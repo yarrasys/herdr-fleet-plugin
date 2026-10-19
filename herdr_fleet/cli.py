@@ -15,7 +15,7 @@ import os
 import sys
 from typing import List, Mapping, Optional, Sequence, TextIO
 
-from herdr_fleet import __version__
+from herdr_fleet import PLUGIN_ROOT, __version__
 from herdr_fleet.checks import collect_status, render_status, run_doctor
 from herdr_fleet.context import (EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, Ctx, OpError, Report,
                                  UsageError, preflight)
@@ -23,10 +23,10 @@ from herdr_fleet.fleetfile import FleetError
 from herdr_fleet.herdr import Herdr, HerdrError, Runner, describe, find_binary
 from herdr_fleet.menu import run_menu, wait_for_enter
 from herdr_fleet.ops import op_down, op_install_cli, op_kickoff, op_restart, op_swap, op_ui, op_up
+from herdr_fleet.scaffold import available_examples, run_init
 from herdr_fleet.seats import Clock
 from herdr_fleet.state import StateError
 
-PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", parents=[common], help="check python, herdr, the fleet file and config (read-only)")
 
+    p = sub.add_parser("init", help="write a starter .herdr/fleet.toml (or copy an example) into a repository",
+                       description="Write a starter .herdr/fleet.toml, kickoff template and state note at the root "
+                                   "of DIR's Git work tree (else DIR itself). Never overwrites without --force. "
+                                   "Runs no herdr command.")
+    p.add_argument("dir", nargs="?", metavar="DIR", help="target directory (default: the current directory)")
+    p.add_argument("--example", metavar="NAME",
+                   help="copy examples/NAME as shipped instead (available: %s)" % ", ".join(available_examples()))
+    p.add_argument("--force", action="store_true", help="overwrite files that already exist")
+    p.add_argument("--notify", action="store_true", help="also send the result as a herdr notification")
+
     p = sub.add_parser("install-cli", help="symlink bin/herdr-fleet into DIR so agents can run it by name")
     p.add_argument("--dir", metavar="DIR", help="target directory (default ~/.local/bin)")
 
@@ -106,7 +116,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
     if args.command == "install-cli":
         return op_install_cli(PLUGIN_ROOT, args.dir, stdout, env.get("PATH", ""))
     herdr = Herdr(find_binary(env), runner)
-    ctx = Ctx(herdr, env, clock or Clock(), stdout, stderr, cwd or os.getcwd(), file=args.file,
+    ctx = Ctx(herdr, env, clock or Clock(), stdout, stderr, cwd or os.getcwd(), file=getattr(args, "file", None),
               notify=args.notify, dry_run=getattr(args, "dry_run", False))
     try:
         return _dispatch(ctx, args, stdin)
@@ -127,6 +137,8 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
 def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     command = args.command
+    if command == "init":  # pure file writing: no preflight, no herdr command
+        return _init(ctx, args)
     if command == "doctor":
         return _doctor(ctx)
     preflight(ctx)
@@ -182,6 +194,22 @@ def _status(ctx: Ctx, as_json: bool, hold: bool, stdin: TextIO) -> int:
     if hold:
         wait_for_enter(ctx, stdin)
     return EXIT_OK
+
+
+def _init(ctx: Ctx, args: argparse.Namespace) -> int:
+    root, in_git, results = run_init(args.dir, args.example, args.force, ctx.env, ctx.cwd)
+    ctx.say("root: %s (%s)" % (root, "Git work tree" if in_git else "not in a Git work tree; using the directory"))
+    lines = ["%-11s %s%s" % (r.status, r.path, ": " + r.detail if r.detail else "") for r in results]
+    for line in lines:
+        ctx.say(line)
+    failed = any(r.status == "failed" for r in results)
+    if not failed:
+        ctx.say("next: edit .herdr/fleet.toml, then run `herdr-fleet doctor` and `herdr-fleet up`")
+    if ctx.notify_enabled:
+        created = sum(r.status in ("created", "overwritten") for r in results)
+        title = "Fleet init failed" if failed else "Fleet init: %d file(s) written in %s" % (created, root)
+        ctx.notify(title, "\n".join(["root: %s" % root] + lines), "request" if failed else "done")
+    return EXIT_FAIL if failed else EXIT_OK
 
 
 def _doctor(ctx: Ctx) -> int:

@@ -13,8 +13,12 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 - ``fleetfile`` / ``state``: the two files on disk; ``kickoff``: templates.
 - ``context``: per-invocation context and preconditions; ``menu``: the popup;
   ``notify``: ``herdr notification show``.
+- ``scaffold``: ``init``, which writes a starter fleet file (no herdr calls).
 """
 
-__version__ = "0.1.0"
+import os
+
+__version__ = "0.2.0"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

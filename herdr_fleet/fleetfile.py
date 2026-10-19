@@ -113,8 +113,8 @@ def find_fleet_file(start: str, explicit: Optional[str] = None,
             return candidate
         parent = os.path.dirname(folder)
         if parent == folder:
-            raise FleetError(["no %s/%s found in %s or any parent directory (use --file PATH)"
-                              % (FLEET_DIR, FLEET_NAME, os.path.abspath(start))])
+            raise FleetError(["no %s/%s found in %s or any parent directory (use --file PATH); "
+                              "run `herdr-fleet init` to create one" % (FLEET_DIR, FLEET_NAME, os.path.abspath(start))])
         folder = parent
 
 

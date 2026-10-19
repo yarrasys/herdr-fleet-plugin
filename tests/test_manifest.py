@@ -44,6 +44,10 @@ class ManifestContents(unittest.TestCase):
         self.assertEqual(actions["manage"]["command"], ["python3", "bin/herdr-fleet", "ui", "manage"])
         self.assertEqual(actions["doctor"]["command"], ["python3", "bin/herdr-fleet", "doctor", "--notify"])
         self.assertEqual(actions["doctor"]["contexts"], ["global"])
+        self.assertEqual(actions["init"], {  # design section 13.2, verbatim
+            "id": "init", "title": "Fleet: init (write a starter .herdr/fleet.toml here)",
+            "contexts": ["workspace"], "command": ["python3", "bin/herdr-fleet", "init", "--notify"]})
+        self.assertEqual([a["id"] for a in self.manifest["actions"]], ["up", "status", "manage", "doctor", "init"])
         for action in actions.values():
             build_parser().parse_args(action["command"][2:])  # still valid CLI arguments
 
@@ -113,6 +117,23 @@ class ManifestCommandsRun(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(["plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "status", "--cwd", self.repo],
                       read_log(self.env))
+
+    def test_init_action_writes_into_the_focused_panes_repo(self):
+        target = os.path.join(self.tmp, "fresh")
+        os.makedirs(os.path.join(target, "src"))
+        if shutil.which("git"):
+            subprocess.run(["git", "init", "-q", target], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        context = {"workspace_id": "w1", "focused_pane_id": "w1:p1", "focused_pane_cwd": os.path.join(target, "src")}
+        plugin_fleet = os.path.join(ROOT, ".herdr", "fleet.toml")
+        before = os.path.exists(plugin_fleet)
+        proc = self.run_cmd(self.action_command("init"), ROOT, HERDR_PLUGIN_ACTION_ID="yarrasys.fleet.init",
+                            HERDR_PLUGIN_CONTEXT_JSON=json.dumps(context))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        root = target if shutil.which("git") else os.path.join(target, "src")
+        self.assertTrue(os.path.isfile(os.path.join(root, ".herdr", "fleet.toml")))
+        self.assertEqual(os.path.exists(plugin_fleet), before)  # nothing written in the plugin root
+        calls = read_log(self.env)
+        self.assertEqual([a[:2] for a in calls], [["notification", "show"]])  # nothing else reaches herdr
 
     def test_doctor_action_from_the_plugin_root(self):
         context = {"workspace_id": "w1", "focused_pane_id": "w1:p1", "focused_pane_cwd": self.repo}

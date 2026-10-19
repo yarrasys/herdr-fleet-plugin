@@ -38,6 +38,19 @@ Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry
 
 Specific tests cover restart refusing blocked, unknown and working agents, stalled prompts never being resent, quit polling and timeout, swap drift from process-info argv, and `down` closing only created panes.
 
+`tests/test_init.py` covers `init` (design section 13):
+
+- the starter in a plain directory (root is the directory) and in a Git work tree invoked from a subdirectory (root is the toplevel, found with a real `git init` in the test; skipped when git is missing);
+- the written `.herdr/fleet.toml` loads through `load_fleet` with no errors or warnings, shows every optional key in comments, and its seat name is a valid herdr name for odd directory names (spaces, uppercase, leading digits, accents, non-Latin, very long);
+- existing files are `kept`, `--force` reports `overwritten`, a failed write exits 1;
+- `--example fablyn` copies every file of `examples/fablyn` byte for byte; an unknown example exits 2 and lists the available ones;
+- the manifest action writes into the root of `focused_pane_cwd` from the context JSON, not the plugin root, and exits 2 without it;
+- `init` sends no herdr command at all, except the one notification with `--notify` inside herdr;
+- `--version` prints 0.2.0, and `up`, `status`, `restart`, `swap`, `kickoff`, `down`, `ui status` and `doctor` suggest `herdr-fleet init` when no fleet file is found;
+- `init`, then `doctor` and `up` against the fake herdr: the seat starts beside the caller and its kickoff carries no template comment.
+
+`tests/test_manifest.py` also checks the `init` action entry verbatim and runs it from the plugin root.
+
 ### Running the CLI against the fake by hand
 
 ```bash

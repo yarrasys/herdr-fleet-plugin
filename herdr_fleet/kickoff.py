@@ -6,7 +6,9 @@ expand with ``str.format_map`` semantics (``{{`` and ``}}`` are literal
 braces); a placeholder that is not one of ours, or that cannot be parsed, is
 left exactly as written, so templates may quote code containing braces.
 The composed text starts with ``[from herdr-fleet]`` unless the template
-already starts with ``[from``.
+already starts with ``[from``. Whole lines that are HTML comments
+(``<!-- ... -->``) are notes for humans and are removed before rendering, so
+they are never sent (``init`` writes one into its starter template).
 """
 
 from __future__ import annotations
@@ -63,6 +65,13 @@ def _render_plain(template: str, values: Mapping[str, str]) -> str:
     return template
 
 
+def strip_comments(template: str) -> str:
+    """Drop whole-line HTML comments (``<!-- ... -->`` on one line)."""
+    kept = [line for line in template.splitlines(True)
+            if not (line.strip().startswith("<!--") and line.strip().endswith("-->"))]
+    return "".join(kept)
+
+
 def roster_table(rows: Sequence[Sequence[str]]) -> str:
     """Markdown table of seats: rows of (name, kind, pane id, cwd)."""
     lines = ["| name | kind | pane | cwd |", "| --- | --- | --- | --- |"]
@@ -107,7 +116,7 @@ def compose(seat: Seat, fleet: Fleet, workspace: str, roster: str, reason: str,
         "note": note or "",
         "reason": reason,
     }
-    template = template_for(seat, fleet)
+    template = strip_comments(template_for(seat, fleet))
     text = render(template, values).strip()
     if not text.startswith("[from"):
         text = PREFIX + " " + text

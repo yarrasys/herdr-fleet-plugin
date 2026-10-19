@@ -37,10 +37,35 @@ herdr-fleet doctor
 
 `herdr plugin list --json` shows where herdr installed the plugin.
 
-### What the plugin adds to herdr
+## Quick start
+
+Installing the plugin does not give a repository a fleet; `init` does. From anywhere inside the repository:
+
+```bash
+herdr-fleet init              # writes the starter files at the repository root
+$EDITOR .herdr/fleet.toml     # name the seats, pick kinds and models
+herdr-fleet doctor            # check the file, herdr and the kinds
+herdr-fleet up                # start every seat beside your pane and brief it
+```
+
+Or, inside herdr, run the **Fleet: init** action (`herdr plugin action invoke yarrasys.fleet.init`) with a pane in the repository focused, then **Fleet: up**. The action reports what it wrote in a notification.
+
+`init` writes at the root of the Git work tree that contains the directory (else the directory itself), and prints the root it chose:
+
+| File | Contents |
+| --- | --- |
+| `.herdr/fleet.toml` | one seat, `<repository name>-dev`, kind `claude`, no args, no `workspace` (so seats open beside your pane), with every optional key shown in comments |
+| `.herdr/kickoff/default.md` | the built-in kickoff template, as the default for every seat |
+| `.herdr/STATE.md` | the "where things stand" note that fills `{state}` |
+| `.herdr/.gitignore` | ignores `fleet.state.json` |
+
+It never overwrites a file: each one is reported as `created` or `kept`, and only `--force` overwrites (`overwritten`). It runs no herdr command and works outside herdr. `herdr-fleet init --example fablyn` copies the three-seat example in [examples/fablyn](examples/fablyn) as shipped instead. Commit the `.herdr` files (the state file stays ignored).
+
+## Actions and panes
 
 | Manifest entry | What it does |
 | --- | --- |
+| action `yarrasys.fleet.init` | `herdr-fleet init --notify` in the focused pane's repository |
 | action `yarrasys.fleet.up` | `herdr-fleet up --notify` from the focused pane's directory |
 | action `yarrasys.fleet.status` | `herdr-fleet ui status`: opens the `status` pane (an overlay running `status --hold`) |
 | action `yarrasys.fleet.manage` | `herdr-fleet ui manage`: opens the `manage` pane (a popup running the menu: pick a seat, then restart, swap, kickoff, down or up) |
@@ -118,14 +143,15 @@ Each seat gets one `herdr agent prompt <name> "<text>"` after every seat has sta
 | `{note}` | `--note TEXT` or `--note-file PATH` |
 | `{reason}` | `up`, `restart`, `swap` or `kickoff` |
 
-The text starts with `[from herdr-fleet]` unless the template starts with `[from`. Without a template, a built-in default introduces the seat, points it at `AGENTS.md`, and lists the team.
+The text starts with `[from herdr-fleet]` unless the template starts with `[from`. Without a template, a built-in default introduces the seat, points it at `AGENTS.md`, and lists the team. A line that is entirely an HTML comment (`<!-- ... -->`) is a note for humans and is never sent; `init` puts one at the top of its starter template to list the placeholders.
 
 ## Commands
 
-All commands accept `--file PATH` and `--notify` (also send the summary as a herdr notification).
+All commands except `init` and `install-cli` accept `--file PATH`; all but `install-cli` accept `--notify` (also send the summary as a herdr notification). When no fleet file is found, the error says so and suggests `herdr-fleet init`.
 
 | Command | What it does |
 | --- | --- |
+| `init [DIR] [--example NAME] [--force]` | Write the starter `.herdr` files at the root of DIR's Git work tree (else DIR; default the current directory), or copy `examples/NAME` with `--example` (`fablyn`). Never overwrites without `--force`. Runs no herdr command and does not need `HERDR_ENV`. Exit 0 when every file was created or kept, 1 when a write failed, 2 for an unknown example or a bad DIR. |
 | `up [NAME...] [--me NAME] [--dry-run] [--no-kickoff] [--note TEXT]` | Start every seat that is not live, then brief the ones it started. Skips seats whose name is live; adopts an unnamed agent of the right kind that herdr resumed in a seat's recorded pane (rename, no kickoff); reuses a recorded pane that is at a shell prompt; else splits a new pane. `--me NAME` names the agent in your own pane as seat NAME (rename only, no kickoff). `--dry-run` prints the exact herdr commands and changes nothing. |
 | `status [--json] [--hold]` | Every seat: expected kind, live kind, pane, state (`idle`, `working`, `blocked`, `done`, `unknown` or `absent`), drift and notes, then `herdr integration status` for the kinds in use, flagging `outdated` and `not installed`. |
 | `restart NAME... [--note TEXT \| --note-file PATH] [--wait MS] [--dry-run]` | Quit each seat, start it again in the same pane with the same name, and brief it with `reason = restart`. A seat that is not running is started (in its recorded pane if that is at a shell prompt, else a fresh split). |

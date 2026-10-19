@@ -1,6 +1,6 @@
 id = "yarrasys.fleet"
 name = "Fleet"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.4"
 description = "Start, restart and swap a team of named coding agents from a per-repository fleet file (.herdr/fleet.toml)."
 platforms = ["linux", "macos"]
@@ -28,6 +28,12 @@ id = "doctor"
 title = "Fleet: doctor"
 contexts = ["global"]
 command = ["python3", "bin/herdr-fleet", "doctor", "--notify"]
+
+[[actions]]
+id = "init"
+title = "Fleet: init (write a starter .herdr/fleet.toml here)"
+contexts = ["workspace"]
+command = ["python3", "bin/herdr-fleet", "init", "--notify"]
 
 [[panes]]
 id = "status"

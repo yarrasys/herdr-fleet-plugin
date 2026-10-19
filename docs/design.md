@@ -307,3 +307,48 @@ Facts learned live (herdr 0.9.4):
 - `pane get` and `pane list` records carry no agent `name`; `agent get <pane>` does. Every name check therefore goes through `agent get` (fixed after the smoke test; the first build read the name from pane records, which would have mis-adopted a named agent). Pane records do carry `label` once a pane has been renamed.
 - `plugin pane open` returns the new pane at `result.plugin_pane.pane.pane_id`, and `--cwd` does set the pane process's cwd.
 - Smoke test timings with a Claude seat: `up` 4.4 s, `restart` 5.8 s, `swap` 5.7 s, each including the quit, the start and the kickoff. `/exit` through `agent prompt` quits Claude Code cleanly and the shell is back within a second.
+
+## 13. `init` (added 19 Oct 2026, version 0.2.0)
+
+Installing the plugin installs only the plugin; the fleet file is per repository. `init` is the bootstrap step for a repository that has none.
+
+### 13.1 CLI
+
+`init [DIR] [--example NAME] [--force] [--notify]`
+
+- **Target.** `DIR` when given, else the invoking directory (the current directory for the CLI; `focused_pane_cwd` for the manifest action). The repository root is `git rev-parse --show-toplevel` run in that directory when it is inside a Git work tree, else the directory itself. `init` prints the root it chose.
+- **Starter files** (default, no `--example`), all paths under the root:
+  - `.herdr/fleet.toml`: a commented starter with one seat named `<root basename, sanitised to the herdr name pattern>-dev`, kind `claude`, no args, `kickoff = ".herdr/kickoff/default.md"`, `state_note = ".herdr/STATE.md"`, no `workspace` key (so seats open beside the caller), and comments showing every optional key from section 2.
+  - `.herdr/kickoff/default.md`: the built-in default template from section 3, with a comment line explaining the placeholders.
+  - `.herdr/STATE.md`: one line, `Where things stand: (nothing yet).`
+  - `.herdr/.gitignore`: `fleet.state.json`.
+- **`--example fablyn`** copies the whole `examples/fablyn` tree instead (`.herdr/fleet.toml`, `docs/kickoff/*.md`, `docs/STATE.md`), paths as shipped. Unknown example names exit 2 and list the available ones.
+- **Never overwrites.** Each file is reported as `created`, `kept` (already existed, left untouched) or, with `--force`, `overwritten`. Directories are created as needed.
+- `init` runs no herdr command at all and does not require `HERDR_ENV`; it is pure file writing. Exit 0 when every file is created or kept, 1 when a write failed, 2 on usage errors.
+- `--notify` (set by the manifest action) sends one notification listing the files created, or the failure, through `herdr notification show`; outside herdr it is skipped like every other notification.
+
+### 13.2 Manifest
+
+A fifth action:
+
+```toml
+[[actions]]
+id = "init"
+title = "Fleet: init (write a starter .herdr/fleet.toml here)"
+contexts = ["workspace"]
+command = ["python3", "bin/herdr-fleet", "init", "--notify"]
+```
+
+### 13.3 Pointers
+
+When discovery finds no fleet file, `up`, `status`, `restart`, `swap`, `kickoff`, `down`, the UI entrypoints and `doctor` append `run \`herdr-fleet init\` to create one` to their message. The README quick start begins with `init`.
+
+Version 0.2.0 in `herdr-plugin.toml` and `herdr_fleet/__init__.py`.
+
+### 13.4 Amendments from the build
+
+- The starter's `kickoff` is the fleet-wide top-level default, as in the Fablyn example, not a per-seat key.
+- Whole-line HTML comments (`<!-- … -->` alone on a line) are stripped from every kickoff template before rendering, so a template can carry notes for humans without them reaching the agent. Inline comments are kept.
+- The `init` action exits 2 with a hint to run `init DIR` when the context JSON carries no `focused_pane_cwd`; it never falls back to `pane get`.
+- `DIR` must exist. `--example` skips `.DS_Store` and `fleet.state.json`. Writes are atomic with mode 0644.
+- The "run `herdr-fleet init`" pointer is added only when discovery fails, not when an explicit `--file` path is missing.

@@ -12,7 +12,7 @@ import unittest
 import support
 from herdr_fleet.fleetfile import Fleet, Seat
 from herdr_fleet.herdr import Herdr, HerdrError, parse_integration_status, parse_version
-from herdr_fleet.kickoff import DEFAULT_TEMPLATE, compose, render, roster_table
+from herdr_fleet.kickoff import DEFAULT_TEMPLATE, compose, render, roster_table, strip_comments
 from herdr_fleet.seats import (agent_args, at_shell_prompt, contains_in_order, find_agent_process,
                                process_argv, quit_command)
 from herdr_fleet.state import State, StateError, load_state, prune_state, save_state
@@ -59,6 +59,13 @@ class KickoffRendering(unittest.TestCase):
                          "[from herdr-fleet] Hello fablyn-dev, args --model 'm x'")
         s = seat(kickoff_text="[from the owner] hi")
         self.assertEqual(compose(s, fleet([s]), "w", "", "kickoff"), "[from the owner] hi")
+
+    def test_whole_line_html_comments_are_not_sent(self):
+        s = seat(kickoff_text="<!-- note for humans: {name} -->\n  <!-- indented too -->\n"
+                              "Hi {name} <!-- inline stays -->")
+        self.assertEqual(compose(s, fleet([s]), "w", "", "up"),
+                         "[from herdr-fleet] Hi fablyn-dev <!-- inline stays -->")
+        self.assertEqual(strip_comments("a\n<!-- x -->\nb\n"), "a\nb\n")
 
     def test_state_note_and_note(self):
         tmp = tempfile.mkdtemp()
