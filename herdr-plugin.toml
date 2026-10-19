@@ -1,0 +1,44 @@
+id = "yarrasys.fleet"
+name = "Fleet"
+version = "0.1.0"
+min_herdr_version = "0.9.4"
+description = "Start, restart and swap a team of named coding agents from a per-repository fleet file (.herdr/fleet.toml)."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "up"
+title = "Fleet: up"
+contexts = ["workspace"]
+command = ["python3", "bin/herdr-fleet", "up", "--notify"]
+
+[[actions]]
+id = "status"
+title = "Fleet: status"
+contexts = ["workspace"]
+command = ["python3", "bin/herdr-fleet", "ui", "status"]
+
+[[actions]]
+id = "manage"
+title = "Fleet: manage (restart, swap, kickoff, down)"
+contexts = ["workspace"]
+command = ["python3", "bin/herdr-fleet", "ui", "manage"]
+
+[[actions]]
+id = "doctor"
+title = "Fleet: doctor"
+contexts = ["global"]
+command = ["python3", "bin/herdr-fleet", "doctor", "--notify"]
+
+[[panes]]
+id = "status"
+title = "Fleet status"
+placement = "overlay"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/bin/herdr-fleet\" status --hold"]
+
+[[panes]]
+id = "manage"
+title = "Fleet"
+placement = "popup"
+width = "70%"
+height = "60%"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/bin/herdr-fleet\" menu"]

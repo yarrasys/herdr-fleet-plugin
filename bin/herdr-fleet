@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""herdr-fleet command-line entry point.
+
+Puts the plugin root (the parent of this file's real directory, so symlinks
+made by `herdr-fleet install-cli` work) on sys.path and runs
+herdr_fleet.cli.main. The manifest runs it as `python3 bin/herdr-fleet ...`.
+"""
+
+import os
+import sys
+
+if sys.version_info < (3, 8):
+    sys.stderr.write("herdr-fleet: python 3.8 or newer is required (this is %s)\n" % sys.version.split()[0])
+    sys.exit(1)
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from herdr_fleet.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())
