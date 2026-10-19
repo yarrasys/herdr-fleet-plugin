@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from herdr_fleet import MIN_HERDR_VERSION
 from herdr_fleet.context import Ctx
@@ -40,14 +40,24 @@ def live_argv(herdr: Herdr, pane: Optional[str], kind: str) -> Optional[List[str
     return process_argv(proc) if proc else None
 
 
-def drift_reasons(ctx: Ctx, seat: Seat, agent: Dict) -> List[str]:
-    """Why a live seat differs from the fleet file (empty list: no drift)."""
+def is_adopted(entry: Optional[Mapping]) -> bool:
+    """The seat's live session was not started by herdr-fleet, so its args are its
+    owner's business (design section 15): the state entry says ``adopted``, or it
+    records no ``args`` (adopted by an older version, or found live by name).
+    Pane ids are not compared: a session moved by hand stays adopted."""
+    entry = entry or {}
+    return bool(entry.get("adopted")) or entry.get("args") is None
+
+
+def drift_reasons(ctx: Ctx, seat: Seat, agent: Dict, compare_args: bool = True) -> List[str]:
+    """Why a live seat differs from the fleet file (empty list: no drift).
+    ``compare_args=False`` checks the kind only (status of an adopted seat)."""
     reasons: List[str] = []
     live_kind = str(agent.get("agent") or "")
     pane = agent.get("pane_id")
     if live_kind != seat.kind:
         reasons.append("kind: running %s, file says %s" % (live_kind or "?", seat.kind))
-    else:
+    elif compare_args:
         argv = live_argv(ctx.herdr, pane, live_kind)
         if argv is not None:
             running = agent_args(argv, live_kind)
@@ -59,7 +69,8 @@ def drift_reasons(ctx: Ctx, seat: Seat, agent: Dict) -> List[str]:
         if recorded_kind and recorded_kind != seat.kind and not _has(reasons, "kind"):
             reasons.append("kind: started as %s, file says %s" % (recorded_kind, seat.kind))
         recorded_args = entry.get("args")
-        if recorded_args is not None and list(recorded_args) != list(seat.args) and not _has(reasons, "args"):
+        if (compare_args and recorded_args is not None and list(recorded_args) != list(seat.args)
+                and not _has(reasons, "args")):
             reasons.append("args: started with %s, file says %s" % (_join(recorded_args), _join(seat.args)))
     return reasons
 
@@ -97,13 +108,15 @@ def collect_status(ctx: Ctx, integrations: bool = True) -> Dict:
     for seat in fleet.seats:
         agent = live.get(seat.name)
         entry = state.entry(seat.name) or {}
+        adopted = bool(agent) and is_adopted(entry)
         seats.append({
             "name": seat.name,
             "kind": seat.kind,
             "live_kind": agent.get("agent") if agent else None,
             "pane_id": (agent or {}).get("pane_id") or entry.get("pane_id"),
             "state": str(agent.get("agent_status") or "unknown") if agent else "absent",
-            "drift": drift_reasons(ctx, seat, agent) if agent else [],
+            "drift": drift_reasons(ctx, seat, agent, compare_args=not adopted) if agent else [],
+            "adopted": adopted,
             "notes": seat.notes,
             "blocked_at_startup": bool(entry.get("blocked_at_startup")),
             "last_kickoff_at": entry.get("last_kickoff_at"),
@@ -127,7 +140,7 @@ def render_status(data: Dict) -> str:
     for s in data["seats"]:
         state = s["state"] + (" (blocked at startup)" if s.get("blocked_at_startup") and s["state"] != "absent" else "")
         rows.append((s["name"], s["kind"], s["live_kind"] or "-", s["pane_id"] or "-", state,
-                     "; ".join(s["drift"]) or "-", s["notes"] or ""))
+                     "; ".join((["adopted"] if s.get("adopted") else []) + s["drift"]) or "-", s["notes"] or ""))
     widths = [max(len(str(r[i])) for r in [header] + rows) for i in range(len(header) - 1)]
     lines = []
     for row in [header] + rows:

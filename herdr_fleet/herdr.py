@@ -218,6 +218,12 @@ class Herdr:
         result = self.run("pane", "get", pane_id)
         return dict(result.get("pane") or result)
 
+    def pane_current(self) -> Dict:
+        """The caller's pane as herdr sees it now (``pane current --current``). After a
+        pane move the inherited HERDR_PANE_ID is stale but still resolves here."""
+        result = self.run("pane", "current", "--current")
+        return dict(result.get("pane") or result)
+
     def pane_list(self, workspace_id: str) -> List[Dict]:
         return list(self.run("pane", "list", "--workspace", workspace_id).get("panes") or [])
 
@@ -231,6 +237,28 @@ class Herdr:
         if not pane.get("pane_id"):
             raise HerdrError("bad_output", "pane split returned no pane id", argv)
         return str(pane["pane_id"])
+
+    def pane_move_to_tab(self, pane_id: str, tab_id: str, direction: str = "right", ratio: Optional[float] = 0.5,
+                         target_pane: Optional[str] = None) -> str:
+        """Move a pane (and its running process) into a tab, split beside
+        ``target_pane`` (else herdr's choice); return its id afterwards. Ids are
+        workspace-qualified: a move to another workspace changes the id. Moving a
+        pane to the tab it is already in is a no-op in herdr 0.9.4."""
+        return self._moved(pane_move_argv(pane_id, tab_id, direction, ratio, target_pane))
+
+    def pane_move_new_tab(self, pane_id: str, workspace_id: str, label: str) -> str:
+        """Move a pane into a new tab of a workspace (``tile`` parks panes this
+        way); the emptied tab disappears when its pane moves on."""
+        return self._moved(pane_park_argv(pane_id, workspace_id, label))
+
+    def _moved(self, argv: List[str]) -> str:
+        moved = (self.run(*argv).get("move_result") or {}).get("pane") or {}
+        if not moved.get("pane_id"):
+            raise HerdrError("bad_output", "pane move returned no pane id", argv)
+        return str(moved["pane_id"])
+
+    def tab_list(self, workspace_id: str) -> List[Dict]:
+        return list(self.run("tab", "list", "--workspace", workspace_id).get("tabs") or [])
 
     def pane_close(self, pane_id: str) -> Dict:
         return self.run("pane", "close", pane_id)
@@ -279,6 +307,22 @@ def start_argv(name: str, kind: str, pane: str, args: Sequence[str],
     if args:
         argv += ["--"] + [str(a) for a in args]
     return argv
+
+
+def pane_move_argv(pane_id: str, tab_id: str, direction: str = "right", ratio: Optional[float] = 0.5,
+                   target_pane: Optional[str] = None) -> List[str]:
+    """The exact ``pane move ... --tab`` argv (``up --join``, ``tile``; design section 15)."""
+    argv = ["pane", "move", pane_id, "--tab", tab_id, "--split", direction]
+    if target_pane:
+        argv += ["--target-pane", target_pane]
+    if ratio is not None:
+        argv += ["--ratio", str(ratio)]
+    return argv + ["--no-focus"]
+
+
+def pane_park_argv(pane_id: str, workspace_id: str, label: str) -> List[str]:
+    """The exact ``pane move ... --new-tab`` argv ``tile`` uses to park a pane."""
+    return ["pane", "move", pane_id, "--new-tab", "--workspace", workspace_id, "--label", label, "--no-focus"]
 
 
 def workspace_create_argv(cwd: str, label: str, env: Optional[Dict[str, str]] = None) -> List[str]:

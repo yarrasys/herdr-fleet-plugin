@@ -1,7 +1,8 @@
 """The popup menu (manifest pane ``manage``; design section 8).
 
 A plain numbered text menu on stdin, no curses: list seats with their state,
-pick one seat or all, pick restart / swap / kickoff / down / up, confirm, run
+pick one seat or all, pick restart / swap / kickoff / down / up / tile (tile
+always covers every live seat), confirm, run
 the same operation the CLI runs, show the result, and wait for Enter.
 End of input at any prompt quits without doing anything.
 """
@@ -13,8 +14,9 @@ from typing import List, Optional, TextIO
 from herdr_fleet.checks import collect_status
 from herdr_fleet.context import Ctx, Report
 from herdr_fleet.ops import op_down, op_kickoff, op_restart, op_swap, op_up
+from herdr_fleet.tile import op_tile
 
-ACTIONS = ("restart", "swap", "kickoff", "down", "up")
+ACTIONS = ("restart", "swap", "kickoff", "down", "up", "tile")
 
 
 def _ask(ctx: Ctx, stdin: TextIO, prompt: str) -> Optional[str]:
@@ -75,6 +77,8 @@ def run_menu(ctx: Ctx, stdin: TextIO) -> int:
         names = [s.name for s in ctx.fleet.seats]
     note = None
     close_panes = False
+    if action == "tile":
+        names = []  # tile always re-tiles every live seat
     if action in ("restart", "swap", "kickoff", "up"):
         note = _ask(ctx, stdin, "Note for {note} in the kickoff (Enter for none): ") or None
     if action == "down":
@@ -101,4 +105,6 @@ def _run(ctx: Ctx, action: str, names: List[str], note: Optional[str], close_pan
         return op_kickoff(ctx, names, note)
     if action == "down":
         return op_down(ctx, names, close_panes=close_panes)
+    if action == "tile":
+        return op_tile(ctx)
     return op_up(ctx, names, note=note)

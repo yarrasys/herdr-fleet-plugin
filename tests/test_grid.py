@@ -7,45 +7,8 @@ import os
 import unittest
 
 import fake_herdr
-from support import ARGS, CALLER_PANE, FleetCase, THREE_SEATS
+from support import ARGS, CALLER_PANE, FOUR_SEATS, GridCase, THREE_SEATS, grid_fleet
 from herdr_fleet.fleetfile import FleetError, load_fleet
-
-FOUR_SEATS = THREE_SEATS + '''
-[[agents]]
-name = "fablyn-designer"
-kind = "claude"
-args = ["--model", "claude-opus-5-5"]
-'''
-GRID = '[layout]\nmode = "grid"\n'
-TOL = 1e-3
-
-
-def grid_fleet(text=FOUR_SEATS, layout=GRID):
-    """Insert a [layout] table before the first [[agents]]."""
-    head, rest = text.split("[[agents]]", 1)
-    return head + layout + "\n[[agents]]" + rest
-
-
-class GridCase(FleetCase):
-    def rects(self, area):
-        """Rebuild each pane's rectangle from the splits the fake herdr received."""
-        rects = {area: (0.0, 0.0, 1.0, 1.0)}
-        for pid, pane in self.world["panes"].items():  # creation order
-            split = pane.get("split")
-            if not split or split["from"] not in rects:
-                continue
-            x, y, w, h = rects[split["from"]]
-            r = float(split["ratio"])
-            if split["direction"] == "right":
-                rects[split["from"]], rects[pid] = (x, y, w * r, h), (x + w * r, y, w * (1 - r), h)
-            else:
-                rects[split["from"]], rects[pid] = (x, y, w, h * r), (x, y + h * r, w, h * (1 - r))
-        return rects
-
-    def assert_cell(self, rect, x, y, w, h):
-        for got, want in zip(rect, (x, y, w, h)):
-            self.assertAlmostEqual(got, want, delta=TOL)
-
 
 class GridInCreatedWorkspace(GridCase):
     fleet_text = grid_fleet()

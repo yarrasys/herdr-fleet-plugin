@@ -160,8 +160,9 @@ class FleetCase(unittest.TestCase):
         with open(self.world_path, "w", encoding="utf-8") as handle:
             json.dump(self.world, handle)
         out, err = io.StringIO(), io.StringIO()
-        code = main(list(argv), env=env if env is not None else self.env,
-                    runner=fake_herdr.Fake(self.world_path, self.log_path), clock=self.clock,
+        env = env if env is not None else self.env
+        runner = fake_herdr.Fake(self.world_path, self.log_path, env.get("HERDR_PANE_ID"))
+        code = main(list(argv), env=env, runner=runner, clock=self.clock,
                     stdout=out, stderr=err, stdin=io.StringIO(stdin), cwd=self.repo)
         with open(self.world_path, "r", encoding="utf-8") as handle:
             self.world = json.load(handle)
@@ -235,3 +236,40 @@ class LiveFleet(FleetCase):
 
     def status_of(self, pane, status):
         self.world["panes"][pane]["agent"]["agent_status"] = status
+
+
+FOUR_SEATS = THREE_SEATS + '''
+[[agents]]
+name = "fablyn-designer"
+kind = "claude"
+args = ["--model", "claude-opus-5-5"]
+'''
+GRID = '[layout]\nmode = "grid"\n'
+TOL = 1e-3
+
+
+def grid_fleet(text=FOUR_SEATS, layout=GRID):
+    """Insert a [layout] table before the first [[agents]]."""
+    head, rest = text.split("[[agents]]", 1)
+    return head + layout + "\n[[agents]]" + rest
+
+
+class GridCase(FleetCase):
+    def rects(self, area):
+        """Rebuild each pane's rectangle from the splits the fake herdr received."""
+        rects = {area: (0.0, 0.0, 1.0, 1.0)}
+        for pid, pane in self.world["panes"].items():  # creation order
+            split = pane.get("split")
+            if not split or split["from"] not in rects:
+                continue
+            x, y, w, h = rects[split["from"]]
+            r = float(split["ratio"])
+            if split["direction"] == "right":
+                rects[split["from"]], rects[pid] = (x, y, w * r, h), (x + w * r, y, w * (1 - r), h)
+            else:
+                rects[split["from"]], rects[pid] = (x, y, w, h * r), (x, y + h * r, w, h * (1 - r))
+        return rects
+
+    def assert_cell(self, rect, x, y, w, h):
+        for got, want in zip(rect, (x, y, w, h)):
+            self.assertAlmostEqual(got, want, delta=TOL)

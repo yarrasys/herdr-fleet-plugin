@@ -21,7 +21,7 @@ from herdr_fleet.herdr import HerdrError, describe, has_agent, render_cmd, start
 from herdr_fleet.kickoff import compose, roster_table
 from herdr_fleet.placement import Placed, Target, existing_panes, place_chain
 from herdr_fleet.seats import at_shell_prompt, describe_foreground, live_by_name, safe_prompt, start_in_pane
-from herdr_fleet.state import now_iso
+from herdr_fleet.state import now_iso, refresh_pane
 
 
 def label_of(ctx: Ctx, workspace_id: str) -> str:
@@ -151,10 +151,7 @@ def ensure_seat(ctx: Ctx, seat: Seat, target: Target, live: Dict[str, Dict], rep
 
 def _already_live(ctx: Ctx, seat: Seat, agent: Dict, report: Report) -> str:
     pane = str(agent.get("pane_id"))
-    entry = ctx.state.entry(seat.name)
-    if not entry or entry.get("pane_id") != pane:
-        ctx.state.drop(seat.name)
-        entry = ctx.state.update(seat.name, pane_id=pane, created_pane=False, kind=agent.get("agent"))
+    entry = refresh_pane(ctx.state, seat.name, pane, kind=agent.get("agent"))
     status = agent.get("agent_status") or "unknown"
     if entry.get("blocked_at_startup"):
         report.add(seat.name, "live", "in %s (%s) but never briefed; run `herdr-fleet kickoff %s` once it is idle"
@@ -199,7 +196,7 @@ def _adopt_resumed(ctx: Ctx, seat: Seat, pane: str, kind: str, report: Report) -
     except HerdrError as exc:
         report.add(seat.name, "failed", "rename: %s" % describe(exc), "fail")
         return "conflict"
-    ctx.state.update(seat.name, pane_id=pane, kind=kind, blocked_at_startup=False)
+    ctx.state.update(seat.name, pane_id=pane, kind=kind, blocked_at_startup=False, adopted=True)
     ctx.save()
     report.add(seat.name, "adopted", "named the unnamed %s agent in %s (resumed by herdr); no kickoff sent"
                % (kind, pane))
@@ -214,7 +211,7 @@ def start_seat(ctx: Ctx, seat: Seat, pane: str, created: bool, report: Report) -
     ctx.state.update(seat.name, pane_id=pane, created_pane=created)
     ctx.save()
     outcome = start_in_pane(ctx.herdr, ctx.clock, seat, pane)
-    record = dict(kind=seat.kind, args=list(seat.args), started_at=now_iso())
+    record = dict(kind=seat.kind, args=list(seat.args), started_at=now_iso(), adopted=False)
     if outcome.status == "started":
         ctx.state.update(seat.name, blocked_at_startup=False, **record)
         ctx.save()

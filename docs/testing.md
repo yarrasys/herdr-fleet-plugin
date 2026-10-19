@@ -66,6 +66,30 @@ Grid layout (design section 14):
   - the `--me` hint when the caller's pane has no agent (exit 3, other seats still start).
 - `tests/test_cli_subprocess.py` checks that the Fablyn example's dry run shows its 2×2 grid. The chain tests in `test_up.py` are unchanged.
 
+Adopted seats, `--join` and `tile` (design section 15). The fake herdr supports both `pane move` forms with the live 0.9.4 behaviour: `result.move_result.pane` and `previous_pane_id`, ids kept within a workspace and changed across workspaces, and a move to the pane's own tab is a no-op. It also supports `tab list`.
+
+- `tests/test_adopted.py`:
+  - the `adopted` flag is set by `--me` and by adopt-on-resume, and cleared when the plugin starts the seat;
+  - `status` shows `adopted` and no args drift for such a seat;
+  - a bare `swap` skips adopted seats, while `swap NAME` swaps them and named `restart`/`swap` still refuse a blocked one;
+  - `--me` outside the fleet's workspace warns with the exact `pane move` and moves nothing;
+  - `--join` makes exactly one move, records the new pane id, and the next seat splits off it, both into an existing workspace and into one created in the same run;
+  - `--join` needs `--me`, `--dry-run` only plans the move, a failed move leaves the pane and the other seats still start, and nothing moves when the caller is already in the workspace.
+- `tests/test_adopted.py` also covers the amendment to section 15:
+  - a seat with no recorded `args` counts as adopted (bare `swap` skips it; `status` shows `adopted`, no args drift), and seats herdr-fleet started do not;
+  - refreshing a live seat's pane keeps `adopted`, `args` and timestamps (and drops `created_pane` when the old pane still exists);
+  - a session moved by hand to another workspace is followed in the state file with every field kept, and is skipped by a bare `swap` when adopted;
+  - preflight resolves the caller with `pane current --current` (a stale `HERDR_PANE_ID` after a move still identifies the caller, also after `--join`) and falls back to `HERDR_PANE_ID` when the query fails.
+- `tests/test_tile.py`:
+  - a 4-seat grid makes exactly three out-and-back pairs: all parks first, then the returns with the plan's sources, directions and ratios. The resulting rectangles are equal, and names and pane ids survive;
+  - chain mode follows each seat's `split`, `ratio` and `from`;
+  - `--dry-run` prints the moves and makes none;
+  - seats elsewhere or absent are left alone, and seats spanning two tabs are refused;
+  - the first failed move stops the run and names the seats not re-tiled;
+  - the menu offers `tile`;
+  - no test sees a prompt, start, split, close or rename from `tile`.
+- `tests/test_manifest.py` checks the `tile` action entry verbatim.
+
 ### Running the CLI against the fake by hand
 
 ```bash

@@ -134,13 +134,22 @@ class StateFile(unittest.TestCase):
             def workspace_get(self, ws):
                 raise HerdrError("workspace_not_found", "nope")
 
+            def agent_list(self):
+                return [{"name": "m", "pane_id": "w5:p3"}]
+
         state = State("/x", {"workspace_id": "w9", "created_workspace": True,
-                             "agents": {"a": {"pane_id": "gone"}, "b": {"pane_id": "here"}}}, True)
+                             "agents": {"a": {"pane_id": "gone"}, "b": {"pane_id": "here"},
+                                        "m": {"pane_id": "gone", "created_pane": True, "adopted": True,
+                                              "kind": "claude"}}}, True)
         messages = prune_state(state, FakeHerdr())
-        self.assertEqual(sorted(state.agents), ["b"])
+        self.assertEqual(sorted(state.agents), ["b", "m"])
+        # m's pane was moved (the old id is gone, m is live elsewhere): re-pointed, every field kept
+        self.assertEqual(state.agents["m"], {"pane_id": "w5:p3", "created_pane": True, "adopted": True,
+                                             "kind": "claude"})
+        self.assertIn("state: m moved from gone to w5:p3", messages)
         self.assertIsNone(state.workspace_id)
         self.assertFalse(state.created_workspace)
-        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(messages), 3)
         state.agents["c"] = {"pane_id": "flaky"}
         with self.assertRaises(HerdrError):
             prune_state(state, FakeHerdr())
@@ -240,6 +249,20 @@ class FakeMatchesLive(unittest.TestCase):
                 json.dump(world, handle)
             self.assertEqual(h.pane_agent("w1:p2"), {})
             self.assertEqual(h.pane_agent("w9:p9"), {})
+            # pane move, both forms (live 0.9.4): ids survive within a workspace, change across
+            # workspaces; moving a pane to the tab it is already in changes nothing
+            sup.fake_herdr.add_workspace(world, "w2", "y", tmp)
+            with open(world_path, "w") as handle:
+                json.dump(world, handle)
+            self.assertEqual(h.pane_move_to_tab("w1:p1", "w1:t1", "down", 0.5, "w1:p2"), "w1:p1")
+            self.assertEqual(h.pane_move_new_tab("w1:p1", "w1", "park"), "w1:p1")
+            self.assertNotEqual(h.pane_get("w1:p1")["tab_id"], "w1:t1")
+            self.assertEqual(h.pane_move_to_tab("w1:p1", "w1:t1", "down", 0.5, "w1:p2"), "w1:p1")
+            self.assertEqual(h.pane_get("w1:p1")["tab_id"], "w1:t1")
+            moved = h.pane_move_to_tab("w1:p1", "w2:t1", "right", 0.5)
+            self.assertTrue(moved.startswith("w2:p"))
+            self.assertEqual(h.agent_get(moved)["name"], "dev")
+            self.assertEqual(h.tab_list("w2")[0]["tab_id"], "w2:t1")
         finally:
             shutil.rmtree(tmp)
 

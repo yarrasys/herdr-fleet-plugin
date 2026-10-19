@@ -118,10 +118,28 @@ def save_state(state: State) -> None:
     state.dirty = False
 
 
+def refresh_pane(state: State, name: str, pane: str, kind: Optional[str] = None) -> Dict:
+    """Point a live named seat's entry at the pane it is in now, keeping every
+    other field (``adopted``, ``args``, timestamps). A new entry is marked
+    ``adopted``: herdr-fleet did not start that session. When an existing entry
+    pointed at another pane that still exists, the live pane is a different
+    terminal, so it is not recorded as created by herdr-fleet (only created
+    panes are ever closed)."""
+    entry = state.entry(name)
+    if entry is None:
+        return state.update(name, pane_id=pane, created_pane=False, kind=kind, adopted=True)
+    if entry.get("pane_id") != pane:
+        state.update(name, pane_id=pane, created_pane=False)
+    return entry
+
+
 def prune_state(state: State, herdr: Herdr) -> List[str]:
-    """Drop recorded panes and workspace that herdr no longer knows.
-    Only "not found" errors prune; any other herdr error propagates."""
+    """Drop recorded panes and workspace that herdr no longer knows. A seat whose
+    recorded pane is gone but which is live by name elsewhere (its pane was moved,
+    e.g. to another workspace, which changes the id) is re-pointed instead, with
+    every field kept. Only "not found" errors prune; any other herdr error propagates."""
     messages = []
+    live: Optional[Dict[str, str]] = None
     for name in list(state.agents):
         pane = state.agents[name].get("pane_id")
         if not pane:
@@ -131,6 +149,13 @@ def prune_state(state: State, herdr: Herdr) -> List[str]:
         except HerdrError as exc:
             if "not_found" not in exc.code:
                 raise
+            if live is None:
+                live = {str(a["name"]): str(a.get("pane_id")) for a in herdr.agent_list() if a.get("name")}
+            if name in live:
+                state.agents[name]["pane_id"] = live[name]
+                state.dirty = True
+                messages.append("state: %s moved from %s to %s" % (name, pane, live[name]))
+                continue
             state.drop(name)
             messages.append("state: dropped %s (pane %s no longer exists)" % (name, pane))
     workspace = state.workspace_id

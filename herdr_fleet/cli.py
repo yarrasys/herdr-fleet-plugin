@@ -26,6 +26,7 @@ from herdr_fleet.ops import op_down, op_install_cli, op_kickoff, op_restart, op_
 from herdr_fleet.scaffold import available_examples, run_init
 from herdr_fleet.seats import Clock
 from herdr_fleet.state import StateError
+from herdr_fleet.tile import op_tile
 
 
 
@@ -53,6 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("up", parents=[common], help="start every seat that is not running, then brief it")
     p.add_argument("names", nargs="*", metavar="NAME", help="only these seats (default: all)")
     p.add_argument("--me", metavar="NAME", help="adopt the agent in your own pane as seat NAME (rename only)")
+    p.add_argument("--join", action="store_true",
+                   help="with --me: move your pane into the fleet's workspace if it is elsewhere (herdr pane move)")
     p.add_argument("--dry-run", action="store_true", help="print the plan and change nothing")
     p.add_argument("--no-kickoff", action="store_true", help="start seats but send no kickoff")
     p.add_argument("--note", metavar="TEXT", help="text for {note} in the kickoff")
@@ -79,6 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--close-panes", action="store_true", help="close panes herdr-fleet created, once at a shell")
     p.add_argument("--close-workspace", action="store_true",
                    help="close the workspace if herdr-fleet created it and no agent is left")
+
+    p = sub.add_parser("tile", parents=[common],
+                       help="re-tile the live seats in place ([layout] grid or chain); moves panes only")
+    p.add_argument("--dry-run", action="store_true", help="print the pane moves and change nothing")
 
     sub.add_parser("doctor", parents=[common], help="check python, herdr, the fleet file and config (read-only)")
 
@@ -151,7 +158,7 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         return run_menu(ctx, stdin)
     note = _note(args)
     if command == "up":
-        report = op_up(ctx, args.names, me=args.me, no_kickoff=args.no_kickoff, note=args.note)
+        report = op_up(ctx, args.names, me=args.me, no_kickoff=args.no_kickoff, note=args.note, join=args.join)
         return _finish(ctx, report, status_table=True)
     if command == "restart":
         return _finish(ctx, op_restart(ctx, args.names, note, args.wait))
@@ -161,6 +168,8 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         return _finish(ctx, op_kickoff(ctx, args.names, note))
     if command == "down":
         return _finish(ctx, op_down(ctx, args.names, args.wait, args.close_panes, args.close_workspace))
+    if command == "tile":
+        return _finish(ctx, op_tile(ctx))
     raise UsageError("unknown command %s" % command)
 
 

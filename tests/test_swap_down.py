@@ -30,9 +30,9 @@ class Swap(LiveFleet):
         self.world["panes"]["w2:p2"]["procs"][0].pop("argv")
         self.world["panes"]["w2:p2"]["procs"][0]["cmdline"] = "claude --model claude-old"
         state = self.read_state()
-        del state["agents"]["fablyn-dev"]["args"]
+        del state["agents"]["fablyn-dev"]["args"]  # no recorded args: treated as adopted (design 15)
         self.write_state(state)
-        code, out, _ = self.run_cli("swap", "--dry-run")
+        code, out, _ = self.run_cli("swap", "fablyn-dev", "--dry-run")  # named, so it is compared
         self.assertEqual(code, 0)
         self.assertIn("fablyn-dev: would restart - args: running --model claude-old", out)
 

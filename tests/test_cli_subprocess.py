@@ -16,6 +16,7 @@ from support import ROOT, THREE_SEATS, install_fake_herdr, read_log
 BIN = os.path.join(ROOT, "bin", "herdr-fleet")
 EXAMPLE = os.path.join(ROOT, "examples", "fablyn")
 READ_ONLY = (["--version"], ["agent", "list"], ["agent"], ["agent", "get"], ["pane", "get"], ["pane", "list"],
+             ["pane", "current"],
              ["pane", "process-info"], ["workspace", "list"], ["workspace", "get"], ["integration", "status"],
              ["plugin", "config-dir"])
 

@@ -17,16 +17,16 @@ import shlex
 from typing import Dict, List, Optional, Sequence, TextIO
 
 from herdr_fleet import PLUGIN_ID
-from herdr_fleet.bringup import (claim_seat, ensure_seat, label_for, require_caller_context, resolve_target,
-                                send_kickoffs, start_claimed, start_seat)
-from herdr_fleet.checks import drift_reasons
+from herdr_fleet.bringup import (claim_seat, ensure_seat, label_for, label_of, require_caller_context,
+                                resolve_target, send_kickoffs, start_claimed, start_seat)
+from herdr_fleet.checks import drift_reasons, is_adopted
 from herdr_fleet.context import Ctx, Report, UsageError
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
-from herdr_fleet.herdr import HerdrError, describe, has_agent, render_cmd, start_argv
+from herdr_fleet.herdr import HerdrError, describe, has_agent, pane_move_argv, render_cmd, start_argv
 from herdr_fleet.placement import Target, place_chain, place_grid
 from herdr_fleet.seats import (QUIT_CONFIG_HINT, SETTLED, at_shell_prompt, describe_foreground,
                                live_by_name, quit_agent, quit_command)
-from herdr_fleet.state import prune_state
+from herdr_fleet.state import prune_state, refresh_pane
 
 WAIT_UNTIL = ("idle", "done", "blocked")
 
@@ -69,7 +69,7 @@ def prune(ctx: Ctx) -> None:
 
 
 def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: bool = False,
-          note: Optional[str] = None) -> Report:
+          note: Optional[str] = None, join: bool = False) -> Report:
     """Design 4.1 and 14: classify every seat, find or create the workspace,
     place the seats that need panes (chain or grid), start them, brief them."""
     report = Report("up")
@@ -77,18 +77,21 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
     selected = {s.name for s in select_seats(fleet, names)}
     if me and fleet.seat(me) is None:
         raise UsageError("--me %s: not a seat in %s" % (me, fleet.path))
+    if join and not me:
+        raise UsageError("--join moves your own pane, so it needs --me NAME")
     refuse_unknown_kinds(ctx)
     require_caller_context(ctx)
     prune(ctx)
     live = live_by_name(ctx.herdr)
-    if me:
-        _adopt_caller(ctx, fleet.seat(me), live, report)
-    else:
+    caller = _adopt_caller(ctx, fleet.seat(me), live, report) if me else None
+    if not me:
         _hint_caller(ctx)
     order = [s for s in fleet.seats if s.name in selected and s.name != me]
     claims = {s.name: claim_seat(ctx, s, live, report) for s in order}
     needs = [s for s in order if claims[s.name].state == "needs"]
     target = resolve_target(ctx, report, needs[0] if needs else None)
+    if caller is not None:
+        _join_or_warn(ctx, fleet.seat(me), caller, target, live, join, report)
     place = place_grid if fleet.mode == "grid" else place_chain
     placed = place(ctx, needs, target, live, report)
     started = [s for s in order if start_claimed(ctx, s, claims[s.name], placed, report)]
@@ -100,8 +103,9 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
     return report
 
 
-def _adopt_caller(ctx: Ctx, seat: Seat, live: Dict[str, Dict], report: Report) -> None:
-    """``--me NAME``: name the caller's own agent as a seat; never start or brief it."""
+def _adopt_caller(ctx: Ctx, seat: Seat, live: Dict[str, Dict], report: Report) -> Optional[Dict]:
+    """``--me NAME``: name the caller's own agent as a seat; never start or brief it.
+    Returns the caller's pane record once adopted, else None."""
     pane = ctx.invocation.pane_id
     if not pane:
         report.add(seat.name, "failed", "--me needs to run inside a herdr pane (HERDR_PANE_ID)", "fail")
@@ -132,7 +136,7 @@ def _adopt_caller(ctx: Ctx, seat: Seat, live: Dict[str, Dict], report: Report) -
         if ctx.dry_run:
             report.add(seat.name, "plan", render_cmd(["agent", "rename", pane, seat.name]) + " (you; no kickoff)")
             live[seat.name] = dict(info, name=seat.name, pane_id=pane)
-            return
+            return info
         try:
             ctx.herdr.agent_rename(pane, seat.name)
         except HerdrError as exc:
@@ -140,10 +144,63 @@ def _adopt_caller(ctx: Ctx, seat: Seat, live: Dict[str, Dict], report: Report) -
             return
     if (ctx.state.entry(seat.name) or {}).get("pane_id") != pane:
         ctx.state.drop(seat.name)
-    ctx.state.update(seat.name, pane_id=pane, created_pane=False, kind=kind, blocked_at_startup=False)
+    ctx.state.update(seat.name, pane_id=pane, created_pane=False, kind=kind, blocked_at_startup=False,
+                     adopted=True)
     ctx.save()
     live[seat.name] = dict(info, name=seat.name, pane_id=pane)
     report.add(seat.name, "adopted", "your pane %s is now %s; no kickoff sent" % (pane, seat.name))
+    return info
+
+
+def active_tab(ctx: Ctx, workspace_id: str) -> Optional[str]:
+    """A workspace's active tab: ``workspace list`` row, else its first tab."""
+    for ws in ctx.herdr.workspace_list():
+        if ws.get("workspace_id") == workspace_id and ws.get("active_tab_id"):
+            return str(ws["active_tab_id"])
+    tabs = ctx.herdr.tab_list(workspace_id)
+    return str(tabs[0]["tab_id"]) if tabs else None
+
+
+def _join_or_warn(ctx: Ctx, seat: Seat, caller: Dict, target: Target, live: Dict[str, Dict], join: bool,
+                  report: Report) -> None:
+    """Design 15.2: an adopted caller outside the fleet's workspace splits the
+    team. Say so with the exact move; with --join, make it and record the new pane."""
+    pane = str(caller.get("pane_id") or ctx.invocation.pane_id)
+    here = str(caller.get("workspace_id") or ctx.invocation.workspace_id or "")
+    if target.workspace_id is not None and here == target.workspace_id:
+        if join:
+            report.add(seat.name, "joined", "already in the fleet's workspace %s" % here)
+        return
+    there = target.workspace_id or "(new)"
+    tab = active_tab(ctx, target.workspace_id) if target.workspace_id else "<active tab of %s>" % target.label
+    if not tab:
+        report.add(seat.name, "warning", "cannot find a tab in the fleet's workspace %s" % there, "partial")
+        return
+    argv = pane_move_argv(pane, tab, "right", 0.5)
+    if not join:
+        report.add(seat.name, "warning",
+                   "your pane %s is in workspace %s (%s) but the fleet's workspace is %s (%s), where the other "
+                   "seats open; to join them run `%s`, or rerun up with --join"
+                   % (pane, here, label_of(ctx, here) if here else "?", there, target.label, render_cmd(argv)))
+        return
+    if ctx.dry_run:
+        report.add(seat.name, "plan", "%s (join the fleet's workspace)" % render_cmd(argv))
+        moved = "<pane of %s after --join>" % seat.name
+    else:
+        try:
+            moved = ctx.herdr.pane_move_to_tab(pane, tab, "right", 0.5)
+        except HerdrError as exc:
+            report.add(seat.name, "failed", "--join: %s; your pane stays where it is" % describe(exc), "fail")
+            return
+        ctx.state.update(seat.name, pane_id=moved)
+        ctx.save()
+        report.add(seat.name, "joined", "moved your pane %s into %s %s; it is now %s" % (pane, there, tab, moved))
+    # From here on the caller is in the fleet's workspace: guard its new pane id,
+    # and in an existing workspace let new seats split off it (design 14.2).
+    ctx.invocation.pane_id, ctx.invocation.workspace_id = moved, target.workspace_id
+    live[seat.name] = dict(live.get(seat.name) or caller, pane_id=moved, workspace_id=target.workspace_id)
+    if not target.free_pane:
+        target.anchor = moved
 
 
 def _hint_caller(ctx: Ctx) -> None:
@@ -256,7 +313,8 @@ def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_
 
 def op_swap(ctx: Ctx, names: Sequence[str], note: Optional[str] = None,
             wait_ms: Optional[int] = None) -> Report:
-    """Restart exactly the seats that drifted from the file; start absent ones."""
+    """Restart exactly the seats that drifted from the file; start absent ones.
+    Without names, adopted sessions are skipped (design section 15)."""
     report = Report("swap")
     seats = select_seats(ctx.fleet, names)
     refuse_unknown_kinds(ctx)
@@ -268,6 +326,9 @@ def op_swap(ctx: Ctx, names: Sequence[str], note: Optional[str] = None,
         if agent is None:
             changed.append(seat.name)
             report.add(seat.name, "would start" if ctx.dry_run else "absent", "not running")
+            continue
+        if not names and is_adopted(ctx.state.entry(seat.name)):
+            report.add(seat.name, "skipped", "adopted session; name it explicitly to swap it")
             continue
         reasons = drift_reasons(ctx, seat, agent)
         if reasons:
@@ -311,8 +372,7 @@ def op_down(ctx: Ctx, names: Sequence[str], wait_ms: Optional[int] = None, close
             continue
         pane = _quit_live(ctx, seat, agent, report)
         if pane and not ctx.dry_run and ctx.state.pane_of(seat.name) != pane:
-            ctx.state.drop(seat.name)
-            ctx.state.update(seat.name, pane_id=pane, created_pane=False)
+            refresh_pane(ctx.state, seat.name, pane)
     ctx.save()
     if close_panes:
         _close_panes(ctx, seats, report)

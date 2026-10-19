@@ -20,6 +20,10 @@ acts, writes it back and appends one JSON line to the call log (env
   process-info answers that still show a non-shell process after exit),
   ``prompt_errors`` ({name: code}), ``wait_status`` ({name: status}),
   ``argv_absent`` (agent processes carry ``cmdline`` but no ``argv``).
+- ``pane move`` keeps the pane's process and gives it a new workspace-qualified
+  id, answering ``result.move_result.pane`` and ``previous_pane_id`` like live herdr;
+  a cross-workspace move leaves the old id as an alias that ``pane current
+  --current`` (resolved from the caller's HERDR_PANE_ID) still follows.
 - The log records facts the safety tests assert on: the target's state at
   every ``agent prompt``, whether a pane was at a shell at every ``agent
   start``, and whether a closed pane or workspace was created by a command
@@ -103,15 +107,18 @@ def put_agent(world: Dict, pane: str, kind: str, name: Optional[str] = None, sta
 class Fake:
     """Callable runner: ``Fake(world_path, log_path)([binary, *argv])``."""
 
-    def __init__(self, world_path: str, log_path: str):
+    def __init__(self, world_path: str, log_path: str, caller: Optional[str] = None):
         self.world_path = world_path
         self.log_path = log_path
+        self.caller = caller  # the calling process's HERDR_PANE_ID, for `pane current --current`
 
     def __call__(self, argv: List[str]) -> Result:
         args = list(argv[1:])
         with open(self.world_path, "r", encoding="utf-8") as handle:
             world = json.load(handle)
         info: Dict = {}
+        if self.caller:
+            world["caller"] = self.caller
         code, out, err = Sim(world, info).handle(args)
         with open(self.world_path, "w", encoding="utf-8") as handle:
             json.dump(world, handle)
@@ -341,6 +348,18 @@ class Sim:
             return _err("pane_not_found", "pane %s not found" % pid)
         return _ok({"pane": self._pane_record(pid), "type": "pane_info"}, "cli:pane:get")
 
+    def _pane_current(self, args: List[str]) -> Result:
+        """``pane current --current``: the caller's pane, following moves (a moved
+        process's inherited pane id stays an alias for its terminal)."""
+        pid = self.w.get("caller")
+        seen = set()
+        while pid in self.w.get("aliases", {}) and pid not in seen:
+            seen.add(pid)
+            pid = self.w["aliases"][pid]
+        if not pid or pid not in self.w["panes"]:
+            return _err("pane_not_found", "no current pane for the caller")
+        return _ok({"pane": self._pane_record(pid), "type": "pane_info"}, "cli:pane:current")
+
     def _pane_list(self, args: List[str]) -> Result:
         _, opts, _ = _opts(args, ("--workspace",))
         ws = (opts.get("--workspace") or [None])[0]
@@ -377,6 +396,51 @@ class Sim:
         p["split"] = {"from": source, "direction": opts["--direction"][0],
                       "ratio": (opts.get("--ratio") or [None])[0]}
         return _ok({"pane": self._pane_record(pid), "type": "pane_info"}, "cli:pane:split")
+
+    def _pane_move(self, args: List[str]) -> Result:
+        """``pane move P --new-tab --workspace W --label L`` or ``pane move P --tab T --split D
+        [--target-pane X] [--ratio r]``, with live 0.9.4 behaviour: the process moves with the
+        pane; the id is kept within a workspace and changes across workspaces; moving a pane
+        to the tab it is already in changes nothing."""
+        pos, opts, _ = _opts(args, ("--tab", "--split", "--ratio", "--target-pane", "--workspace", "--label"))
+        old = pos[0]
+        if old not in self.w["panes"]:
+            return _err("pane_not_found", "pane %s not found" % old)
+        record = self.w["panes"][old]
+        if "--new-tab" in opts:
+            ws = (opts.get("--workspace") or [record["workspace_id"]])[0]
+            if ws not in self.w["workspaces"]:
+                return _err("workspace_not_found", "workspace %s not found" % ws)
+            tab, split = "%s:t%d" % (ws, self._next()), None
+        else:
+            tab = (opts.get("--tab") or [""])[0]
+            ws = tab.split(":")[0]
+            if ws not in self.w["workspaces"]:
+                return _err("tab_not_found", "tab %s not found" % tab)
+            if record["tab_id"] == tab:
+                self.info["noop"] = True
+                return _ok({"move_result": {"pane": self._pane_record(old), "previous_pane_id": old},
+                            "type": "pane_moved"}, "cli:pane:move")
+            beside = (opts.get("--target-pane") or [None])[0] or next(
+                pid for pid, p in self.w["panes"].items() if p["tab_id"] == tab)
+            split = {"from": beside, "direction": (opts.get("--split") or ["right"])[0],
+                     "ratio": (opts.get("--ratio") or ["0.5"])[0]}
+        new = old if ws == record["workspace_id"] else "%s:p%d" % (ws, self._next())
+        if new != old:
+            self.w.setdefault("aliases", {})[old] = new
+        del self.w["panes"][old]
+        record.update(workspace_id=ws, tab_id=tab, moved_from=old, split=split)
+        self.w["panes"][new] = record
+        return _ok({"move_result": {"pane": self._pane_record(new), "previous_pane_id": old},
+                    "type": "pane_moved"}, "cli:pane:move")
+
+    def _tab_list(self, args: List[str]) -> Result:
+        _, opts, _ = _opts(args, ("--workspace",))
+        ws = (opts.get("--workspace") or [""])[0]
+        if ws not in self.w["workspaces"]:
+            return _err("workspace_not_found", "workspace %s not found" % ws)
+        return _ok({"tabs": [{"tab_id": ws + ":t1", "label": "1", "workspace_id": ws}], "type": "tab_list"},
+                   "cli:tab:list")
 
     def _pane_close(self, args: List[str]) -> Result:
         pid = args[0]
@@ -460,7 +524,7 @@ def main() -> int:
     if not world or not log:
         sys.stderr.write("fake herdr: FAKE_HERDR_WORLD and FAKE_HERDR_LOG must be set\n")
         return 98
-    code, out, err = Fake(world, log)([sys.argv[0]] + sys.argv[1:])
+    code, out, err = Fake(world, log, os.environ.get("HERDR_PANE_ID"))([sys.argv[0]] + sys.argv[1:])
     sys.stdout.write(out)
     sys.stderr.write(err)
     return code

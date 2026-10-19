@@ -251,6 +251,23 @@ def preflight(ctx: Ctx) -> None:
         found = ".".join(str(v) for v in version) if version else "unknown"
         raise OpError("herdr %s is too old; herdr-fleet needs %s or newer"
                       % (found, ".".join(str(v) for v in MIN_HERDR_VERSION)))
+    if ctx.env.get("HERDR_PANE_ID"):
+        resolve_caller(ctx)
+
+
+def resolve_caller(ctx: Ctx) -> None:
+    """Use the caller's current pane id (and workspace) from ``pane current --current``,
+    so the caller-pane guards hold after ``--join`` or a hand move made the inherited
+    HERDR_PANE_ID stale. Any error keeps HERDR_PANE_ID."""
+    try:
+        info = ctx.herdr.pane_current()
+    except HerdrError:
+        return
+    pane = info.get("pane_id")
+    if pane:
+        inv = ctx.invocation
+        inv.pane_id = str(pane)
+        inv.workspace_id = str(info.get("workspace_id") or inv.workspace_id or "") or None
 
 
 def load_config(env: Mapping[str, str], herdr: Herdr) -> PluginConfig:

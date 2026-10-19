@@ -68,8 +68,9 @@ It never overwrites a file: each one is reported as `created` or `kept`, and onl
 | action `yarrasys.fleet.init` | `herdr-fleet init --notify` in the focused pane's repository |
 | action `yarrasys.fleet.up` | `herdr-fleet up --notify` from the focused pane's directory |
 | action `yarrasys.fleet.status` | `herdr-fleet ui status`: opens the `status` pane (an overlay running `status --hold`) |
-| action `yarrasys.fleet.manage` | `herdr-fleet ui manage`: opens the `manage` pane (a popup running the menu: pick a seat, then restart, swap, kickoff, down or up) |
+| action `yarrasys.fleet.manage` | `herdr-fleet ui manage`: opens the `manage` pane (a popup running the menu: pick a seat, then restart, swap, kickoff, down, up or tile) |
 | action `yarrasys.fleet.doctor` | `herdr-fleet doctor --notify` |
+| action `yarrasys.fleet.tile` | `herdr-fleet tile --notify`: re-tile the live seats in place |
 
 Actions run with the plugin root as their working directory, so they find the fleet file from the focused pane instead: `focused_pane_cwd` in `HERDR_PLUGIN_CONTEXT_JSON`, else the `cwd` from `herdr pane get $HERDR_PANE_ID`. On herdr 0.9.4 an action's context JSON has these keys (values abridged):
 
@@ -155,6 +156,12 @@ chain                        grid                         grid with --me
 
 The grid is built with chained splits, since `herdr pane split SRC --ratio r` leaves `SRC` with share `r` and gives the new pane `1 - r`. First the column heads, each split `right` from the previous head with ratio `1/(columns remaining)`; then each column's rows, split `down` from the cell above with ratio `1/(rows remaining)`. `up --dry-run` prints every split with its ratio.
 
+#### Re-tiling
+
+`herdr-fleet tile` lays out the seats that are already live in the fleet's workspace again, without restarting anything: the `[layout]` grid, or in chain mode the chain with each seat's `split`, `ratio` and `from`. The first live seat's pane stays put and anchors the result. The other seats are first parked in tabs of their own, each with `herdr pane move <pane> --new-tab`. Then they are moved back one by one in plan order beside their planned neighbour with `herdr pane move <pane> --tab <tab> --split <dir> --target-pane <src> --ratio <r>`. A pane can't simply be moved within its own tab, because herdr treats that as a no-op. Processes, agent names and pane ids survive, and the temporary tabs disappear once empty. Nothing is prompted, quit or started.
+
+Seats in other workspaces are reported as `elsewhere` and left alone. The seats being tiled must share one tab, or `tile` refuses. If a move fails, `tile` stops and names the seats it did not re-tile. `tile --dry-run` prints every move. Use it after changing `[layout]`, or when a run left the panes uneven.
+
 ### Kickoff templates
 
 Each seat gets one `herdr agent prompt <name> "<text>"` after every seat has started, in file order, so the roster is complete (put the orchestrator last to brief it last). Placeholders use Python `str.format_map` rules (`{{` and `}}` are literal braces); anything that is not one of these is left exactly as written:
@@ -177,11 +184,12 @@ All commands except `init` and `install-cli` accept `--file PATH`; all but `inst
 | Command | What it does |
 | --- | --- |
 | `init [DIR] [--example NAME] [--force]` | Write the starter `.herdr` files at the root of DIR's Git work tree (else DIR; default the current directory), or copy `examples/NAME` with `--example` (`fablyn`). Never overwrites without `--force`. Runs no herdr command and does not need `HERDR_ENV`. Exit 0 when every file was created or kept, 1 when a write failed, 2 for an unknown example or a bad DIR. |
-| `up [NAME...] [--me NAME] [--dry-run] [--no-kickoff] [--note TEXT]` | Start every seat that is not live, then brief the ones it started. Skips seats whose name is live; adopts an unnamed agent of the right kind that herdr resumed in a seat's recorded pane (rename, no kickoff); reuses a recorded pane that is at a shell prompt; else splits a new pane. `--me NAME` names the agent in your own pane as seat NAME (rename only, no kickoff). `--dry-run` prints the exact herdr commands and changes nothing. |
+| `up [NAME...] [--me NAME] [--dry-run] [--no-kickoff] [--note TEXT]` | Start every seat that is not live, then brief the ones it started. Skips seats whose name is live; adopts an unnamed agent of the right kind that herdr resumed in a seat's recorded pane (rename, no kickoff); reuses a recorded pane that is at a shell prompt; else splits a new pane. `--me NAME` names the agent in your own pane as seat NAME (rename only, no kickoff) and records it as `adopted`. If your pane is in another workspace than the fleet's, `up --me` warns with the exact `herdr pane move` that would join them; `--join` runs that move (your session keeps running) and records the new pane id. `--dry-run` prints the exact herdr commands and changes nothing. |
 | `status [--json] [--hold]` | Every seat: expected kind, live kind, pane, state (`idle`, `working`, `blocked`, `done`, `unknown` or `absent`), drift and notes, then `herdr integration status` for the kinds in use, flagging `outdated` and `not installed`. |
 | `restart NAME... [--note TEXT \| --note-file PATH] [--wait MS] [--dry-run]` | Quit each seat, start it again in the same pane with the same name, and brief it with `reason = restart`. A seat that is not running is started (in its recorded pane if that is at a shell prompt, else a fresh split). |
-| `swap [NAME...] [--note …] [--wait MS] [--dry-run]` | Restart exactly the seats that drifted from the file, and start absent ones. Drift: the live kind differs, or the running process's argv does not contain the file's `args` in order, or the state file recorded a different kind or args at start. `--dry-run` lists what would change and why. |
+| `swap [NAME...] [--note …] [--wait MS] [--dry-run]` | Restart exactly the seats that drifted from the file, and start absent ones. Drift: the live kind differs, or the running process's argv does not contain the file's `args` in order, or the state file recorded a different kind or args at start. Without names, adopted seats are skipped (`skipped - adopted session; name it explicitly to swap it`); `swap NAME` acts on them. `--dry-run` lists what would change and why. |
 | `kickoff NAME... [--note …]` | Resend the kickoff (`reason = kickoff`), e.g. after you answered a seat's startup prompt. |
+| `tile [--dry-run]` | Re-tile the seats live in the fleet's workspace into the `[layout]` grid or chain with pane moves only (see Re-tiling). |
 | `down [NAME...] [--wait MS] [--close-panes] [--close-workspace]` | Quit seats. `--close-panes` then closes the panes herdr-fleet created, once they are back at a shell. `--close-workspace` closes the workspace only if herdr-fleet created it and no agent is left in it. |
 | `doctor` | Read-only checks: python, herdr binary and version, `HERDR_ENV`, server reachable, fleet file, kinds, kickoff files, `state_note`, integration status, a quit command per seat, the state file. Exit 1 on any `fail`. |
 | `install-cli [--dir DIR]` | Symlink `bin/herdr-fleet` into DIR (default `~/.local/bin`) and print the plugin root. |
@@ -198,7 +206,7 @@ herdr-fleet never answers anything for you. In code and in tests:
 3. A prompt that returns `agent_prompt_stalled` or `timeout` is reported and never resent: herdr says the text may have been delivered.
 4. Only panes recorded as created by herdr-fleet are closed, and only with `--close-panes`; only a workspace it created is closed, and only with `--close-workspace`.
 5. An agent is started only in a pane whose foreground is a bare shell (`zsh`, `bash`, `fish`, `sh` or `nu`). `agent_pane_busy` is retried every 250 ms for up to 10 s.
-6. Your own pane is never started into, restarted or quit; `--me` only renames.
+6. Your own pane is never started into, restarted or quit; `--me` only renames. herdr-fleet asks herdr which pane is yours (`herdr pane current --current`), so this holds after `--join` or a hand move made `HERDR_PANE_ID` stale; if that query fails it uses `HERDR_PANE_ID`.
 
 If a seat is blocked at startup (typically a trust prompt), `up` records it, notifies you with the `request` sound and moves on. Answer the prompt yourself, then run `herdr-fleet kickoff NAME`.
 
@@ -221,11 +229,19 @@ quit_timeout_ms = 30000
 
 In the smoke test, `/exit` through `agent prompt` quit Claude Code cleanly and the shell was back within a second.
 
+### Adopted seats
+
+A seat is *adopted* when herdr-fleet named a session it did not start: your own with `up --me`, or an unnamed agent that herdr resumed in a seat's recorded pane. The state file marks it `"adopted": true`, and herdr-fleet clears the mark when it starts that seat itself (`up`, `restart`, `swap`). A seat whose entry records no `args` counts as adopted too, because herdr-fleet never started it (adopted by an older version, or found live by name). Pane ids are not compared, so a session you move by hand stays adopted.
+
+An adopted session usually runs with its owner's own args (for example a hand-started `claude --chrome`). So `status` shows `adopted` in the DRIFT column instead of comparing args (`"adopted": true, "drift": []` in `--json`), and a bare `swap` skips it rather than quit someone's conversation. `swap NAME` and `restart NAME` still act on it, under the usual rules: blocked and unknown agents are refused, working ones need `--wait`, and the caller's own pane is refused.
+
+`up --me` from a pane outside the fleet's workspace (a labelled workspace elsewhere, or one `up` creates) would split the team across two workspaces. `up` says so, naming both workspaces, and prints the exact command, for example `herdr pane move wY:pC --tab w1H:t1 --split right --ratio 0.5 --no-focus`. With `up --me NAME --join` it runs that move itself before placing the other seats; the session keeps running and the new pane id is recorded. Without `--join` nothing moves.
+
 ## The state file
 
 `<repo>/.herdr/fleet.state.json`, created on the first `up`, records the workspace and, per seat, the pane, whether herdr-fleet created it, the kind and args it started with, and timestamps. herdr-fleet also creates `<repo>/.herdr/.gitignore` (or appends to it) so the state file is not committed. It lives in the repo rather than the plugin state directory so the manifest actions and an agent running the CLI share it.
 
-Pane and workspace ids are valid for one herdr server. Every command checks the ids it is about to use and drops the ones herdr no longer knows. Writes are atomic.
+Pane and workspace ids are valid for one herdr server. Every command checks the ids it is about to use and drops the ones herdr no longer knows. There is one exception: a seat whose recorded pane is gone but which is still live by name elsewhere (its pane was moved to another workspace, which changes its id) is re-pointed to its new pane, and every other field is kept. When a live seat turns up in a different pane while its recorded pane still exists, the entry follows it but no longer counts the pane as created by herdr-fleet, so `--close-panes` will not close it. Writes are atomic.
 
 Lifecycle:
 

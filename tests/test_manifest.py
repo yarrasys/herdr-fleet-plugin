@@ -47,7 +47,11 @@ class ManifestContents(unittest.TestCase):
         self.assertEqual(actions["init"], {  # design section 13.2, verbatim
             "id": "init", "title": "Fleet: init (write a starter .herdr/fleet.toml here)",
             "contexts": ["workspace"], "command": ["python3", "bin/herdr-fleet", "init", "--notify"]})
-        self.assertEqual([a["id"] for a in self.manifest["actions"]], ["up", "status", "manage", "doctor", "init"])
+        self.assertEqual(actions["tile"], {  # design section 15.1
+            "id": "tile", "title": "Fleet: tile (re-tile the seats in place)",
+            "contexts": ["workspace"], "command": ["python3", "bin/herdr-fleet", "tile", "--notify"]})
+        self.assertEqual([a["id"] for a in self.manifest["actions"]],
+                         ["up", "status", "manage", "doctor", "init", "tile"])
         for action in actions.values():
             build_parser().parse_args(action["command"][2:])  # still valid CLI arguments
 

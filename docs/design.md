@@ -393,3 +393,24 @@ In chain mode a seat may set `from = "<seat name>"` to split from that seat's pa
 When `--me NAME` finds no agent in the caller's pane, the message says so and adds: `start NAME as a seat instead with \`herdr-fleet up NAME\`, or start a NAME-kind agent in this pane first and run --me from inside it`. The run continues with the other seats as before (exit 3).
 
 Version 0.3.0. The Fablyn example sets `mode = "grid"`.
+
+## 15. Adopted seats and `--join` (version 0.3.1)
+
+Observed live: `up --me` from a session in another workspace adopts that session where it is, while `workspace = "<label>"` sends every other seat to the labelled workspace, so the team ends up split across two workspaces. And an adopted session usually runs with different args than the file (for example a hand-started `claude --chrome`), so a bare `swap` from another pane would quit the owner's own session and restart it, losing its conversation.
+
+1. **Adopted seats are recorded** with `adopted = true` in the state file (set by `--me` and by adopt-on-resume, cleared when the plugin starts the seat itself). `status` shows `adopted` in the DRIFT column instead of comparing args. `swap` without names skips adopted seats and says so; `swap NAME` and `restart NAME` still act on them, subject to the usual state rules.
+2. **`--me` outside the target workspace** prints a warning naming both workspaces and the exact `herdr pane move <pane> --tab <tab> --split right --ratio 0.5 --no-focus` that would join them. With `--join`, `up` runs that move itself (it is reversible and keeps the process), then records the new pane id. Without `--join` nothing moves.
+3. Nothing else changes. Version 0.3.1.
+
+### 15.1 `tile`: re-tile live seats without restarting them
+
+Observed live: `herdr pane move <pane> --tab <same tab> --split … --target-pane …` is a no-op when the pane is already in that tab, but moving the pane out to a temporary tab (`pane move <pane> --new-tab --workspace <id> --label park --no-focus`) and straight back (`pane move <pane> --tab <tab> --split <dir> --target-pane <src> --ratio <r> --no-focus`) re-attaches it exactly where asked, keeps the process and the agent name, keeps the pane id within the workspace, and the temporary tab disappears when it empties. Four seats were re-tiled this way into an equal 2×2 while all four agents kept working.
+
+`tile [--dry-run]` rebuilds the layout of the seats that are live in the fleet's workspace into the `[layout]` grid (or, in chain mode, the chain order with each seat's `split`/`from`) using that out-and-back move for every seat after the first, in grid-plan order, with the planned source pane, direction and ratio. Seats in other workspaces are reported and left alone. No agent is prompted, quit or started. The first seat's pane stays where it is and anchors the result. `--dry-run` prints the moves. Manifest action `tile` ("Fleet: tile") runs it for the focused pane's repository.
+
+### 15.2 Amendments from the build
+
+- "Adopted" means the state entry carries `adopted = true` or records no `args` (the plugin never started that seat). Pane ids are not compared.
+- A live named seat found in a different pane keeps its entry; only `pane_id` is refreshed. When the recorded pane still exists, `created_pane` becomes false (someone started the agent elsewhere; the plugin must not close a pane it did not create). When the recorded pane is gone, the move is followed and every field is kept.
+- The caller's pane is resolved with `herdr pane current --current` at preflight, falling back to `HERDR_PANE_ID`, so the caller guards survive `--join` and hand moves.
+- `tile` parks every seat after the first and then re-attaches them in plan order, so the ratios yield equal cells from any starting layout. On a failed return it names the seats left parked and the command to bring each back.
