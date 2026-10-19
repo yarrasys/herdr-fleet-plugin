@@ -92,10 +92,13 @@ class Starter(InitCase):
         self.assertEqual(self.read(project, ".herdr", "STATE.md"), b"Where things stand: (nothing yet).\n")
         self.assertEqual(self.read(project, ".herdr", ".gitignore"), b"fleet.state.json\n")
         self.assertIn(b"<!--", self.read(project, ".herdr", "kickoff", "default.md").splitlines()[0])
+        self.assertEqual(fleet.mode, "chain")
         text = self.read(project, ".herdr", "fleet.toml").decode()
-        for key in ("workspace", "cwd", "quit_timeout_ms", "[layout]", "direction", "ratio", "args", "split",
-                    "env", "kickoff_text", "quit", "notes"):
+        for key in ("workspace", "cwd", "quit_timeout_ms", "[layout]", "mode", "columns", "direction", "ratio",
+                    "args", "split", "from", "env", "kickoff_text", "quit", "notes"):
             self.assertIn(key, text)  # every optional key is shown, commented out
+        self.assertIn('# mode = "chain"', text)
+        self.assertIn("grid:", text)  # both modes explained
         self.assertEqual(self.calls(), [])
 
     @unittest.skipUnless(GIT, "git is not installed")

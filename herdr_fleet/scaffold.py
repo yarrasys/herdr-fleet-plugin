@@ -41,16 +41,23 @@ kickoff = ".herdr/kickoff/default.md"   # default kickoff template for every sea
 # quit_timeout_ms = 20000        # how long to wait for an agent to exit after its quit command
 
 # [layout]
-# direction = "right"            # split direction between consecutive seats: right | down
-# ratio = 0.5                    # split ratio, strictly between 0 and 1
+# mode = "chain"                 # chain (default): each seat splits from the previous seat's pane
+#                                # (or its `from` seat's), in its own split direction and ratio;
+#                                # grid: the seats placed in a run fill an even grid, column-major
+#                                # in file order, and per-seat split, ratio and from are ignored
+# columns = 2                    # grid only: number of columns (default: ceil(sqrt(seats placed)))
+# direction = "right"            # chain: split direction between seats: right | down;
+#                                # grid: direction of the first split off your pane
+# ratio = 0.5                    # chain: split ratio; grid: share your pane keeps (0 < ratio < 1)
 
 [[agents]]
 __NAME_LINE__ # herdr agent name: [a-z][a-z0-9_-]{0,31}, unique in this file
 kind = "claude"                  # a kind from `herdr agent start --help`
 # args = ["--model", "..."]      # passed after `--` to herdr agent start
 # cwd = "."                      # relative to the repository root, absolute, or ~/...
-# split = "right"                # overrides [layout].direction for this seat
-# ratio = 0.5                    # overrides [layout].ratio for this seat
+# split = "right"                # chain only: overrides [layout].direction for this seat
+# ratio = 0.5                    # chain only: overrides [layout].ratio for this seat
+# from = "<an earlier seat>"     # chain only: split from that seat's pane instead of the previous one
 # env = { ROLE = "dev" }         # environment for the seat's pane
 # kickoff = ".herdr/kickoff/dev.md"   # this seat's own template, instead of the default
 # kickoff_text = "..."           # or an inline template (not both)

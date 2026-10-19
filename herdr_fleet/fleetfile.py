@@ -1,4 +1,4 @@
-"""The fleet file: discovery, TOML parsing and validation (design section 2).
+"""The fleet file: discovery, TOML parsing and validation (design sections 2 and 14).
 
 ``find_fleet_file`` walks up from the invoking directory to the first
 directory holding ``.herdr/fleet.toml`` unless ``--file`` or
@@ -27,8 +27,9 @@ FLEET_NAME = "fleet.toml"
 DIRECTIONS = ("right", "down")
 
 TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "quit_timeout_ms"}
-LAYOUT_KEYS = {"direction", "ratio"}
-SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "env", "kickoff",
+LAYOUT_KEYS = {"mode", "columns", "direction", "ratio"}
+MODES = ("chain", "grid")
+SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "from", "env", "kickoff",
              "kickoff_text", "quit", "notes"}
 
 
@@ -56,6 +57,7 @@ class Seat:
     quit: Optional[str]
     notes: str
     index: int
+    from_seat: Optional[str] = None  # chain mode: split from this earlier seat's pane (``from``)
 
 
 @dataclass
@@ -71,6 +73,8 @@ class Fleet:
     quit_timeout_ms: Optional[int]
     seats: List[Seat]
     warnings: List[str] = field(default_factory=list)
+    mode: str = "chain"              # chain | grid (design section 14)
+    columns: Optional[int] = None    # grid only
 
     def seat(self, name: str) -> Optional[Seat]:
         for seat in self.seats:
@@ -156,6 +160,16 @@ def load_fleet(path: str) -> Fleet:
     _unknown_keys(layout, LAYOUT_KEYS, "[layout]", warnings)
     direction = _direction(layout.get("direction", "right"), "layout.direction", errors)
     ratio = _ratio(layout.get("ratio"), "layout.ratio", errors)
+    mode = layout.get("mode", "chain")
+    if mode not in MODES:
+        errors.append("layout.mode: %r must be chain or grid" % (mode,))
+        mode = "chain"
+    columns = layout.get("columns")
+    if columns is not None and (not isinstance(columns, int) or isinstance(columns, bool) or columns < 1):
+        errors.append("layout.columns: %r must be a positive integer" % (columns,))
+        columns = None
+    if columns is not None and mode != "grid":
+        warnings.append("layout.columns: ignored in chain mode (it applies to mode = \"grid\")")
 
     raw_seats = data.get("agents", [])
     if not isinstance(raw_seats, list) or not all(isinstance(s, dict) for s in raw_seats):
@@ -172,14 +186,17 @@ def load_fleet(path: str) -> Fleet:
             continue
         if seat.name in seen:
             errors.append("agents[%d].name: duplicate name %r" % (index, seat.name))
+        _check_from(seat, [s.name for s in seats], errors)
         seen.add(seat.name)
         seats.append(seat)
+    if mode == "grid":
+        _grid_overrides(seats, raw_seats, direction, ratio, warnings)
 
     if errors:
         raise FleetError(["%s: %s" % (path, e) for e in errors])
     return Fleet(path=path, repo=repo, workspace=workspace, cwd=base_cwd, state_note=state_note,
                  kickoff=default_kickoff, direction=direction, ratio=ratio,
-                 quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings)
+                 quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
@@ -227,11 +244,32 @@ def _parse_seat(raw: Dict, index: int, repo: str, base_cwd: str, direction: str,
         errors.append("%s: set kickoff or kickoff_text, not both" % where)
     quit_cmd = _opt_str(raw, "quit", where + ".quit", errors)
     notes = _opt_str(raw, "notes", where + ".notes", errors) or ""
+    from_seat = _opt_str(raw, "from", where + ".from", errors)
     if name is None or kind is None:
         return None
     return Seat(name=name, kind=kind, args=list(args), cwd=cwd, split=split,
                 ratio=seat_ratio if seat_ratio is not None else ratio, env=dict(env),
-                kickoff=kickoff, kickoff_text=kickoff_text, quit=quit_cmd, notes=notes, index=index)
+                kickoff=kickoff, kickoff_text=kickoff_text, quit=quit_cmd, notes=notes, index=index,
+                from_seat=from_seat)
+
+
+def _check_from(seat: Seat, earlier: List[str], errors: List[str]) -> None:
+    """``from`` must name a seat earlier in the file (design 14.3)."""
+    if seat.from_seat is not None and seat.from_seat not in earlier:
+        errors.append("agents[%d] (%s).from: %r must name a seat earlier in the file (%s)"
+                      % (seat.index, seat.name, seat.from_seat, ", ".join(earlier) or "none"))
+
+
+def _grid_overrides(seats: List[Seat], raw_seats: List[Dict], direction: str, ratio: Optional[float],
+                    warnings: List[str]) -> None:
+    """Grid mode places seats itself: per-seat ``split``, ``ratio`` and ``from`` are
+    ignored (with a warning); seats appended to an existing layout use [layout]."""
+    for seat in seats:
+        ignored = [key for key in ("split", "ratio", "from") if key in raw_seats[seat.index]]
+        if ignored:
+            warnings.append("agents[%d] (%s): %s ignored in grid mode"
+                            % (seat.index, seat.name, ", ".join(ignored)))
+        seat.split, seat.ratio, seat.from_seat = direction, ratio, None
 
 
 def _unknown_keys(table: Dict, allowed: set, where: str, warnings: List[str]) -> None:

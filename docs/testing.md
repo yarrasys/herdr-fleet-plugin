@@ -51,6 +51,21 @@ Specific tests cover restart refusing blocked, unknown and working agents, stall
 
 `tests/test_manifest.py` also checks the `init` action entry verbatim and runs it from the plugin root.
 
+Grid layout (design section 14):
+
+- `tests/test_layout.py` tests the pure plan in `herdr_fleet/layout.py`: rows per column for 1 to 10 seats and with `columns` set, column-major order, the exact split sequence and ratios, and, for 1 to 6 seats (and larger grids), equal cells, proved by simulating herdr's split rule (the split pane keeps `r`, the new pane gets `1 - r`) independently of the code under test.
+- `tests/test_grid.py` runs `up` against the fake herdr and rebuilds every pane's rectangle from the splits herdr received. It covers:
+  - a grid in a created workspace (the root pane is the first cell; 4 seats → 2×2, 5 → 2+2+1);
+  - a grid beside the caller with `--me` (the caller keeps `ratio`, the other seats share the rest evenly) and without it;
+  - a grid off the first pane of an existing labelled workspace;
+  - a partial run appending with the chain rule, and a restart of an absent seat in grid mode;
+  - a failed column head skipping the cells below it;
+  - `--dry-run` printing every split with its ratio;
+  - warnings for per-seat `split`/`ratio`/`from` in grid mode and `columns` in chain mode, and errors for a bad `mode` or `columns`;
+  - `from` validation (unknown, later or own seat) and behaviour (splits from the named seat; falls back to the previous seat when the named seat has no pane);
+  - the `--me` hint when the caller's pane has no agent (exit 3, other seats still start).
+- `tests/test_cli_subprocess.py` checks that the Fablyn example's dry run shows its 2×2 grid. The chain tests in `test_up.py` are unchanged.
+
 ### Running the CLI against the fake by hand
 
 ```bash

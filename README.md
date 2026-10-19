@@ -110,25 +110,50 @@ kickoff    = ".herdr/kickoff/default.md" # optional default kickoff template
 quit_timeout_ms = 20000                # optional: how long to wait for an agent to exit (ms)
 
 [layout]
-direction = "right"                    # split direction between consecutive seats: right | down
-ratio     = 0.5                        # optional split ratio, 0 < ratio < 1
+mode      = "chain"                    # chain (default) | grid; see Layout below
+# columns = 2                          # grid only: number of columns (default ceil(sqrt(seats placed)))
+direction = "right"                    # chain: split direction between seats. grid: first split off your pane
+ratio     = 0.5                        # chain: split ratio. grid: share your pane keeps. 0 < ratio < 1
 
 [[agents]]
 name    = "fablyn-orchestrator"        # herdr agent name: [a-z][a-z0-9_-]{0,31}, unique
 kind    = "claude"                     # a kind from `herdr agent start --help`
 args    = ["--model", "claude-opus-5-5"]          # passed after `--` to herdr agent start
 cwd     = "."                          # relative to the repo root, absolute, or ~/…
-split   = "right"                      # overrides [layout].direction for this seat
-ratio   = 0.5                          # overrides [layout].ratio
+split   = "right"                      # chain only: overrides [layout].direction for this seat
+ratio   = 0.5                          # chain only: overrides [layout].ratio
+# from  = "<an earlier seat>"          # chain only: split from that seat's pane, not the previous one
 env     = { FABLYN_ROLE = "orchestrator" }        # set on the seat's pane
 kickoff = ".herdr/kickoff/orchestrator.md"          # or kickoff_text = "inline template"
 quit    = "/exit"                      # overrides the per-kind quit command
 notes   = "Needs localhost for Playwright."       # shown by status only
 ```
 
-Seats start in file order. The first seat takes the root pane of a workspace that `up` creates (created with that seat's `cwd` and `env`); every other seat splits from the previous seat's pane. When the fleet has no `workspace`, the first seat splits from your pane: herdr-fleet never starts an agent in the pane you run it from.
+Seats start in file order. The first seat takes the root pane of a workspace that `up` creates (created with that seat's `cwd` and `env`). When the fleet has no `workspace`, new panes split off your pane: herdr-fleet never starts an agent in the pane you run it from. Where the other seats go depends on the layout mode.
 
-Validation reports every problem at once and exits 2: names match herdr's pattern and are unique; `args` is a list of strings; kickoff files exist; `split` is `right` or `down`; `ratio` is strictly between 0 and 1; only one of `kickoff` and `kickoff_text`. Kinds must be ones the installed herdr supports: `doctor` warns, and commands that start agents refuse. Unknown keys are warned about and ignored.
+Validation reports every problem at once and exits 2: names match herdr's pattern and are unique; `args` is a list of strings; kickoff files exist; `split` is `right` or `down`; `ratio` is strictly between 0 and 1; only one of `kickoff` and `kickoff_text`; `mode` is `chain` or `grid`; `columns` is a positive integer; `from` names a seat earlier in the file. Kinds must be ones the installed herdr supports: `doctor` warns, and commands that start agents refuse. Unknown keys are warned about and ignored.
+
+### Layout
+
+`[layout] mode` picks how `up` arranges the panes it creates.
+
+- **chain** (the default): each seat splits from the previous seat's pane, or from its `from` seat's pane, in its own `split` direction with its own `ratio` (falling back to `[layout]`). With `ratio = 0.5` every split halves the previous seat, so a long chain gets narrow; use `split = "down"` and `from` to shape it.
+- **grid**: the seats placed in one run fill an even grid, column-major in file order. There are `columns` columns of equal width (default ceil(sqrt(seats))), and each column's rows have equal height, with any extra rows in the first columns (3 seats: 2 + 1; 5 seats: 2 + 2 + 1). Per-seat `split`, `ratio` and `from` are ignored with a warning. The grid fills the root pane of a workspace `up` created in that run. Otherwise it fills a new pane split off the anchor (your pane, or the first pane of the labelled workspace) with `[layout] direction` and `ratio`, and the anchor keeps `ratio` of the space. If seats placed by an earlier run are already in the workspace, new seats are appended with the chain rule instead.
+
+Four seats in a new workspace (`mode = "chain"`, `ratio = 0.5` on the left; `mode = "grid"` on the right), and the grid beside you with `up --me orchestrator` and `ratio = 0.4`:
+
+```
+chain                        grid                         grid with --me
++-----------+-----+--+--+    +-----------+-----------+    +---------+-------+-------+
+|           |     |  |  |    |     1     |     3     |    |         |   2   |       |
+|     1     |  2  |3 |4 |    |           |           |    |   you   |       |       |
+|           |     |  |  |    +-----------+-----------+    |   (1)   +-------+   4   |
+|           |     |  |  |    |     2     |     4     |    |         |   3   |       |
+|           |     |  |  |    |           |           |    |         |       |       |
++-----------+-----+--+--+    +-----------+-----------+    +---------+-------+-------+
+```
+
+The grid is built with chained splits, since `herdr pane split SRC --ratio r` leaves `SRC` with share `r` and gives the new pane `1 - r`. First the column heads, each split `right` from the previous head with ratio `1/(columns remaining)`; then each column's rows, split `down` from the cell above with ratio `1/(rows remaining)`. `up --dry-run` prints every split with its ratio.
 
 ### Kickoff templates
 

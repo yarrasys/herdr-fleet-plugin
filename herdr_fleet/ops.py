@@ -17,12 +17,13 @@ import shlex
 from typing import Dict, List, Optional, Sequence, TextIO
 
 from herdr_fleet import PLUGIN_ID
-from herdr_fleet.bringup import (Target, ensure_seat, in_target, label_for, resolve_target, send_kickoffs,
-                                split_source, start_seat)
+from herdr_fleet.bringup import (claim_seat, ensure_seat, label_for, require_caller_context, resolve_target,
+                                send_kickoffs, start_claimed, start_seat)
 from herdr_fleet.checks import drift_reasons
 from herdr_fleet.context import Ctx, Report, UsageError
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import HerdrError, describe, has_agent, render_cmd, start_argv
+from herdr_fleet.placement import Target, place_chain, place_grid
 from herdr_fleet.seats import (QUIT_CONFIG_HINT, SETTLED, at_shell_prompt, describe_foreground,
                                live_by_name, quit_agent, quit_command)
 from herdr_fleet.state import prune_state
@@ -69,32 +70,28 @@ def prune(ctx: Ctx) -> None:
 
 def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: bool = False,
           note: Optional[str] = None) -> Report:
+    """Design 4.1 and 14: classify every seat, find or create the workspace,
+    place the seats that need panes (chain or grid), start them, brief them."""
     report = Report("up")
     fleet = ctx.fleet
     selected = {s.name for s in select_seats(fleet, names)}
     if me and fleet.seat(me) is None:
         raise UsageError("--me %s: not a seat in %s" % (me, fleet.path))
     refuse_unknown_kinds(ctx)
+    require_caller_context(ctx)
     prune(ctx)
     live = live_by_name(ctx.herdr)
-    pending = [s for s in fleet.seats if s.name in selected and s.name != me and s.name not in live]
-    target = resolve_target(ctx, report, pending[0] if pending else None)
     if me:
         _adopt_caller(ctx, fleet.seat(me), live, report)
     else:
         _hint_caller(ctx)
-    cache: Dict[str, Optional[str]] = {}
-    prev: Optional[str] = None
-    started: List[Seat] = []
-    for seat in fleet.seats:
-        if seat.name in selected and seat.name != me:
-            pane, now = ensure_seat(ctx, seat, target, prev, live, report)
-            if now:
-                started.append(seat)
-        else:
-            pane = (live.get(seat.name) or {}).get("pane_id") or ctx.state.pane_of(seat.name)
-        if pane and in_target(ctx, str(pane), target, cache):
-            prev = str(pane)
+    order = [s for s in fleet.seats if s.name in selected and s.name != me]
+    claims = {s.name: claim_seat(ctx, s, live, report) for s in order}
+    needs = [s for s in order if claims[s.name].state == "needs"]
+    target = resolve_target(ctx, report, needs[0] if needs else None)
+    place = place_grid if fleet.mode == "grid" else place_chain
+    placed = place(ctx, needs, target, live, report)
+    started = [s for s in order if start_claimed(ctx, s, claims[s.name], placed, report)]
     if started and no_kickoff:
         ctx.say("kickoffs skipped (--no-kickoff)")
     elif started:
@@ -115,8 +112,12 @@ def _adopt_caller(ctx: Ctx, seat: Seat, live: Dict[str, Dict], report: Report) -
         report.add(seat.name, "failed", "--me: %s" % describe(exc), "fail")
         return
     kind = info.get("agent")
-    if not kind:
-        report.add(seat.name, "failed", "--me: no agent is running in your pane %s" % pane, "fail")
+    if not kind:  # design 14.4: say what to do instead; the other seats still come up (exit 3)
+        report.add(seat.name, "failed",
+                   "--me: no agent is running in your pane %s; start %s as a seat instead with "
+                   "`herdr-fleet up %s`, or start a %s agent in this pane first and run "
+                   "`herdr-fleet up --me %s` from inside it" % (pane, seat.name, seat.name, seat.kind, seat.name),
+                   "partial")
         return
     if kind != seat.kind:
         report.add(seat.name, "failed",
@@ -228,8 +229,7 @@ def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_
         if agent is None:
             if target is None:
                 target = resolve_target(ctx, report, seat)
-            _, started = ensure_seat(ctx, seat, target, split_source(ctx, seat, live, target), live, report)
-            if started:
+            if ensure_seat(ctx, seat, target, live, report):
                 to_brief.append(seat)
             continue
         if agent.get("pane_id") == ctx.invocation.pane_id:

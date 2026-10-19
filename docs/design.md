@@ -356,3 +356,40 @@ Version 0.2.0 in `herdr-plugin.toml` and `herdr_fleet/__init__.py`.
 ### 13.5 Version 0.2.1
 
 Everything fleet-related lives under `.herdr/`: the shipped Fablyn example keeps its kickoff templates in `.herdr/kickoff/` and its state note at `.herdr/STATE.md`, like the plain starter, so `init --example fablyn` writes nothing outside `.herdr/`. The example gains a fourth seat, `fablyn-designer`. The section 2 example above uses the same paths.
+
+## 14. Grid layout, `from`, and the `--me` hint (version 0.3.0)
+
+### 14.1 Facts
+
+`herdr pane split <pane> --direction right|down --ratio r` keeps share `r` for the pane being split and gives `1 - r` to the new pane (verified live: ratio 0.333 left the original pane at one third of the width). `layout.apply` exists only on the socket, builds a fresh tab and does not preserve running processes, so it is not used.
+
+### 14.2 `[layout] mode`
+
+```toml
+[layout]
+mode    = "grid"     # chain (default, the behaviour of sections 2 and 4.1) | grid
+columns = 2          # grid only, optional; default ceil(sqrt(number of seats to place))
+direction = "right"  # chain: default split direction. grid: direction of the first split off the anchor
+ratio   = 0.5        # chain: default ratio. grid: share the anchor keeps when it is not a seat pane
+```
+
+Grid mode places the seats that this run creates panes for as an even grid, column-major in file order: `columns` columns of equal width; column `j` holds `R_j` rows of equal height, with rows distributed evenly and the extra rows going to the first columns (4 seats → 2×2; 3 seats in 2 columns → 2 + 1; 5 seats → 3 columns, 2 + 2 + 1).
+
+The grid area is:
+
+- the root pane when the plugin created the workspace in this run (seat 1 takes the first cell);
+- otherwise a new pane split from the anchor (the caller's pane, or the first pane of the labelled workspace's active tab) with `[layout] direction` and `ratio`, so with `--me` the orchestrator keeps `ratio` of the tab and the other seats form the grid in the rest.
+
+Building the grid with chained splits: the column heads are made by splitting the previous head `right` with ratio `1/(columns remaining including this one)`, and each column's rows by splitting the previous cell `down` with ratio `1/(rows remaining including this one)`. This yields equal cells regardless of the seat count.
+
+Per-seat `split` and `ratio` are ignored in grid mode with a warning. When only some seats need panes in a run (others are live or adopted), grid mode still computes the grid for the seats being placed, from the anchor; if a previous run already placed seats, the new ones are appended with the chain rule from the last placed seat's pane. `--dry-run` prints every split with its ratio.
+
+### 14.3 Per-seat `from`
+
+In chain mode a seat may set `from = "<seat name>"` to split from that seat's pane instead of the previous seat's. The named seat must be earlier in the file; validation rejects anything else. Ignored in grid mode with a warning.
+
+### 14.4 `--me` when the caller is not an agent
+
+When `--me NAME` finds no agent in the caller's pane, the message says so and adds: `start NAME as a seat instead with \`herdr-fleet up NAME\`, or start a NAME-kind agent in this pane first and run --me from inside it`. The run continues with the other seats as before (exit 3).
+
+Version 0.3.0. The Fablyn example sets `mode = "grid"`.
