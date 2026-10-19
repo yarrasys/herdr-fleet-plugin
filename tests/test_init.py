@@ -16,6 +16,7 @@ import unittest
 
 import fake_herdr
 from support import CALLER_PANE, CALLER_WS, FleetCase
+from herdr_fleet import __version__
 from herdr_fleet.cli import main
 from herdr_fleet.fleetfile import NAME_RE, load_fleet
 from herdr_fleet.scaffold import EXAMPLES_DIR, SKIP_NAMES, seat_name
@@ -171,9 +172,9 @@ class Examples(InitCase):
         for rel in shipped:
             self.assertEqual(self.read(project, rel), self.read(source, rel), rel)
             self.assertIn("created     %s" % rel.replace(os.sep, "/"), out)
-        self.assertFalse(os.path.exists(os.path.join(project, ".herdr", "kickoff")))  # no starter files
+        self.assertEqual(out.count("created     "), len(shipped))  # the example only, no starter files
         fleet = load_fleet(os.path.join(project, ".herdr", "fleet.toml"))
-        self.assertEqual([s.name for s in fleet.seats], ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"])
+        self.assertEqual([s.name for s in fleet.seats], ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer", "fablyn-designer"])
 
     def test_unknown_example_exits_2_and_lists_the_examples(self):
         project = self.mkdir("project")
@@ -257,7 +258,7 @@ class Pointers(InitCase):
         with contextlib.redirect_stdout(out):
             code = main(["--version"], env=self.env)
         self.assertEqual(code, 0)
-        self.assertEqual(out.getvalue().strip(), "herdr-fleet 0.2.0")
+        self.assertEqual(out.getvalue().strip(), "herdr-fleet %s" % __version__)
 
     def test_no_fleet_file_points_at_init(self):
         empty = self.mkdir("empty")

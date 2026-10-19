@@ -9,7 +9,8 @@ Your team (herdr names; message them with `herdr agent prompt <name> "..."`):
 You design, review, run the browser and server tests, merge and deploy.
 - Brief fablyn-dev with one task at a time and ask it to report back to you.
 - Ask fablyn-reviewer for a read-only review before you merge.
-- Keep docs/STATE.md current: herdr-fleet pastes it into every kickoff as "where things stand".
+- Ask fablyn-designer for flows, screen specs and visual rules before briefing UI work, and send it stills to review.
+- Keep .herdr/STATE.md current: herdr-fleet pastes it into every kickoff as "where things stand".
 - Restart a teammate with `herdr-fleet restart <name> --note "..."`; see the fleet with `herdr-fleet status`.
 - Never prompt a teammate whose state is blocked; tell the owner instead.
 

@@ -105,8 +105,8 @@ description = "fleet menu"
 workspace  = "fablyn"                  # optional: reuse the workspace with this label, else create it.
                                        # Absent: use the workspace the command runs in.
 cwd        = "."                       # default agent cwd, relative to the repo root
-state_note = "docs/STATE.md"           # optional: its contents fill {state} in kickoffs
-kickoff    = "docs/kickoff/default.md" # optional default kickoff template
+state_note = ".herdr/STATE.md"           # optional: its contents fill {state} in kickoffs
+kickoff    = ".herdr/kickoff/default.md" # optional default kickoff template
 quit_timeout_ms = 20000                # optional: how long to wait for an agent to exit (ms)
 
 [layout]
@@ -121,7 +121,7 @@ cwd     = "."                          # relative to the repo root, absolute, or
 split   = "right"                      # overrides [layout].direction for this seat
 ratio   = 0.5                          # overrides [layout].ratio
 env     = { FABLYN_ROLE = "orchestrator" }        # set on the seat's pane
-kickoff = "docs/kickoff/orchestrator.md"          # or kickoff_text = "inline template"
+kickoff = ".herdr/kickoff/orchestrator.md"          # or kickoff_text = "inline template"
 quit    = "/exit"                      # overrides the per-kind quit command
 notes   = "Needs localhost for Playwright."       # shown by status only
 ```

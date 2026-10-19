@@ -27,8 +27,8 @@ Invoking directory: for the CLI, the current directory. For a manifest action or
 workspace  = "fablyn"            # optional: reuse the workspace with this label, else create it.
                                  # Absent: use the workspace the command was invoked from.
 cwd        = "."                 # optional default agent cwd, relative to the repo root. Default ".".
-state_note = "docs/STATE.md"     # optional: file the orchestrator keeps; its contents fill {state}.
-kickoff    = "docs/kickoff/default.md"   # optional default kickoff template (path, relative to repo root)
+state_note = ".herdr/STATE.md"     # optional: file the orchestrator keeps; its contents fill {state}.
+kickoff    = ".herdr/kickoff/default.md"   # optional default kickoff template (path, relative to repo root)
 
 [layout]
 direction = "right"              # default split direction between consecutive seats: right | down
@@ -42,7 +42,7 @@ cwd     = "."                    # optional, relative to repo root, or absolute,
 split   = "right"                # optional, overrides [layout].direction for this seat
 ratio   = 0.5                    # optional
 env     = { FABLYN_ROLE = "orchestrator" }  # optional, injected with --env on the pane
-kickoff = "docs/kickoff/orchestrator.md"    # optional template path; or kickoff_text = "inline"
+kickoff = ".herdr/kickoff/orchestrator.md"    # optional template path; or kickoff_text = "inline"
 quit    = "/exit"                # optional override of the per-kind quit command
 notes   = "Needs localhost for Playwright and the Miniflare vitest files."  # shown in status only
 
@@ -269,7 +269,7 @@ herdr_fleet/
   _vendor/tomli/  # vendored, with its LICENSE
 tests/            # unittest; a fake `herdr` script driven by scenario files, so no live herdr is needed
 examples/fablyn/.herdr/fleet.toml
-examples/fablyn/docs/kickoff/*.md
+examples/fablyn/.herdr/kickoff/*.md
 docs/design.md docs/requirements.md docs/survey.md docs/testing.md
 README.md LICENSE AGENTS.md
 ```
@@ -322,7 +322,7 @@ Installing the plugin installs only the plugin; the fleet file is per repository
   - `.herdr/kickoff/default.md`: the built-in default template from section 3, with a comment line explaining the placeholders.
   - `.herdr/STATE.md`: one line, `Where things stand: (nothing yet).`
   - `.herdr/.gitignore`: `fleet.state.json`.
-- **`--example fablyn`** copies the whole `examples/fablyn` tree instead (`.herdr/fleet.toml`, `docs/kickoff/*.md`, `docs/STATE.md`), paths as shipped. Unknown example names exit 2 and list the available ones.
+- **`--example fablyn`** copies the whole `examples/fablyn` tree instead (`.herdr/fleet.toml`, `.herdr/kickoff/*.md`, `.herdr/STATE.md`), paths as shipped. Unknown example names exit 2 and list the available ones.
 - **Never overwrites.** Each file is reported as `created`, `kept` (already existed, left untouched) or, with `--force`, `overwritten`. Directories are created as needed.
 - `init` runs no herdr command at all and does not require `HERDR_ENV`; it is pure file writing. Exit 0 when every file is created or kept, 1 when a write failed, 2 on usage errors.
 - `--notify` (set by the manifest action) sends one notification listing the files created, or the failure, through `herdr notification show`; outside herdr it is skipped like every other notification.
@@ -352,3 +352,7 @@ Version 0.2.0 in `herdr-plugin.toml` and `herdr_fleet/__init__.py`.
 - The `init` action exits 2 with a hint to run `init DIR` when the context JSON carries no `focused_pane_cwd`; it never falls back to `pane get`.
 - `DIR` must exist. `--example` skips `.DS_Store` and `fleet.state.json`. Writes are atomic with mode 0644.
 - The "run `herdr-fleet init`" pointer is added only when discovery fails, not when an explicit `--file` path is missing.
+
+### 13.5 Version 0.2.1
+
+Everything fleet-related lives under `.herdr/`: the shipped Fablyn example keeps its kickoff templates in `.herdr/kickoff/` and its state note at `.herdr/STATE.md`, like the plain starter, so `init --example fablyn` writes nothing outside `.herdr/`. The example gains a fourth seat, `fablyn-designer`. The section 2 example above uses the same paths.

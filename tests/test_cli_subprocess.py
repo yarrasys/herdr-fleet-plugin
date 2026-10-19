@@ -47,7 +47,7 @@ class Subprocess(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
     def test_doctor_on_the_example(self):
-        proc = self.run_bin("doctor", cwd=os.path.join(EXAMPLE, "docs"))
+        proc = self.run_bin("doctor", cwd=os.path.join(EXAMPLE, ".herdr", "kickoff"))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("ok    fleet file: %s" % os.path.join(EXAMPLE, ".herdr", "fleet.toml"), proc.stdout)
         self.assertIn("ok    kickoff fablyn-reviewer", proc.stdout)
