@@ -18,7 +18,7 @@ Requirements: herdr 0.9.4 or newer, `python3` 3.8 or newer, Linux or macOS. No b
 From GitHub (the repository is tagged `herdr-plugin` for the marketplace):
 
 ```bash
-herdr plugin install yarrasys/herdr-fleet
+herdr plugin install yarrasys/herdr-fleet-plugin
 ```
 
 Or link a local checkout while developing:
