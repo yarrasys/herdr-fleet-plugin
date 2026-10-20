@@ -306,6 +306,12 @@ class ProcessInfo(unittest.TestCase):
         self.assertEqual(quit_command(seat(), "claude", {"claude": "/q"}), "/q")
         self.assertIsNone(quit_command(seat(kind="amp"), "amp", {}))
 
+    def test_agy_quits_with_slash_exit_by_default(self):
+        # verified live 21 Oct 2026: herdr 0.9.5, agy 1.4.3, `/exit` through agent prompt
+        self.assertEqual(quit_command(seat(kind="agy"), "agy", {}), "/exit")
+        self.assertEqual(quit_command(seat(kind="agy", quit="/bye"), "agy", {}), "/bye")
+        self.assertEqual(quit_command(seat(kind="agy"), "agy", {"agy": "/q"}), "/q")
+
 
 if __name__ == "__main__":
     unittest.main()

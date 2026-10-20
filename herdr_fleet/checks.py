@@ -174,11 +174,23 @@ def _log_entries(ctx: Ctx) -> List[Dict]:
     return entries
 
 
+def startup_label(seat: Dict) -> str:
+    """STATE suffix for a seat flagged ``blocked_at_startup`` (never briefed): still
+    blocked, or past the prompt and waiting for ``kickoff`` (design 16.12)."""
+    if not seat.get("blocked_at_startup"):
+        return ""
+    if seat["state"] == "blocked":
+        return " (blocked at startup)"
+    if seat["state"] in ("idle", "done", "working"):
+        return " (kickoff pending)"
+    return ""
+
+
 def render_status(data: Dict, home: Optional[str] = None) -> str:
     header = ("SEAT", "KIND", "LIVE", "PANE", "STATE", "CWD", "BRANCH", "DRIFT", "NOTES")
     rows = []
     for s in data["seats"]:
-        state = s["state"] + (" (blocked at startup)" if s.get("blocked_at_startup") and s["state"] != "absent" else "")
+        state = s["state"] + startup_label(s)
         rows.append((s["name"], s["kind"], s["live_kind"] or "-", s["pane_id"] or "-", state,
                      shorten(s.get("cwd") or "", home) or "-", s.get("branch") or "",
                      "; ".join((["adopted"] if s.get("adopted") else []) + s["drift"]) or "-", s["notes"] or ""))

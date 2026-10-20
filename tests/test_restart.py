@@ -27,6 +27,31 @@ class Restart(LiveFleet):
         # the quit procedure polled agent get on the pane, then checked the shell
         self.assertIn(["agent", "get", "w2:p2"], self.argvs("agent", "get"))
 
+    def test_agent_not_ready_that_clears_by_itself_is_briefed_once(self):
+        self.world["behaviors"]["start_not_ready_transient"] = {"fablyn-dev": 2}
+        code, out, err = self.run_cli("restart", "fablyn-dev")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.prompts_to("fablyn-dev")[0], "/exit")
+        kickoffs = self.prompts_to("fablyn-dev")[1:]
+        self.assertEqual(len(kickoffs), 1)
+        self.assertIn("on restart.", kickoffs[0])
+        entry = self.read_state()["agents"]["fablyn-dev"]
+        self.assertFalse(entry["blocked_at_startup"])
+        self.assertTrue(entry["last_kickoff_at"])
+        self.assertNotIn("blocked at startup", out)
+        self.assertEqual(self.world["notifications"], [])
+        # between the agent_not_ready start and the first idle answer only agent get ran
+        calls = self.calls()
+        start = next(i for i, c in enumerate(calls) if c["argv"][:2] == ["agent", "start"])
+        self.assertNotEqual(calls[start]["exit"], 0)
+        after = [(i, c) for i, c in enumerate(calls) if i > start]
+        ready = next(i for i, c in after if c["argv"] == ["agent", "get", "w2:p2"] and c["info"].get("status") == "idle")
+        between = [c["argv"][:2] for i, c in after if i < ready]
+        self.assertEqual(between, [["agent", "get"], ["agent", "get"]])
+        prompts = [i for i, c in after if c["argv"][:2] == ["agent", "prompt"]]
+        self.assertEqual(len(prompts), 1)
+        self.assertGreater(prompts[0], ready)
+
     def test_codex_quits_with_slash_quit(self):
         code, out, _ = self.run_cli("restart", "fablyn-reviewer")
         self.assertEqual(code, 0, out)

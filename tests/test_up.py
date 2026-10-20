@@ -281,6 +281,13 @@ class UpStartupProblems(FleetCase):
         code, out, _ = self.run_cli("up")
         self.assertEqual(code, 3, out)
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        # still blocked for the whole start budget: polled with agent get, then given up on
+        pane = self.read_state()["agents"]["fablyn-dev"]["pane_id"]
+        polls = [c for c in self.calls() if c["argv"] == ["agent", "get", pane]]
+        self.assertGreater(len(polls), 1)
+        self.assertEqual({c["info"].get("status") for c in polls}, {"blocked"})
+        self.assertGreaterEqual(self.clock.slept, 10.0)
+        self.assertLess(self.clock.slept, 10.6)
         self.assertEqual(len(self.prompts_to("fablyn-reviewer")), 1)
         entry = self.read_state()["agents"]["fablyn-dev"]
         self.assertTrue(entry["blocked_at_startup"])
@@ -293,6 +300,51 @@ class UpStartupProblems(FleetCase):
         self.assertEqual(code, 3)
         self.assertIn("never briefed", out)
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
+
+    def test_agent_not_ready_that_clears_by_itself_counts_as_started(self):
+        # live (herdr 0.9.5, agy 1.4.3): the first launch answered agent_not_ready over a
+        # one-time notice, yet agent get showed idle within a second; nobody answered anything
+        self.world["behaviors"]["start_not_ready_transient"] = {"fablyn-dev": 3}
+        code, out, _ = self.run_cli("up")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
+        self.assertIn("on up.", self.prompts_to("fablyn-dev")[0])
+        entry = self.read_state()["agents"]["fablyn-dev"]
+        self.assertFalse(entry["blocked_at_startup"])
+        self.assertTrue(entry["last_kickoff_at"])
+        self.assertEqual([n for n in self.world["notifications"] if "fablyn-dev" in n["title"]], [])
+        self.assertNotIn("blocked at startup", out)
+        # read-only polls only: nothing reached the agent before agent get answered idle
+        calls = self.calls()
+        pane = entry["pane_id"]
+        start = next(i for i, c in enumerate(calls) if c["argv"][:3] == ["agent", "start", "fablyn-dev"])
+        self.assertNotEqual(calls[start]["exit"], 0)
+        polls = [(i, c["info"].get("status")) for i, c in enumerate(calls) if c["argv"] == ["agent", "get", pane]]
+        self.assertEqual([status for _, status in polls[:4]], ["blocked", "blocked", "blocked", "idle"])
+        ready = polls[3][0]
+        prompts = [i for i, c in enumerate(calls) if c["argv"][:2] == ["agent", "prompt"]]
+        self.assertTrue(prompts)
+        self.assertTrue(all(i > ready for i in prompts), "a prompt was sent before agent get answered idle")
+        self.assertAlmostEqual(self.clock.slept, 0.75)
+
+    def test_agent_not_ready_then_working_counts_as_started(self):
+        # past startup but already busy: started, and the kickoff follows the normal
+        # safe_prompt rules (a working agent is not briefed, nothing is sent)
+        working = {"id": "cli:agent:get", "result": {"type": "agent_info", "agent": {
+            "agent": "claude", "agent_status": "working", "name": "fablyn-dev", "pane_id": "w2:p101"}}}
+        self.world["behaviors"]["start_not_ready"] = ["fablyn-dev"]
+        self.world["canned"] = [{"prefix": ["agent", "get", "w2:p101"], "times": 1, "stdout": working},
+                                {"prefix": ["agent", "get", "fablyn-dev"], "times": 1, "stdout": working}]
+        self.fleet_ws()
+        code, out, _ = self.run_cli("up", "fablyn-dev")
+        self.assertEqual(code, 3, out)
+        entry = self.read_state()["agents"]["fablyn-dev"]
+        self.assertEqual(entry["pane_id"], "w2:p101")  # the pane the canned answers name
+        self.assertIn("fablyn-dev: started - in w2:p101", out)
+        self.assertIn("agent fablyn-dev is working; nothing sent", out)
+        self.assertFalse(entry["blocked_at_startup"])
+        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        self.assertEqual(self.world["notifications"], [])
 
     def test_other_start_errors_surface_code_and_message(self):
         self.world["behaviors"]["start_errors"] = {"fablyn-dev": {"code": "agent_start_failed", "message": "boom"}}

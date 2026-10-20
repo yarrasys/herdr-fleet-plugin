@@ -13,7 +13,10 @@ acts, writes it back and appends one JSON line to the call log (env
 - Stateful simulation: workspace/pane/agent commands behave like herdr 0.9.4
   (JSON shapes copied from the live binary; as live, ``pane get``/``pane list``
   records never carry the agent ``name``, only ``agent get``/``agent list`` do). Behaviours: ``start_not_ready``
-  (names), ``start_errors`` ({name: {code, message}}), ``split_busy`` (n
+  (names that answer ``agent_not_ready`` and stay blocked), ``start_not_ready_transient``
+  ({name: n}: ``agent_not_ready``, then the first n ``agent get`` calls for it
+  answer blocked and later ones idle, as agy did on its first launch under
+  herdr 0.9.5), ``start_errors`` ({name: {code, message}}), ``split_busy`` (n
   ``agent_pane_busy`` answers for a fresh split), ``quit_polls`` (``agent
   get`` keeps succeeding n times after a quit command, then the agent is
   gone), ``ignore_quit`` (names that never exit), ``linger_polls`` (n
@@ -25,9 +28,10 @@ acts, writes it back and appends one JSON line to the call log (env
   a cross-workspace move leaves the old id as an alias that ``pane current
   --current`` (resolved from the caller's HERDR_PANE_ID) still follows.
 - The log records facts the safety tests assert on: the target's state at
-  every ``agent prompt``, whether a pane was at a shell at every ``agent
-  start``, and whether a closed pane or workspace was created by a command
-  in this world (``split``/``workspace create``) rather than set up by a test.
+  every ``agent prompt``, the state every ``agent get`` answered, whether a
+  pane was at a shell at every ``agent start``, and whether a closed pane or
+  workspace was created by a command in this world (``split``/``workspace
+  create``) rather than set up by a test.
 
 Use it in-process (``Fake(world, log)(argv)``) or as a program.
 """
@@ -267,6 +271,14 @@ class Sim:
                 self._exit_agent(pid)
                 return _err("agent_not_found", "no agent for %s" % args[0])
             p["quitting"] -= 1
+        agent = p["agent"]
+        if "unblock_after" in agent:  # start_not_ready_transient: blocked for n reads, then idle
+            if agent["unblock_after"] > 0:
+                agent["unblock_after"] -= 1
+            else:
+                del agent["unblock_after"]
+                agent["agent_status"] = "idle"
+        self.info["status"] = agent["agent_status"]
         return _ok({"agent": self._agent_record(pid), "type": "agent_info"}, "cli:agent:get")
 
     def _agent_start(self, args: List[str]) -> Result:
@@ -288,8 +300,11 @@ class Sim:
         error = self.b.get("start_errors", {}).get(name)
         if error:
             return _err(error["code"], error["message"])
-        blocked = name in self.b.get("start_not_ready", [])
+        transient = self.b.get("start_not_ready_transient", {}).get(name)
+        blocked = name in self.b.get("start_not_ready", []) or transient is not None
         p["agent"] = {"agent": kind, "agent_status": "blocked" if blocked else "idle", "name": name}
+        if transient is not None:
+            p["agent"]["unblock_after"] = int(transient)  # internal; never part of a response
         p["procs"] = [agent_proc(kind, rest, p["cwd"], self.b.get("argv_absent", False))]
         if blocked:
             return _err("agent_not_ready", "agent %s is blocked during startup" % name)

@@ -45,6 +45,36 @@ class Status(LiveFleet):
         self.assertEqual({r["kind"]: r["status"] for r in data["integrations"]},
                          {"claude": "current", "codex": "current"})
 
+    def test_startup_labels_follow_the_live_state(self):
+        self.write_fleet(self.read_fleet() + '\n[[agents]]\nname = "helper"\nkind = "pi"\n')
+        state = self.read_state()
+        for name in ("fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"):
+            state["agents"][name]["blocked_at_startup"] = True
+        state["agents"]["helper"] = {"pane_id": None, "kind": "pi", "blocked_at_startup": True}
+        self.write_state(state)
+        self.status_of("w2:p1", "blocked")
+        self.status_of("w2:p3", "unknown")
+        code, out, _ = self.run_cli("status")
+        self.assertEqual(code, 0, out)
+        rows = {l.split()[0]: l for l in out.splitlines()[2:6]}
+        self.assertIn("blocked (blocked at startup)", rows["fablyn-orchestrator"])
+        self.assertIn("idle (kickoff pending)", rows["fablyn-dev"])
+        self.assertNotIn("(", rows["fablyn-reviewer"])  # unknown: no label
+        self.assertNotIn("(", rows["helper"])  # absent: no label
+        for state_name in ("working", "done"):
+            self.status_of("w2:p2", state_name)
+            out = self.run_cli("status")[1]
+            self.assertIn("%s (kickoff pending)" % state_name, out)
+        # the flag alone decides nothing: a seat blocked later in its life is just blocked
+        state = self.read_state()
+        state["agents"]["fablyn-orchestrator"]["blocked_at_startup"] = False
+        self.write_state(state)
+        out = self.run_cli("status")[1]
+        self.assertNotIn("blocked at startup", out)
+        data = json.loads(self.run_cli("status", "--json")[1])
+        self.assertEqual([s["blocked_at_startup"] for s in data["seats"]], [False, True, True, True])
+        self.assertEqual(self.argvs("agent", "prompt"), [])
+
     def test_hold_waits_for_enter(self):
         code, out, _ = self.run_cli("status", "--hold", stdin="\n")
         self.assertEqual(code, 0)
@@ -66,6 +96,15 @@ class Doctor(FleetCase):
                       "ok    fleet file", "ok    kinds: claude, codex", "ok    integration claude",
                       "ok    quit fablyn-reviewer: /quit (codex)", "ok    state file"):
             self.assertIn(check, out)
+
+    def test_agy_seat_has_a_known_quit_command(self):
+        self.write_fleet('[[agents]]\nname = "fleet-agy"\nkind = "agy"\n')
+        self.world["integration"].append("antigravity-cli: current (v4) "
+                                          "(/home/u/.gemini/config/hooks/herdr-agent-state.sh)")
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0, out)
+        self.assertIn("ok    quit fleet-agy: /exit (agy)", out)
+        self.assertIn("ok    integration agy", out)
 
     def test_problems_are_reported_without_changing_anything(self):
         self.write_fleet('state_note = "docs/STATE.md"\n[[agents]]\nname = "a"\nkind = "amp"\n'

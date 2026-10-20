@@ -9,7 +9,9 @@
   ``done`` (``send`` alone also allows ``working``; ``blocked`` and ``unknown``
   never); ``agent_prompt_stalled`` and ``timeout`` are reported, never resent.
 - ``start_in_pane``: shell check, ``agent start``, retry on ``agent_pane_busy``
-  every 250 ms for up to 10 s, ``agent_not_ready`` reported as blocked.
+  every 250 ms for up to 10 s; after ``agent_not_ready``, read ``agent get``
+  for the rest of the 10 s (``idle``, ``done`` or ``working`` count as started,
+  design 16.12) and only then report blocked. Nothing is sent meanwhile.
 - ``quit_agent``: the per-kind quit command through ``safe_prompt``, then poll
   until the agent is gone and the shell is back, or give up without retrying.
 """
@@ -27,6 +29,7 @@ from herdr_fleet.herdr import Herdr, HerdrError, describe
 
 SHELLS = ("zsh", "bash", "fish", "sh", "nu")
 SETTLED = ("idle", "done")
+STARTED = SETTLED + ("working",)  # after agent_not_ready, these mean the agent got past startup
 POLL_S = 0.25
 START_BUDGET_S = 10.0
 DEFAULT_QUIT_TIMEOUT_MS = 20000
@@ -39,6 +42,7 @@ DEFAULT_QUIT: Dict[str, str] = {
     "opencode": "/exit",
     "copilot": "/exit",
     "pi": "/exit",
+    "agy": "/exit",
 }
 
 QUIT_CONFIG_HINT = ('set `quit = "..."` on the seat in .herdr/fleet.toml, or add the kind under '
@@ -173,7 +177,8 @@ def safe_prompt(herdr: Herdr, target: str, text: str, allow: Sequence[str] = SET
 def start_in_pane(herdr: Herdr, clock: Clock, seat: Seat, pane: str,
                   budget_s: float = START_BUDGET_S) -> Outcome:
     """Start ``seat`` in ``pane`` once the pane is at a shell prompt.
-    status: started | blocked (agent_not_ready) | failed."""
+    status: started | blocked (agent_not_ready and still not ready at the
+    deadline) | failed. The deadline covers busy retries and the ready poll."""
     deadline = clock.monotonic() + budget_s
     while True:
         try:
@@ -186,9 +191,7 @@ def start_in_pane(herdr: Herdr, clock: Clock, seat: Seat, pane: str,
                 return Outcome(True, "started", "in %s" % pane, agent)
             except HerdrError as exc:
                 if exc.code == "agent_not_ready":
-                    return Outcome(False, "blocked",
-                                   "blocked at startup in %s (%s); answer the prompt there, then run "
-                                   "`herdr-fleet kickoff %s`" % (pane, exc.message, seat.name))
+                    return _await_ready(herdr, clock, seat, pane, deadline, exc)
                 if exc.code != "agent_pane_busy":
                     return Outcome(False, "failed", describe(exc))
                 last = describe(exc)
@@ -196,6 +199,27 @@ def start_in_pane(herdr: Herdr, clock: Clock, seat: Seat, pane: str,
             last = "pane %s is not at a shell prompt (foreground: %s)" % (pane, describe_foreground(info))
         if clock.monotonic() >= deadline:
             return Outcome(False, "failed", "%s after %.0f s" % (last, budget_s))
+        clock.sleep(POLL_S)
+
+
+def _await_ready(herdr: Herdr, clock: Clock, seat: Seat, pane: str, deadline: float,
+                 exc: HerdrError) -> Outcome:
+    """After ``agent_not_ready``: the agent is registered but was blocked when herdr
+    gave up waiting. A one-time notice can clear by itself (design 16.12), so read
+    ``agent get`` every POLL_S until the start deadline. Read-only: nothing is
+    sent to the pane. ``idle``/``done``/``working`` count as started; still
+    ``blocked`` (or ``unknown``, or no answer) at the deadline is blocked."""
+    while True:
+        try:
+            agent = herdr.agent_get(pane)
+        except HerdrError:
+            agent = {}
+        if agent.get("agent_status") in STARTED:
+            return Outcome(True, "started", "in %s" % pane, agent)
+        if clock.monotonic() >= deadline:
+            return Outcome(False, "blocked",
+                           "blocked at startup in %s (%s); answer the prompt there, then run "
+                           "`herdr-fleet kickoff %s`" % (pane, exc.message, seat.name))
         clock.sleep(POLL_S)
 
 

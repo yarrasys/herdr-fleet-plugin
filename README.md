@@ -274,7 +274,7 @@ herdr has no stop command, so herdr-fleet sends the kind's quit command with `he
 
 | kind | command |
 | --- | --- |
-| claude, opencode, copilot, pi | `/exit` |
+| claude, opencode, copilot, pi, agy | `/exit` |
 | codex, gemini | `/quit` |
 
 Other kinds need a `quit` on the seat or an entry in `$HERDR_PLUGIN_CONFIG_DIR/config.toml` (that is `~/.config/herdr/plugins/config/yarrasys.fleet/config.toml`; `herdr plugin config-dir yarrasys.fleet` prints the directory). The poll timeout can go there too; `quit_timeout_ms` at the top of the fleet file wins over it.

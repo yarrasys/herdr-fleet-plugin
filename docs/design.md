@@ -99,7 +99,7 @@ Common preconditions: `HERDR_ENV=1` or `HERDR_BIN_PATH` set, else refuse ("not r
 4. For each seat in order, skip if an agent with that name is already live (`herdr agent list`, field `name`). Otherwise:
    - If the state file records a pane and that pane hosts an unnamed live agent of the right kind (a herdr restart resumed it), rename it, record it, and skip the kickoff. If it hosts an agent of another kind, report a conflict and skip the seat.
    - Else ensure a pane: the recorded pane if it exists and is at a shell prompt (section 6), else `herdr pane split <previous seat pane> --direction <split> [--ratio r] --cwd <seat cwd> [--env K=V…] --no-focus` and record `created_pane = true`.
-   - `herdr agent start NAME --kind KIND --pane PANE -- ARGS…`. Retry on `agent_pane_busy` every 250 ms for up to 10 s (a fresh pane's shell may still be printing its rc). On `agent_not_ready` (blocked during startup, typically a trust prompt): record the pane, mark the seat `blocked_at_startup`, notify (section 7), continue; never send anything to it. The user answers the prompt and runs `herdr-fleet kickoff NAME`.
+   - `herdr agent start NAME --kind KIND --pane PANE -- ARGS…`. Retry on `agent_pane_busy` every 250 ms for up to 10 s (a fresh pane's shell may still be printing its rc). On `agent_not_ready` (blocked during startup, typically a trust prompt): record the pane, mark the seat `blocked_at_startup`, notify (section 7), continue; never send anything to it. The user answers the prompt and runs `herdr-fleet kickoff NAME`. After `agent_not_ready` the plugin first keeps polling `herdr agent get PANE` (read-only) every 250 ms for the rest of the 10 s budget and treats `idle`, `done` or `working` as started, since a one-time notice can clear by itself (section 16.12); only a seat still not ready at the deadline is handled as above.
 5. Send kickoffs (section 3) to every seat started in this run, with `--note` text in `{note}` and `reason = up`, unless `--no-kickoff`.
 6. Print a status table. Exit 0 if every seat is live and briefed, 3 if some were skipped or blocked, 1 on a hard failure.
 
@@ -179,6 +179,7 @@ Default quit commands, overridable per seat (`quit = "..."`) or per kind in `$HE
 | opencode | `/exit` |
 | copilot | `/exit` |
 | pi | `/exit` |
+| agy | `/exit` |
 
 Any other kind without a configured command: refuse to quit, with the config hint.
 
@@ -498,3 +499,14 @@ Invariant 1 extends to `send`: text reaches agents only through `agent prompt`. 
 ### 16.11 Version 0.4.2
 
 Options may appear anywhere on the command line: commands with a name list (`send`, `restart`, `swap`, `kickoff`, `down`, `up`, `state set`) parse with `parse_known_args` and fold the remaining words back into the list in order; `--` still ends options. `send` item rules: without `--file` the last item is the text and at least two items are required (one with `--all`); with `--file` every item is a target.
+
+### 16.12 Version 0.4.3
+
+- **agy quits with `/exit`.** `agy` joins the default quit table (section 6).
+- **A transient `agent_not_ready` counts as started.** After `agent start` answers `agent_not_ready`, `start_in_pane` polls `herdr agent get PANE` every 250 ms until the 10 s start budget (counted from the start of the call, so busy retries use it up too) runs out. It sends nothing meanwhile. `idle` or `done` is a normal start, and the kickoff follows as for a clean start. `working` is also a start; the kickoff then follows the usual `safe_prompt` rules, so a working agent is not briefed. Still `blocked` or `unknown` at the deadline, or no answer from `agent get`, is handled as before: blocked at startup, recorded, notified, never prompted. `restart` and `swap` use the same path.
+- **Status labels.** For a seat flagged `blocked_at_startup`, the STATE column says `(blocked at startup)` only while the live state is `blocked`, `(kickoff pending)` when it is `idle`, `done` or `working`, and nothing when it is `unknown` or `absent`. A seat without the flag gets no label, whatever its state. `status --json` keeps the `blocked_at_startup` boolean unchanged.
+
+Facts learned live (21 Oct 2026; herdr 0.9.5, Antigravity CLI `agy` 1.4.3):
+
+- A seat with `kind = "agy"` works end to end. `up` took 4.1 s and the kickoff was delivered through `agent prompt` and answered. `status` shows the integration row for kind `agy` under the integration name `antigravity-cli` (hook v4, `~/.gemini/config/hooks/herdr-agent-state.sh`). `down` quit it with `/exit` through `agent prompt` in 1.2 s, with the shell back in the pane.
+- On the first launch of agy on a machine, `herdr agent start` answered `agent_not_ready` ("agent fleet-agy is blocked during startup and is not ready for prompts"). Yet `herdr agent get` showed `agent_status: idle, interactive_ready: true` within a second of `up` returning, and nobody had answered anything: agy had shown a one-time dismissable "what's new" notice, not a permission prompt. 0.4.2 reported the seat blocked at startup, skipped its kickoff, and `status` kept printing `idle (blocked at startup)` until the next kickoff. The second and third starts returned normally, with the agent idle at once.
