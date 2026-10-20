@@ -23,6 +23,10 @@ acts, writes it back and appends one JSON line to the call log (env
   process-info answers that still show a non-shell process after exit),
   ``prompt_errors`` ({name: code}), ``wait_status`` ({name: status}),
   ``argv_absent`` (agent processes carry ``cmdline`` but no ``argv``).
+- ``agent get``/``agent list`` records carry ``agent_session`` only when a test set
+  one with ``put_agent(..., session=...)`` (live herdr 0.9.5 shape, e.g.
+  ``claude_session(uuid)``; ``None`` gives ``"agent_session": null``); by
+  default the key is absent, as for an agy agent started by hand.
 - ``pane move`` keeps the pane's process and gives it a new workspace-qualified
   id, answering ``result.move_result.pane`` and ``previous_pane_id`` like live herdr;
   a cross-workspace move leaves the old id as an alias that ``pane current
@@ -99,11 +103,23 @@ def agent_proc(kind: str, args: List[str], cwd: str, argv_absent: bool = False) 
     return proc
 
 
+SESSION_SOURCES = {"claude": "herdr:claude", "codex": "herdr:codex", "agy": "herdr:antigravity_cli"}
+UNSET = object()
+
+
+def claude_session(value: str, kind: str = "claude") -> Dict:
+    """An ``agent_session`` exactly as live herdr 0.9.5 reports it."""
+    return {"agent": kind, "kind": "id", "source": SESSION_SOURCES.get(kind, "herdr:" + kind), "value": value}
+
+
 def put_agent(world: Dict, pane: str, kind: str, name: Optional[str] = None, status: str = "idle",
-              args: Optional[List[str]] = None) -> None:
-    """Place a running agent in a pane (as if started earlier or resumed by herdr)."""
+              args: Optional[List[str]] = None, session: object = UNSET) -> None:
+    """Place a running agent in a pane (as if started earlier or resumed by herdr).
+    ``session`` sets ``agent_session`` on its agent records (absent by default)."""
     record = world["panes"][pane]
     record["agent"] = {"agent": kind, "agent_status": status, "name": name}
+    if session is not UNSET:
+        record["agent"]["agent_session"] = session
     record["procs"] = [agent_proc(kind, list(args or []), record["cwd"],
                                   world["behaviors"].get("argv_absent", False))]
 
@@ -190,9 +206,11 @@ class Sim:
         """``agent get``/``agent list`` records: like a pane record plus ``name`` when named."""
         rec = self._pane_record(pid)
         rec.pop("scroll", None)
-        name = self.w["panes"][pid]["agent"].get("name")
-        if name:
-            rec["name"] = name
+        agent = self.w["panes"][pid]["agent"]
+        if agent.get("name"):
+            rec["name"] = agent["name"]
+        if "agent_session" in agent:  # herdr 0.9.5; absent unless a test set it
+            rec["agent_session"] = agent["agent_session"]
         return rec
 
     def _resolve(self, target: str) -> Optional[str]:

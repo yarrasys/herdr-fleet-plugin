@@ -1,15 +1,18 @@
-"""status (design 4.2), doctor (4.7), the menu and ui (section 8), and how
-the invoking directory and caller pane are found (section 2)."""
+"""status (design 4.2, 17.2), doctor (4.7, 17.3), the menu and ui (section 8),
+and how the invoking directory and caller pane are found (section 2)."""
 
 from __future__ import annotations
 
 import io
 import json
 import os
+import shutil
+import subprocess
 import unittest
 
 import fake_herdr
-from support import CALLER_PANE, FleetCase, LiveFleet
+from support import CALLER_PANE, GIT, FleetCase, GitCase, LiveFleet
+from herdr_fleet import gitinfo
 from herdr_fleet.cli import main
 from herdr_fleet.context import context_cwd, context_id, parse_context
 
@@ -306,6 +309,126 @@ class InstallCli(FleetCase):
             handle.write("x")
         self.assertEqual(self.run_cli("install-cli", "--dir", target)[0], 1)
         self.assertEqual(self.calls(), [])
+
+
+@unittest.skipUnless(GIT, "git is not installed")
+class FleetFileVsGit(GitCase):
+    """The fleet file is committed on main in GitCase.setUp (the first commit includes .herdr/fleet.toml)."""
+
+    def doctor_line(self):
+        code, out, _ = self.run_cli("doctor")
+        lines = [l for l in out.splitlines() if "fleet file vs git" in l]
+        self.assertEqual(len(lines), 1, out)
+        return code, lines[0]
+
+    def test_identical(self):
+        self.set_origin(self.git("rev-parse", "HEAD"))
+        code, line = self.doctor_line()
+        self.assertEqual(code, 0)
+        self.assertEqual(line, "ok    fleet file vs git: committed, same as origin/main")
+
+    def test_no_origin(self):
+        code, line = self.doctor_line()
+        self.assertEqual(line, "ok    fleet file vs git: committed, same as HEAD; no default branch found to "
+                               "compare with")
+
+    def test_untracked_and_origin_copy_differs(self):  # emberline's case
+        self.set_origin(self.git("rev-parse", "HEAD"))
+        self.git("checkout", "-q", "-b", "docs/render-launch-recovery-receipt")
+        self.git("rm", "-q", "--cached", ".herdr/fleet.toml")
+        self.git("commit", "-q", "-m", "untrack")
+        before = self.read_fleet().count("\n")
+        self.write_fleet(self.read_fleet() + "\n[[contacts]]\nname = \"winner\"\nmatch = { kind = \"claude\" }\n"
+                                             "note = \"customer\"\n\n\n")
+        code, line = self.doctor_line()
+        self.assertEqual(code, 0)  # drift is never a fail
+        self.assertEqual(line, "warn  fleet file vs git: untracked in this checkout (branch "
+                               "docs/render-launch-recovery-receipt); origin/main copy differs: +7/-0 lines, "
+                               "first at line %d" % (before + 1))
+
+    def test_modified_since_head(self):
+        self.set_origin(self.git("rev-parse", "HEAD"))
+        text = self.read_fleet()
+        self.write_fleet(text.replace('kind = "codex"', 'kind = "codex"\nnotes = "a"\nquit = "/quit"'))
+        line_no = text.splitlines().index('kind = "codex"') + 2
+        code, line = self.doctor_line()
+        self.assertEqual(line, "warn  fleet file vs git: modified since HEAD: +2/-0 lines, first at line %d; "
+                               "origin/main copy differs: +2/-0 lines, first at line %d" % (line_no, line_no))
+
+    def test_no_copy_on_origin(self):
+        first = self.git("rev-parse", "HEAD")
+        self.git("rm", "-q", "--cached", ".herdr/fleet.toml")
+        self.git("commit", "-q", "-m", "untrack")
+        self.set_origin(self.git("rev-parse", "HEAD"))
+        self.git("reset", "-q", first)  # tracked again in this checkout; origin/main has no copy
+        code, line = self.doctor_line()
+        self.assertEqual(line, "warn  fleet file vs git: no copy on origin/main")
+
+    def test_not_a_git_repository(self):
+        shutil.rmtree(os.path.join(self.repo, ".git"))
+        code, line = self.doctor_line()
+        self.assertEqual(line, "skip  fleet file vs git: not a git repository")
+
+    def test_git_missing(self):
+        self.env["PATH"] = os.path.join(self.tmp, "no-git-here")
+        self.assertEqual(gitinfo.is_work_tree(self.repo, self.env), False)
+        self.assertEqual(self.doctor_line()[1], "skip  fleet file vs git: not a git repository")
+
+    def test_doctor_runs_no_new_herdr_command(self):
+        self.doctor_line()
+        read_only = (["--version"], ["agent", "list"], ["agent"], ["integration", "status"], ["plugin", "config-dir"])
+        self.assertEqual([c["argv"] for c in self.calls() if c["argv"][:2] not in read_only], [])
+
+    def test_line_diff(self):
+        self.assertEqual(gitinfo.line_diff("a\nb\nc\n", "a\nB\nc\nd\n"), (2, 1, 2))
+        self.assertEqual(gitinfo.line_diff("a\n", "a\n"), (0, 0, None))
+
+
+@unittest.skipUnless(GIT, "git is not installed")
+class StatusFolding(LiveFleet):
+    """CWD and BRANCH fold into the header when every live seat shares them (17.2)."""
+
+    def test_same_cwd_and_branch_fold(self):
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": self.tmp, "GIT_CONFIG_NOSYSTEM": "1"}
+        for args in (["init", "-q"], ["symbolic-ref", "HEAD", "refs/heads/main"],
+                     ["-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", "i"]):
+            subprocess.run([GIT, "-C", self.repo] + args, env=env, check=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE)
+        out = self.run_cli("status")[1]
+        lines = out.splitlines()
+        self.assertTrue(lines[0].endswith("  cwd ~/repo  branch main"), lines[0])
+        self.assertNotIn("CWD", lines[1])
+        self.assertNotIn("BRANCH", lines[1])
+        data = json.loads(self.run_cli("status", "--json")[1])
+        self.assertEqual({(s["cwd"], s["branch"]) for s in data["seats"]}, {(self.repo, "main")})
+
+
+class StatusFoldingRules(LiveFleet):
+    def test_blank_branch_folds_away_and_cwd_folds(self):
+        lines = self.run_cli("status")[1].splitlines()
+        self.assertTrue(lines[0].endswith("  cwd ~/repo"), lines[0])
+        self.assertEqual(lines[1].split(), ["SEAT", "KIND", "LIVE", "PANE", "STATE", "DRIFT", "NOTES"])
+
+    def test_a_different_cwd_keeps_the_column(self):
+        other = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(other)
+        self.world["panes"]["w2:p3"]["cwd"] = other
+        lines = self.run_cli("status")[1].splitlines()
+        self.assertIn("CWD", lines[1])
+        self.assertNotIn("cwd ", lines[0])
+        self.assertIn("~/elsewhere", [l for l in lines if l.startswith("fablyn-reviewer")][0])
+
+    def test_absent_seats_do_not_count_and_one_live_seat_keeps_columns(self):
+        self.world["panes"]["w2:p3"]["agent"] = None  # reviewer absent: its configured cwd is ignored
+        self.write_fleet(self.read_fleet().replace('name = "fablyn-reviewer"\nkind = "codex"',
+                                                   'name = "fablyn-reviewer"\nkind = "codex"\ncwd = "/"'))
+        lines = self.run_cli("status")[1].splitlines()
+        self.assertNotIn("CWD", lines[1])
+        self.world["panes"]["w2:p2"]["agent"] = None  # one live seat left
+        lines = self.run_cli("status")[1].splitlines()
+        self.assertIn("CWD", lines[1])
+        self.assertIn("BRANCH", lines[1])
+        self.assertNotIn("cwd ", lines[0])
 
 
 if __name__ == "__main__":

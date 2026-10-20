@@ -149,5 +149,30 @@ name = "nokind"
         self.assertIn("'zz' is not a kind", errors[0])
 
 
+class Version050Keys(Base):
+    """Design 17.2 and 17.4: per-seat ``worktrees`` globs and ``restart_hint_tokens``."""
+
+    def test_worktrees_globs(self):
+        fleet = load_fleet(self.write('[[agents]]\nname = "a"\nkind = "claude"\n'
+                                      'worktrees = ["/private/tmp/fablyn-*", "~/wt/a-*"]\n'
+                                      '[[agents]]\nname = "b"\nkind = "claude"\n'))
+        self.assertEqual(fleet.seats[0].worktrees, ["/private/tmp/fablyn-*", os.path.expanduser("~/wt/a-*")])
+        self.assertEqual(fleet.seats[1].worktrees, [])
+        self.assertEqual(fleet.warnings, [])
+        for bad in ('"/tmp/x-*"', '["/tmp/x", 3]', '[""]', '["  "]', "true"):
+            self.assertIn("worktrees: must be a list of non-empty strings",
+                          self.errors('[[agents]]\nname = "a"\nkind = "claude"\nworktrees = %s\n' % bad), bad)
+        fleet = load_fleet(self.write('[[agents]]\nname = "a"\nkind = "claude"\nworktrees = ["wt/*"]\n'))
+        self.assertTrue(any("'wt/*' is not an absolute path" in w for w in fleet.warnings), fleet.warnings)
+
+    def test_restart_hint_tokens(self):
+        seat = '[[agents]]\nname = "a"\nkind = "claude"\n'
+        self.assertIsNone(load_fleet(self.write(seat)).restart_hint_tokens)
+        self.assertEqual(load_fleet(self.write("restart_hint_tokens = 450000\n" + seat)).restart_hint_tokens, 450000)
+        for bad in ("0", "-1", '"450k"', "true", "4.5e5"):
+            self.assertIn("restart_hint_tokens: must be a positive integer",
+                          self.errors("restart_hint_tokens = %s\n" % bad + seat), bad)
+
+
 if __name__ == "__main__":
     unittest.main()

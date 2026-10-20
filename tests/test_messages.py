@@ -1,5 +1,6 @@
-"""Messages (design 16.1 to 16.3 and 16.7): send, the log, owed replies, the
-send-only exception to the safety hook, and pane-move lines."""
+"""Messages (design 16.1 to 16.3, 16.7 and 17.1): send, the log, owed replies,
+FYI messages, ack, the send-only exception to the safety hook, and pane-move
+lines."""
 
 from __future__ import annotations
 
@@ -313,10 +314,20 @@ class KickoffsAreLogged(FleetCase):
         self.assertTrue(entries[0]["first_line"].startswith("You are fablyn-orchestrator"))
         self.assertEqual(messages.owed(entries), [])  # kickoffs never create an obligation
 
+    def test_roster_tells_seats_to_send_reports_with_fyi(self):  # design 17.1
+        self.assertEqual(self.run_cli("up")[0], 0)
+        for name in ("fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"):
+            (kickoff,) = self.prompts_to(name)
+            self.assertIn("| fablyn-reviewer | codex |", kickoff)
+            self.assertIn("status reports go with `--fyi`; a message that asks for something does not.", kickoff)
 
-def entry(sender, to, minute, kind="send", first="m"):
-    return {"time": "2026-10-20T10:%02d:00+11:00" % minute, "from": sender, "to": to, "kind": kind,
+
+def entry(sender, to, minute, kind="send", first="m", fyi=False):
+    item = {"time": "2026-10-20T10:%02d:00+11:00" % minute, "from": sender, "to": to, "kind": kind,
             "bytes": 1, "first_line": first}
+    if fyi:
+        item["fyi"] = True
+    return item
 
 
 class Owed(unittest.TestCase):
@@ -351,6 +362,145 @@ class Owed(unittest.TestCase):
         self.assertEqual(messages.first_line("[from a] \n\n  hello world  \nmore"), "hello world")
         self.assertEqual(len(messages.first_line("[from a] " + "x" * 300)), 120)
         self.assertEqual((messages.size_label(999), messages.size_label(3412)), ("999 B", "3.4 KB"))
+
+
+class OwedWithFyiAndAck(unittest.TestCase):
+    """Design 17.1: an FYI never creates an obligation but still settles one; ack settles."""
+
+    def test_fyi_never_owes(self):
+        self.assertEqual(messages.owed([entry("dev", "orch", 1, first="cleanup done", fyi=True)]), [])
+
+    def test_fyi_reply_settles(self):
+        self.assertEqual(messages.owed([entry("orch", "dev", 1, first="task"),
+                                        entry("dev", "orch", 2, first="FYI: committed", fyi=True)]), [])
+
+    def test_a_later_fyi_from_the_asker_keeps_the_ask_open(self):
+        owed = messages.owed([entry("orch", "dev", 1, first="task 4"),
+                              entry("orch", "dev", 2, first="FYI: main is green", fyi=True)])
+        self.assertEqual([(o["from"], o["to"], o["first_line"], o["since"][11:16]) for o in owed],
+                         [("orch", "dev", "task 4", "10:01")])
+
+    def test_ack_settles_and_never_owes(self):
+        self.assertEqual(messages.owed([entry("orch", "dev", 1), entry("dev", "orch", 2, "ack", "ack")]), [])
+        self.assertEqual(messages.owed([entry("dev", "orch", 1, "ack", "ack")]), [])
+        early = messages.owed([entry("dev", "orch", 1, "ack", "ack"), entry("orch", "dev", 2, first="new task")])
+        self.assertEqual([o["first_line"] for o in early], ["new task"])
+        same_minute = messages.owed([entry("orch", "dev", 1), entry("dev", "orch", 1, "ack", "ack")])
+        self.assertEqual(same_minute, [])  # log order decides within the same time
+
+    def test_is_fyi(self):
+        for text in ("FYI: holding", "fyi committed a1b2", "  Fyi: x", "[from the owner] FYI: main is green",
+                     "[from a]   fYi done", "\nFYI: leading newline"):
+            self.assertTrue(messages.is_fyi(text), text)
+        for text in ("FYIs are not this", "fyi-ish", "Not FYI: x", "FYI", "[from a] please FYI: x", "fyi\tx"):
+            self.assertFalse(messages.is_fyi(text), text)
+
+
+class Fyi(LiveFleet):
+    def test_flag_logs_fyi_and_sends_the_text_as_written(self):
+        code, out, _ = self.run_cli("send", "--fyi", "--as", "fablyn-dev", "fablyn-orchestrator", "cleanup done")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.prompts_to("fablyn-orchestrator"), ["[from fablyn-dev] cleanup done"])
+        (item,) = log_entries(self.repo)
+        self.assertIs(item["fyi"], True)
+        self.assertEqual(item["kind"], "send")
+        self.assertEqual(json.loads(self.run_cli("log", "--owed", "--json")[1]), [])
+
+    def test_prefix_marks_fyi_and_other_messages_carry_no_key(self):
+        self.run_cli("send", "--as", "fablyn-dev", "fablyn-orchestrator", "FYI: holding until review")
+        self.run_cli("send", "--as", "fablyn-dev", "fablyn-orchestrator", "fyi committed a1b2c3")
+        self.run_cli("send", "--as", "fablyn-dev", "fablyn-orchestrator", "[from the owner] Fyi: main is green")
+        self.run_cli("send", "--as", "fablyn-dev", "fablyn-orchestrator", "FYIs pile up; can you look?")
+        items = log_entries(self.repo)
+        self.assertEqual([i.get("fyi") for i in items], [True, True, True, None])
+        self.assertNotIn("fyi", items[3])
+        self.assertEqual(self.prompts_to("fablyn-orchestrator")[0], "[from fablyn-dev] FYI: holding until review")
+        owed = json.loads(self.run_cli("log", "--owed", "--json")[1])
+        self.assertEqual([o["first_line"] for o in owed], ["FYIs pile up; can you look?"])
+
+    def test_log_tags_fyi_and_a_report_settles(self):
+        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Task 4: export button")
+        self.run_cli("send", "--fyi", "--as", "fablyn-dev", "fablyn-orchestrator", "Task 4 committed")
+        lines = self.run_cli("log")[1].splitlines()
+        self.assertRegex(lines[0], r"  fablyn-orchestrator → fablyn-dev  \d+  Task 4: export button$")
+        self.assertRegex(lines[1], r"  fablyn-dev → fablyn-orchestrator  \d+  \[fyi\]  Task 4 committed$")
+        self.assertNotIn("awaiting:", self.run_cli("status")[1])
+
+
+class Ack(LiveFleet):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Task 4: export button")
+        self.run_cli("send", "--as", "owner", "fablyn-dev", "please check the deploy")
+        self.run_cli("send", "--as", "fablyn-orchestrator", "caller", "are you there?")
+        self.run_cli("send", "--as", "fablyn-reviewer", "caller", "round 3 ready")
+        self.sent = len(self.argvs("agent", "prompt"))
+
+    def owed_pairs(self):
+        return [(o["from"], o["to"]) for o in json.loads(self.run_cli("log", "--owed", "--json")[1])]
+
+    def test_named_seats_with_as(self):
+        before = len(self.calls())
+        code, out, err = self.run_cli("ack", "--as", "fablyn-dev", "fablyn-orchestrator")
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out.strip(), r"^acked fablyn-orchestrator since \d\d:\d\d \(Task 4: export button\)$")
+        self.assertEqual(len(self.calls()), before)  # with --as, herdr is not asked anything
+        item = log_entries(self.repo)[-1]
+        self.assertEqual({k: v for k, v in item.items() if k != "time"},
+                         {"from": "fablyn-dev", "to": "fablyn-orchestrator", "kind": "ack", "bytes": 0,
+                          "first_line": "ack", "delivery": "logged"})
+        self.assertRegex(item["time"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d$")
+        self.assertNotIn(("fablyn-orchestrator", "fablyn-dev"), self.owed_pairs())
+        self.assertIn(("owner", "fablyn-dev"), self.owed_pairs())
+        self.assertRegex(self.run_cli("log")[1].splitlines()[-1], r"  fablyn-dev → fablyn-orchestrator  ack$")
+        self.assertEqual(len(self.argvs("agent", "prompt")), self.sent)  # ack sends nothing
+
+    def test_owner_and_options_anywhere(self):
+        code, out, _ = self.run_cli("ack", "owner", "--as", "fablyn-dev", "fablyn-orchestrator")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([l.split()[1] for l in out.splitlines()], ["owner", "fablyn-orchestrator"])
+        self.assertEqual([p for p in self.owed_pairs() if p[1] == "fablyn-dev"], [])
+
+    def test_all_resolves_the_caller_from_its_pane(self):
+        before = len(self.calls())
+        code, out, err = self.run_cli("ack", "--all")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual([l.split()[1] for l in out.splitlines()], ["fablyn-orchestrator", "fablyn-reviewer"])
+        self.assertEqual([(e["from"], e["to"]) for e in log_entries(self.repo)[-2:]],
+                         [("caller", "fablyn-orchestrator"), ("caller", "fablyn-reviewer")])
+        self.assertEqual([p for p in self.owed_pairs() if p[1] == "caller"], [])
+        ack_calls = [c["argv"] for c in self.calls()[before:]]
+        self.assertEqual(ack_calls, [["agent", "list"], ["--version"], ["pane", "current", "--current"],
+                                     ["agent", "get", "w1:p1"]])  # read-only: who is calling
+        self.assertEqual(len(self.argvs("agent", "prompt")), self.sent)
+
+    def test_all_plus_names_and_nothing_owed(self):
+        code, out, _ = self.run_cli("ack", "--as", "fablyn-dev", "--all", "fablyn-reviewer")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[0], "nothing owed to fablyn-reviewer")
+        self.assertEqual([l.split()[1] for l in out.splitlines()[1:]], ["fablyn-orchestrator", "owner"])
+        written = len(log_entries(self.repo))
+        code, out, _ = self.run_cli("ack", "--as", "fablyn-dev", "--all")
+        self.assertEqual((code, out.strip()), (0, "nothing owed by fablyn-dev"))
+        code, out, _ = self.run_cli("ack", "--as", "fablyn-dev", "fablyn-orchestrator")
+        self.assertEqual((code, out.strip()), (0, "nothing owed to fablyn-orchestrator"))
+        self.assertEqual(len(log_entries(self.repo)), written)  # nothing owed: no entry
+
+    def test_unknown_names_and_usage(self):
+        written = len(log_entries(self.repo))
+        code, _, err = self.run_cli("ack", "--as", "fablyn-dev", "fablyn-orchestrator", "nobody")
+        self.assertEqual(code, 2)
+        self.assertIn("not a seat, contact or name in the message log: nobody", err)
+        self.assertEqual(len(log_entries(self.repo)), written)  # nothing written when a name is unknown
+        self.assertEqual(self.run_cli("ack", "--as", "fablyn-dev")[0], 2)
+        self.assertEqual(self.run_cli("ack", "--as", "Not A Name", "owner")[0], 2)
+        self.assertEqual(self.run_cli("ack", "--as", "fablyn-dev", "--bogus", "owner")[0], 2)
+
+    def test_status_drops_what_was_acked(self):
+        self.run_cli("ack", "--as", "fablyn-dev", "fablyn-orchestrator", "owner")
+        out = self.run_cli("status")[1]
+        self.assertNotIn("awaiting: fablyn-dev owes", out)
+        self.assertIn("awaiting: caller owes fablyn-orchestrator", out)
 
 
 class StatusShowsOwed(LiveFleet):

@@ -12,6 +12,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -285,3 +286,74 @@ class GridCase(FleetCase):
     def assert_cell(self, rect, x, y, w, h):
         for got, want in zip(rect, (x, y, w, h)):
             self.assertAlmostEqual(got, want, delta=TOL)
+
+
+GIT = shutil.which("git")
+READ_ONLY = {"rev-parse", "symbolic-ref", "worktree list", "log", "status", "merge-base", "ls-files", "cat-file"}
+
+
+class GitCase(FleetCase):
+    """A FleetCase whose repo is a real git repository on branch main with the fleet file
+    committed (design 17.6). Git runs with HOME set to the test's temp dir and no system
+    config. Every git call the plugin makes goes through a logging shim on PATH, and
+    tearDown asserts invariant 8 on it: only read-only subcommands, no fetch, no prune.
+    Subclasses need ``@unittest.skipUnless(GIT, ...)``."""
+
+    def setUp(self):
+        super().setUp()
+        self.real = os.path.realpath(self.tmp)  # git prints real paths (/private/var/... on macOS)
+        self.git_env = {"PATH": os.environ.get("PATH", ""), "HOME": self.tmp, "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com", "LANG": "C"}
+        self.git("init", "-q")
+        self.git("symbolic-ref", "HEAD", "refs/heads/main")
+        self.write_file("README.md", "hello\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "first")
+        self.shim_log = os.path.join(self.tmp, "git-calls.log")
+        shim_dir = os.path.join(self.tmp, "shim")
+        os.makedirs(shim_dir)
+        with open(os.path.join(shim_dir, "git"), "w") as handle:
+            handle.write('#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexec "%s" "$@"\n' % (self.shim_log, GIT))
+        os.chmod(os.path.join(shim_dir, "git"), 0o755)
+        self.env["PATH"] = shim_dir + os.pathsep + self.env["PATH"]
+
+    def tearDown(self):
+        try:
+            self.assert_git_read_only()
+        finally:
+            super().tearDown()
+
+    def git(self, *args, cwd=None):
+        proc = subprocess.run([GIT, "-C", cwd or self.repo] + list(args), env=self.git_env, check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        return proc.stdout.strip()
+
+    def commit(self, message, cwd=None, date=None):
+        env = dict(self.git_env)
+        if date:
+            env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        subprocess.run([GIT, "-C", cwd or self.repo, "commit", "-q", "--allow-empty", "-m", message], env=env,
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return self.git("rev-parse", "HEAD", cwd=cwd)
+
+    def set_origin(self, sha, head=True, name="main"):
+        self.git("update-ref", "refs/remotes/origin/%s" % name, sha)
+        if head:
+            self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/%s" % name)
+
+    def plugin_git_calls(self):
+        if not os.path.exists(self.shim_log):
+            return []
+        with open(self.shim_log) as handle:
+            return [line.split() for line in handle if line.strip()]
+
+    def assert_git_read_only(self):
+        for argv in self.plugin_git_calls():
+            self.assertEqual(argv[0], "-C", argv)
+            sub = argv[2]
+            if sub == "worktree":
+                sub = "worktree " + argv[3]
+            self.assertIn(sub, READ_ONLY, "the plugin ran git %s" % " ".join(argv))
+            self.assertNotIn("fetch", argv)
+            self.assertNotIn("prune", argv)

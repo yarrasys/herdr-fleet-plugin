@@ -1,19 +1,20 @@
-"""Read-only inspection: drift (design 4.4), status (4.2, 16.3, 16.4, 16.7) and
-doctor (4.7, 16.6).
+"""Read-only inspection: drift (design 4.4), status (4.2, 16.3, 16.4, 16.7, 17.2,
+17.4) and doctor (4.7, 16.6, 17.3).
 
 Nothing here changes herdr. ``collect_status`` may rewrite the state file
-when it prunes ids herdr no longer knows, which every command does.
+when it prunes ids herdr no longer knows, which every command does. Git is
+only read (``gitinfo``), and ``status --context`` only reads transcripts
+(``context_size``).
 """
 
 from __future__ import annotations
 
 import os
 import shlex
-import subprocess
 import sys
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from herdr_fleet import MIN_HERDR_VERSION, contacts as contact_mod, messages, permissions
+from herdr_fleet import MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, messages, permissions
 from herdr_fleet.context import Ctx
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import Herdr, HerdrError, describe
@@ -99,8 +100,9 @@ def integration_rows(herdr: Herdr, kinds: Sequence[str]) -> List[Dict]:
     return rows
 
 
-def collect_status(ctx: Ctx, integrations: bool = True) -> Dict:
-    """One object describing every seat (the ``status --json`` payload)."""
+def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -> Dict:
+    """One object describing every seat (the ``status --json`` payload). With
+    ``context``, each seat also gets ``context`` (design 17.4) and ``restart_hint``."""
     fleet, state, herdr = ctx.fleet, ctx.state, ctx.herdr
     prune_state(state, herdr)
     if state.existed:
@@ -127,6 +129,11 @@ def collect_status(ctx: Ctx, integrations: bool = True) -> Dict:
             "blocked_at_startup": bool(entry.get("blocked_at_startup")),
             "last_kickoff_at": entry.get("last_kickoff_at"),
         })
+        if context:
+            reading = context_size.seat_context(agent, ctx.env) if agent else None
+            hint = fleet.restart_hint_tokens
+            seats[-1]["context"] = reading
+            seats[-1]["restart_hint"] = bool(reading and hint and reading["tokens"] >= hint)
     data = {
         "fleet_file": fleet.path,
         "repo": fleet.repo,
@@ -143,17 +150,9 @@ def collect_status(ctx: Ctx, integrations: bool = True) -> Dict:
     return data
 
 
-def git_branch(cwd: str, timeout: float = 2.0) -> str:
+def git_branch(cwd: str) -> str:
     """``git -C <cwd> rev-parse --abbrev-ref HEAD``; blank when not a repository or on error."""
-    if not cwd or not os.path.isdir(cwd):
-        return ""
-    try:
-        proc = subprocess.run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
-                              timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+    return gitinfo.current_branch(cwd)
 
 
 def shorten(path: str, home: Optional[str]) -> str:
@@ -186,22 +185,47 @@ def startup_label(seat: Dict) -> str:
     return ""
 
 
-def render_status(data: Dict, home: Optional[str] = None) -> str:
-    header = ("SEAT", "KIND", "LIVE", "PANE", "STATE", "CWD", "BRANCH", "DRIFT", "NOTES")
+def folded(seats: Sequence[Dict], key: str) -> Optional[str]:
+    """The one value every seat that is not ``absent`` shares for ``key`` (``cwd`` or
+    ``branch``), so the column can go (design 17.2); None when fewer than two seats
+    are live or any value differs."""
+    live = [s for s in seats if s["state"] != "absent"]
+    values = {str(s.get(key) or "") for s in live}
+    return values.pop() if len(live) >= 2 and len(values) == 1 else None
+
+
+def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool = False) -> str:
+    """The status table. CWD and BRANCH fold into the header line when every live seat
+    shares the value; CONTEXT appears when the data carries ``--context`` readings."""
+    seats = data["seats"]
+    common_cwd, common_branch = folded(seats, "cwd"), folded(seats, "branch")
+    with_context = any("context" in s for s in seats)
+    header = ["SEAT", "KIND", "LIVE", "PANE", "STATE"] + (["CONTEXT"] if with_context else []) \
+        + (["CWD"] if common_cwd is None else []) + (["BRANCH"] if common_branch is None else []) + ["DRIFT", "NOTES"]
     rows = []
-    for s in data["seats"]:
-        state = s["state"] + startup_label(s)
-        rows.append((s["name"], s["kind"], s["live_kind"] or "-", s["pane_id"] or "-", state,
-                     shorten(s.get("cwd") or "", home) or "-", s.get("branch") or "",
-                     "; ".join((["adopted"] if s.get("adopted") else []) + s["drift"]) or "-", s["notes"] or ""))
-    widths = [max(len(str(r[i])) for r in [header] + rows) for i in range(len(header) - 1)]
+    for s in seats:
+        notes = [s["notes"]] if s["notes"] else []
+        if s.get("restart_hint"):
+            notes.append("consider restart")
+        cells = {"SEAT": s["name"], "KIND": s["kind"], "LIVE": s["live_kind"] or "-", "PANE": s["pane_id"] or "-",
+                 "STATE": s["state"] + startup_label(s), "CONTEXT": context_size.context_label(s.get("context")),
+                 "CWD": shorten(s.get("cwd") or "", home) or "-", "BRANCH": s.get("branch") or "",
+                 "DRIFT": "; ".join((["adopted"] if s.get("adopted") else []) + s["drift"]) or "-",
+                 "NOTES": "; ".join(notes)}
+        rows.append([str(cells[column]) for column in header])
+    widths = [max(len(r[i]) for r in [header] + rows) for i in range(len(header) - 1)]
     lines = []
     for row in [header] + rows:
-        cells = [str(cell).ljust(widths[i]) for i, cell in enumerate(row[:-1])] + [str(row[-1])]
+        cells = [cell.ljust(widths[i]) for i, cell in enumerate(row[:-1])] + [row[-1]]
         lines.append("  ".join(cells).rstrip())
     ws = data["workspace"]
-    lines.insert(0, "fleet %s  workspace %s (%s)" % (data["fleet_file"], ws["label"] or "(caller's)",
-                                                      ws["workspace_id"] or "not recorded"))
+    title = "fleet %s  workspace %s (%s)" % (data["fleet_file"], ws["label"] or "(caller's)",
+                                             ws["workspace_id"] or "not recorded")
+    if common_cwd:
+        title += "  cwd %s" % shorten(common_cwd, home)
+    if common_branch:
+        title += "  branch %s" % common_branch
+    lines.insert(0, title)
     if data.get("contacts"):
         lines.append("contacts:")
         for c in data["contacts"]:
@@ -212,6 +236,8 @@ def render_status(data: Dict, home: Optional[str] = None) -> str:
     for row in data.get("integrations", []):
         mark = "  <- %s" % row["status"] if row["flag"] else ""
         lines.append("integration %s: %s%s" % (row["kind"], row["line"] or row["status"], mark))
+    if worktrees_hint:
+        lines.append("worktrees: see herdr-fleet worktrees")
     return "\n".join(lines)
 
 
@@ -234,6 +260,7 @@ def run_doctor(ctx: Ctx) -> List[Check]:
     add(("ok", "fleet file", "%s (%d seats)" % (fleet.path, len(fleet.seats))))
     for warning in fleet.warnings:
         add(("warn", "fleet file", warning))
+    add(fleet_vs_git(fleet.path, fleet.repo, ctx.env))
     _check_kinds(ctx, fleet, add)
     _check_files(fleet, add)
     for row in integration_rows(ctx.herdr, fleet.kinds()):
@@ -247,6 +274,58 @@ def run_doctor(ctx: Ctx) -> List[Check]:
     except StateError as exc:
         add(("fail", "state file", str(exc)))
     return checks
+
+
+def fleet_vs_git(path: str, repo: str, env: Optional[Mapping[str, str]] = None) -> Check:
+    """Design 17.3: the fleet file in the working tree against ``HEAD`` and the default
+    branch, read-only and without ``git fetch``. Drift warns, never fails: the file
+    in the working tree is the one that runs."""
+    name = "fleet file vs git"
+    if not gitinfo.is_work_tree(repo, env):
+        return ("skip", name, "not a git repository")
+    rel = os.path.relpath(path, repo)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError as exc:
+        return ("warn", name, "cannot read %s: %s" % (path, exc))
+    default = gitinfo.default_branch(repo, env)
+    tracked = gitinfo.is_tracked(repo, rel, env)
+    if tracked is None:
+        return ("warn", name, "git did not answer in %s" % repo)
+    problems: List[str] = []
+    if not tracked:
+        problems.append("untracked in this checkout (branch %s)" % (gitinfo.current_branch(repo, env) or "?"))
+    else:
+        head = gitinfo.show_file(repo, "HEAD", rel, env)
+        if head is None:
+            problems.append("no copy in HEAD")
+        elif head != text:
+            problems.append("modified since HEAD: %s" % _diff_label(head, text))
+    if default is None:
+        if problems:
+            problems.append("no default branch found (origin/HEAD, origin/main, origin/master)")
+        else:
+            return ("ok", name, "committed, same as HEAD; no default branch found to compare with")
+    else:
+        copy = gitinfo.show_file(repo, default, rel, env)
+        if copy is None:
+            problems.append("no copy on %s" % default)
+        elif copy != text:
+            problems.append("%s copy differs: %s" % (default, _diff_label(copy, text)))
+        elif problems:
+            problems.append("same as %s" % default)
+    if problems:
+        return ("warn", name, "; ".join(problems))
+    return ("ok", name, "committed, same as %s" % default)
+
+
+def _diff_label(old: str, new: str) -> str:
+    """``+7/-1 lines, first at line 42`` (counts only; no diff body is printed)."""
+    added, removed, first = gitinfo.line_diff(old, new)
+    if first is None:  # same lines, different line endings or final newline
+        return "only line endings or the final newline differ"
+    return "+%d/-%d lines, first at line %d" % (added, removed, first)
 
 
 def _check_herdr(ctx: Ctx, add) -> None:

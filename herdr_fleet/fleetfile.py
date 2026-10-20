@@ -26,13 +26,14 @@ FLEET_DIR = ".herdr"
 FLEET_NAME = "fleet.toml"
 DIRECTIONS = ("right", "down")
 
-TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "contacts", "quit_timeout_ms"}
+TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "contacts", "quit_timeout_ms",
+            "restart_hint_tokens"}
 CONTACT_KEYS = {"name", "match", "note"}
 MATCH_KEYS = {"cwd", "kind", "name"}
 LAYOUT_KEYS = {"mode", "columns", "direction", "ratio"}
 MODES = ("chain", "grid")
 SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "from", "env", "kickoff",
-             "kickoff_text", "quit", "notes"}
+             "kickoff_text", "quit", "notes", "worktrees"}
 
 
 class FleetError(Exception):
@@ -60,6 +61,7 @@ class Seat:
     notes: str
     index: int
     from_seat: Optional[str] = None  # chain mode: split from this earlier seat's pane (``from``)
+    worktrees: List[str] = field(default_factory=list)  # path globs, ~ expanded (design 17.2)
 
 
 @dataclass
@@ -89,6 +91,7 @@ class Fleet:
     mode: str = "chain"              # chain | grid (design section 14)
     columns: Optional[int] = None    # grid only
     contacts: List[Contact] = field(default_factory=list)
+    restart_hint_tokens: Optional[int] = None  # status --context: "consider restart" at or above (17.4)
 
     def contact(self, name: str) -> Optional[Contact]:
         for contact in self.contacts:
@@ -172,6 +175,11 @@ def load_fleet(path: str) -> Fleet:
                                      or quit_timeout <= 0):
         errors.append("quit_timeout_ms: must be a positive integer (milliseconds)")
         quit_timeout = None
+    hint_tokens = data.get("restart_hint_tokens")
+    if hint_tokens is not None and (not isinstance(hint_tokens, int) or isinstance(hint_tokens, bool)
+                                    or hint_tokens <= 0):
+        errors.append("restart_hint_tokens: must be a positive integer (tokens)")
+        hint_tokens = None
 
     layout = data.get("layout", {})
     if not isinstance(layout, dict):
@@ -218,7 +226,7 @@ def load_fleet(path: str) -> Fleet:
     return Fleet(path=path, repo=repo, workspace=workspace, cwd=base_cwd, state_note=state_note,
                  kickoff=default_kickoff, direction=direction, ratio=ratio,
                  quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns,
-                 contacts=contacts)
+                 contacts=contacts, restart_hint_tokens=hint_tokens)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
@@ -267,12 +275,26 @@ def _parse_seat(raw: Dict, index: int, repo: str, base_cwd: str, direction: str,
     quit_cmd = _opt_str(raw, "quit", where + ".quit", errors)
     notes = _opt_str(raw, "notes", where + ".notes", errors) or ""
     from_seat = _opt_str(raw, "from", where + ".from", errors)
+    worktrees = _worktree_globs(raw.get("worktrees", []), where + ".worktrees", errors, warnings)
     if name is None or kind is None:
         return None
     return Seat(name=name, kind=kind, args=list(args), cwd=cwd, split=split,
                 ratio=seat_ratio if seat_ratio is not None else ratio, env=dict(env),
                 kickoff=kickoff, kickoff_text=kickoff_text, quit=quit_cmd, notes=notes, index=index,
-                from_seat=from_seat)
+                from_seat=from_seat, worktrees=worktrees)
+
+
+def _worktree_globs(value: object, where: str, errors: List[str], warnings: List[str]) -> List[str]:
+    """``worktrees = ["<glob>", ...]`` (design 17.2): non-empty strings, ``~`` expanded.
+    A glob that is still relative matches no worktree path, so it is warned about."""
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        errors.append("%s: must be a list of non-empty strings (path globs)" % where)
+        return []
+    globs = [os.path.expanduser(v) for v in value]
+    for raw, expanded in zip(value, globs):
+        if not os.path.isabs(expanded):
+            warnings.append("%s: %r is not an absolute path or ~/...; it matches no worktree" % (where, raw))
+    return globs
 
 
 def _check_from(seat: Seat, earlier: List[str], errors: List[str]) -> None:

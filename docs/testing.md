@@ -25,7 +25,7 @@ The suite takes a few seconds. Nothing in it talks to a real herdr: `HERDR_BIN_P
 
 Most tests call `herdr_fleet.cli.main` in-process with the fake as the runner and an instant clock, so 250 ms polls and 10 s or 20 s timeouts cost nothing. `tests/test_cli_subprocess.py` runs `bin/herdr-fleet` as a real process with the fake installed as an executable on `HERDR_BIN_PATH`, exactly as herdr would. `tests/test_manifest.py` checks `herdr-plugin.toml` and runs its commands the way herdr does: actions from the plugin root with an action's context JSON, pane entrypoints through `sh -c` from the repo directory that `ui` passes as `--cwd`.
 
-Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry the agent `name`; only `agent get` and `agent list` do (design section 12).
+Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry the agent `name`; only `agent get` and `agent list` do (design section 12). Like live herdr 0.9.5, agent records can carry `agent_session` (`{"agent": "claude", "kind": "id", "source": "herdr:claude", "value": "<uuid>"}`); the fake adds it only when a scenario sets one with `put_agent(..., session=fake_herdr.claude_session(uuid))`, and otherwise leaves the key out.
 
 ### Safety invariants
 
@@ -35,6 +35,8 @@ Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry
 - every `agent prompt` went to an agent that was `idle` or `done` at that moment (never `blocked`, `unknown` or `working`);
 - every `agent start` targeted a pane at a bare shell prompt and never the caller's pane;
 - every `pane close` closed a pane herdr-fleet created and that hosted no agent; every `workspace close` closed a workspace herdr-fleet created.
+
+Tests that need git use `GitCase` from `tests/support.py`: a real temporary repository (`git init`, `git commit`, `git worktree add`) with HOME set to the test's temp dir and no system git config. The plugin's git calls go through a logging shim on `PATH`, and `tearDown` asserts invariant 8 on them: only `rev-parse`, `symbolic-ref`, `worktree list`, `log`, `status`, `merge-base`, `ls-files` and `cat-file`, never `fetch` or `prune`. These tests are skipped when git is missing.
 
 Specific tests cover restart refusing blocked, unknown and working agents, stalled prompts never being resent, quit polling and timeout, swap drift from process-info argv, and `down` closing only created panes.
 
@@ -116,6 +118,20 @@ Messages (design section 16). The safety hook in `tests/support.py` stays strict
   - the doctor lines with no settings (exact suggested entries), with entries spread over the three files (HOME is the test's temp dir, never the real `~/.claude`), and with only the missing ones named;
   - unreadable settings;
   - the status `CWD` (with `~`) and `BRANCH` columns, using a real `git init` (skipped without git).
+
+Version 0.5.0 (design section 17):
+
+- `tests/test_messages.py`:
+  - FYI by `--fyi` and by prefix (`FYI:`, `fyi `, after an existing `[from …]`), the text sent as written, `"fyi": true` in the log and no key otherwise, `[fyi]` in `log`;
+  - the owed rule as a pure function: an FYI never owes, an FYI reply settles, a later FYI from the asker keeps the request open, `ack` settles and never owes, same-second order;
+  - `ack` with names and `--as` (the exact entry, no herdr call at all, nothing sent), `owner` and options anywhere, `--all` resolving the caller from its pane (only `agent list`, `--version`, `pane current`, `agent get`), `--all` with names, `nothing owed` (no entry written), unknown names and usage errors (nothing written), `status` after an ack;
+  - the roster sentence about `--fyi` in every kickoff `up` sends.
+- `tests/test_worktrees.py` (real repositories): the table and `--json` with a merged branch, an unmerged dirty one with an old commit, a detached worktree, a deleted (missing, prunable) one and a locked one; rows in git's order; the main worktree marked `main`; seat globs (also through the unresolved temp path); `--seat`; no herdr call; the index unchanged and nothing pruned; no `origin` at all; the `origin/main` and `origin/master` fallbacks and an `origin/HEAD` target; not a repository; the porcelain parser; the status hint line.
+- `tests/test_status_doctor.py`:
+  - `fleet file vs git`: identical to `HEAD` and `origin/main`, no origin, untracked with a differing `origin/main` copy (emberline's case), modified since `HEAD`, no copy on `origin/main`, not a repository, git missing, and no new herdr command;
+  - CWD and BRANCH folding: a shared cwd and branch fold into the header (real repository), a blank branch folds away, a different cwd keeps the column, absent seats do not count, one live seat keeps both columns.
+- `tests/test_context.py` (fake transcripts under the test's HOME): the last `assistant` line with usage wins over later user and other lines and a trailing partial line; the parsed record has exactly `type`, `timestamp` and the four usage integers, with no text, tool call or other field; synthetic all-zero lines are skipped; the chunked backward read gives the same answer for any chunk size and honours the 4 MiB limit (scaled down); missing, empty and session-less cases; `status --context` and `--json --context` with no transcript text, path or session id in the output and nothing written under `~/.claude`; no extra herdr command; nothing read without `--context`; `restart_hint_tokens` (at or above, joined to notes, JSON) and its validation; `HERDR_FLEET_CLAUDE_PROJECTS`.
+- `tests/test_fleetfile.py`: `worktrees` (list of non-empty strings, `~` expanded, a relative glob warned about) and `restart_hint_tokens` (positive integer).
 
 ### Running the CLI against the fake by hand
 
@@ -208,3 +224,39 @@ Both model ids used here, `claude-haiku-5-5` and `claude-sonnet-5-5`, started fi
 ### Not covered by the smoke test
 
 The manifest actions through `herdr plugin action invoke` (`up`, `doctor`, `status`, `manage`) and the popup menu, a fleet with a `workspace` label (creating a workspace), several seats, adopt-on-resume after a herdr server restart, and a seat blocked at startup. The unit tests cover these against the fake herdr.
+
+## Live smoke test for 0.5.0 (to run by hand)
+
+Not run yet. For the designer or the owner, inside herdr, from this repository. Steps 1 to 5 only read: they run against emberline's real fleet file but prompt nobody, fetch nothing and write nothing (`status` may prune stale ids from emberline's state file, as every command does). Steps 6 to 10 use the one-seat Haiku fleet of the smoke test above (`$S`, `$F`, after its `up`).
+
+```bash
+cd /Users/nabsha/work/yarrasys/projects/herdr-fleet-plugin
+E=/Users/nabsha/work/yarrasys/projects/emberline/.herdr/fleet.toml
+
+time python3 bin/herdr-fleet worktrees --fleet "$E"                        # 1
+python3 bin/herdr-fleet worktrees --fleet "$E" --json | head -30           # 2
+python3 bin/herdr-fleet doctor --fleet "$E" | grep 'fleet file vs git'     # 3
+time python3 bin/herdr-fleet status --context --fleet "$E"                 # 4
+python3 bin/herdr-fleet status --json --context --fleet "$E" | grep -A4 '"context"'   # 5
+
+python3 bin/herdr-fleet send --fyi --as owner fleet-smoke "smoke check, no reply needed" --fleet "$F"   # 6
+python3 bin/herdr-fleet send --as owner fleet-smoke "Reply with the single word PONG" --fleet "$F"      # 7
+python3 bin/herdr-fleet log --owed --fleet "$F"                            # 8
+python3 bin/herdr-fleet ack --as fleet-smoke owner --fleet "$F"            # 9
+python3 bin/herdr-fleet log --fleet "$F"; python3 bin/herdr-fleet log --owed --fleet "$F"; tail -3 "$S/.herdr/messages.jsonl"   # 10
+```
+
+| Step | Expected |
+| --- | --- |
+| 1. `worktrees` | a `repo … default origin/main` line and one row per worktree (14 in emberline), in `git worktree list` order; the shared checkout marked `main`; `/private/tmp/fablyn-*` rows with branch, age, `clean` or `N changed`, MERGED `yes`/`no`; no herdr command (nothing in `herdr plugin log list`); about a second |
+| 2. `--json` | `repo`, `default_branch` and the per-worktree keys of design 17.2 |
+| 3. drift | `warn  fleet file vs git: untracked in this checkout (branch …); origin/main copy differs: +7/-0 lines, first at line N` (the `[[contacts]]` entry) |
+| 4. `status --context` | a CONTEXT column with `183k (2 min)`-style cells for the Claude seats and `-` for others; `consider restart` only if emberline sets `restart_hint_tokens`; no transcript text, path or session id anywhere; not noticeably slower than `status` |
+| 5. JSON | `"context": {"tokens": …, "at": "…Z", "source": "claude-transcript"}` or `null`, and `"restart_hint"` per seat |
+| 6. `send --fyi` | `sent to fleet-smoke (idle), …`; the seat receives `[from owner] smoke check, no reply needed` exactly as written |
+| 7. request | sent; the seat answers PONG in its own pane (not through the log) |
+| 8. `log --owed` | one line, `awaiting: fleet-smoke owes owner since … (Reply with the single word PONG)`; nothing for the FYI |
+| 9. `ack` | `acked owner since … (Reply with the single word PONG)`; no prompt reaches the seat |
+| 10. log | the FYI line shows `[fyi]`, the ack line ends in `ack`; `log --owed` says `nothing awaiting a reply`; the last entries carry `"fyi": true` and `"kind": "ack", "delivery": "logged"` |
+
+Then run `down --close-panes --fleet "$F"` and remove `$S` as in the first smoke test.

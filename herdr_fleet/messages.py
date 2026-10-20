@@ -1,4 +1,5 @@
-"""Messages (design 16.1 to 16.3): ``send``, the message log and owed replies.
+"""Messages (design 16.1 to 16.3, 17.1): ``send``, ``ack``, the message log and
+owed replies.
 
 herdr-fleet is a messenger only: it never reads or interprets an agent's
 output, never routes replies and never decides who gets a message.
@@ -12,7 +13,11 @@ output, never routes replies and never decides who gets a message.
   or kickoff that herdr accepted (``"delivery": "sent"``) or that may have
   arrived (``"delivery": "unconfirmed"``: the prompt stalled or timed out),
   appended with ``O_APPEND``. Refused sends are never logged.
-- Owed replies are derived from the log alone (``owed``).
+- Owed replies are derived from the log alone (``owed``). A message sent with
+  ``--fyi``, or whose text starts with ``FYI:`` or ``FYI `` after the prefix,
+  is logged with ``"fyi": true`` and never creates an obligation, though it
+  still answers one. ``ack`` appends ``kind = "ack"`` entries that settle what
+  the caller owes and sends nothing to anyone (invariant 10).
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from herdr_fleet import contacts as contact_mod
-from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError
+from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, preflight
 from herdr_fleet.fleetfile import NAME_RE
 from herdr_fleet.herdr import HerdrError
 from herdr_fleet.seats import SEND_ALLOWED, SETTLED, safe_prompt
@@ -36,6 +41,7 @@ FIRST_LINE_MAX = 120
 PLUGIN_SENDER = "herdr-fleet"
 OWNER = "owner"
 PREFIX_RE = re.compile(r"^\[from [^\]]*\]\s*")
+FYI_RE = re.compile(r"^fyi[: ]", re.IGNORECASE)
 
 
 # -- the log -----------------------------------------------------------------------------
@@ -53,13 +59,27 @@ def first_line(text: str) -> str:
     return ""
 
 
+def is_fyi(text: str) -> bool:
+    """Design 17.1: after the ``[from X]`` prefix and leading whitespace, the text
+    starts with ``FYI:`` or ``FYI `` (any case)."""
+    return bool(FYI_RE.match(PREFIX_RE.sub("", text.lstrip(), count=1).lstrip()))
+
+
 def make_entry(sender: str, to: str, kind: str, text: str, file: Optional[str] = None,
-               time: Optional[str] = None, delivery: str = "sent") -> Dict:
+               time: Optional[str] = None, delivery: str = "sent", fyi: bool = False) -> Dict:
     entry = {"time": time or now_iso(), "from": sender, "to": to, "kind": kind,
              "bytes": len(text.encode("utf-8")), "first_line": first_line(text), "delivery": delivery}
     if file:
         entry["file"] = file
+    if fyi:
+        entry["fyi"] = True
     return entry
+
+
+def ack_entry(caller: str, seat: str, time: Optional[str] = None) -> Dict:
+    """Design 17.1: one hand-made acknowledgement; nothing is sent to anyone."""
+    return {"time": time or now_iso(), "from": caller, "to": seat, "kind": "ack", "bytes": 0,
+            "first_line": "ack", "delivery": "logged"}
 
 
 def append(repo: str, entry: Dict) -> None:
@@ -120,24 +140,30 @@ def _when(entry: Dict) -> Optional[datetime.datetime]:
 
 
 def owed(entries: Sequence[Dict]) -> List[Dict]:
-    """Design 16.3: for each ordered pair (A, B) with at least one ``send`` from A to
-    B, the latest such message is awaiting unless B sent A something later.
-    Kickoffs come from the plugin and never create or settle an obligation.
-    Times have one-second resolution, so equal times are ordered by position in
-    the append-only log. Returns the awaiting messages, oldest first, as
-    {from, to, since, first_line}."""
-    latest: Dict[Tuple[str, str], Tuple[Tuple[datetime.datetime, int], Dict]] = {}
+    """Design 16.3 as amended by 17.1: for each ordered pair (A, B), the latest
+    ``send`` from A to B that is not FYI is awaiting unless an entry from B to A of
+    kind ``send`` (FYI or not) or ``ack`` has a later time. An FYI never creates an
+    obligation but still settles one. Kickoffs come from the plugin and never
+    create or settle anything. Times have one-second resolution, so equal times
+    are ordered by position in the append-only log. Returns the awaiting
+    messages, oldest first, as {from, to, since, first_line}."""
+    Key = Tuple[datetime.datetime, int]
+    asks: Dict[Tuple[str, str], Tuple[Key, Dict]] = {}
+    answers: Dict[Tuple[str, str], Key] = {}
     for index, entry in enumerate(entries):
         when = _when(entry)
-        if entry.get("kind", "send") != "send" or when is None:
+        kind = entry.get("kind", "send")
+        if kind not in ("send", "ack") or when is None:
             continue
-        pair = (str(entry["from"]), str(entry["to"]))
-        if pair not in latest or (when, index) > latest[pair][0]:
-            latest[pair] = ((when, index), entry)
+        pair, key = (str(entry["from"]), str(entry["to"])), (when, index)
+        if pair not in answers or key > answers[pair]:
+            answers[pair] = key
+        if kind == "send" and not entry.get("fyi") and (pair not in asks or key > asks[pair][0]):
+            asks[pair] = (key, entry)
     awaiting = []
-    for (sender, recipient), (key, entry) in latest.items():
-        reply = latest.get((recipient, sender))
-        if reply is None or reply[0] < key:
+    for (sender, recipient), (key, entry) in asks.items():
+        reply = answers.get((recipient, sender))
+        if reply is None or reply < key:
             awaiting.append((key, {"from": sender, "to": recipient, "since": entry["time"],
                                    "first_line": entry.get("first_line", "")}))
     return [item for _, item in sorted(awaiting, key=lambda pair: pair[0])]
@@ -159,10 +185,15 @@ def owed_lines(items: Sequence[Dict], today: Optional[datetime.date] = None) -> 
 
 
 def format_entry(entry: Dict) -> str:
-    """``time  from → to  bytes  first_line``; ``?`` after the bytes marks an unconfirmed delivery."""
+    """``time  from → to  bytes  first_line``; ``?`` after the bytes marks an unconfirmed
+    delivery, ``[fyi]`` before the first line an FYI, and an acknowledgement reads
+    ``time  from → to  ack``."""
+    if entry.get("kind") == "ack":
+        return "%s  %s → %s  ack" % (entry["time"], entry["from"], entry["to"])
     unconfirmed = "?" if entry.get("delivery") == "unconfirmed" else ""
-    return "%s  %s → %s  %s%s  %s" % (entry["time"], entry["from"], entry["to"], entry.get("bytes", "?"),
-                                     unconfirmed, entry.get("first_line", ""))
+    tag = "[fyi]  " if entry.get("fyi") else ""
+    return "%s  %s → %s  %s%s  %s%s" % (entry["time"], entry["from"], entry["to"], entry.get("bytes", "?"),
+                                       unconfirmed, tag, entry.get("first_line", ""))
 
 
 # -- send -----------------------------------------------------------------------------------
@@ -232,8 +263,8 @@ def resolve_targets(ctx: Ctx, names: Sequence[str], agents: Sequence[Dict]) -> L
 
 
 def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_name: Optional[str] = None,
-            when_ready_ms: Optional[int] = None, all_seats: bool = False) -> int:
-    """Design 16.1. One line per target; exit 0 all sent, 3 some refused, 1 herdr failure."""
+            when_ready_ms: Optional[int] = None, all_seats: bool = False, fyi: bool = False) -> int:
+    """Design 16.1 and 17.1. One line per target; exit 0 all sent, 3 some refused, 1 herdr failure."""
     names, text = message_text(words, text_file, all_seats)
     sender = resolve_sender(ctx, as_name)
     agents = ctx.herdr.agent_list()
@@ -247,6 +278,7 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
         raise UsageError("send needs a target and a text, or --file")
     targets = resolve_targets(ctx, names, agents)
     message = text if text.lstrip().startswith("[from") else "[from %s] %s" % (sender, text)
+    fyi = fyi or is_fyi(message)
     size = size_label(len(message.encode("utf-8")))
     codes = []
     for target in targets:
@@ -255,7 +287,7 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
         codes.append(code)
         if delivery and not ctx.dry_run:  # sent, or possibly delivered: log it (never refusals)
             entry = make_entry(sender, target.name, "send", message,
-                               os.path.abspath(text_file) if text_file else None, delivery=delivery)
+                               os.path.abspath(text_file) if text_file else None, delivery=delivery, fyi=fyi)
             try:
                 append(ctx.fleet.repo, entry)
             except OSError as exc:
@@ -306,6 +338,47 @@ def _status(ctx: Ctx, target: str) -> str:
         if "not_found" in exc.code:
             return "absent"
         raise
+
+
+# -- ack ------------------------------------------------------------------------------------------
+
+
+def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Optional[str] = None) -> int:
+    """Design 17.1: settle what the caller owes by hand. Appends one ``ack`` entry per
+    seat that the caller owes a reply; sends nothing to anyone. The caller is found
+    as for ``send``; herdr is asked only when ``--as`` does not say."""
+    if not names and not all_owed:
+        raise UsageError("ack needs a name or --all")
+    if not as_name:
+        preflight(ctx)
+    caller = resolve_sender(ctx, as_name)
+    repo = ctx.fleet.repo
+    warnings: List[str] = []
+    entries = read(repo, warnings)
+    for warning in warnings:
+        ctx.warn(warning)
+    known = {s.name for s in ctx.fleet.seats} | {c.name for c in ctx.fleet.contacts} | {OWNER}
+    known |= {str(e.get(k)) for e in entries for k in ("from", "to")}
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise UsageError("not a seat, contact or name in the message log: %s" % ", ".join(unknown))
+    debts = [o for o in owed(entries) if o["to"] == caller]
+    by_sender = {o["from"]: o for o in debts}
+    targets: List[str] = []
+    for name in list(names) + ([o["from"] for o in debts] if all_owed else []):
+        if name not in targets:
+            targets.append(name)
+    if not targets:
+        ctx.say("nothing owed by %s" % caller)
+        return EXIT_OK
+    for name in targets:
+        item = by_sender.get(name)
+        if item is None:
+            ctx.say("nothing owed to %s" % name)
+            continue
+        append(repo, ack_entry(caller, name))
+        ctx.say("acked %s since %s (%s)" % (name, since_label(item["since"]), item["first_line"]))
+    return EXIT_OK
 
 
 # -- log command --------------------------------------------------------------------------------

@@ -26,9 +26,10 @@ from herdr_fleet.ops import op_down, op_install_cli, op_kickoff, op_restart, op_
 from herdr_fleet.scaffold import available_examples, run_init
 from herdr_fleet.seats import Clock
 from herdr_fleet.state import StateError
-from herdr_fleet.messages import op_log, op_send
+from herdr_fleet.messages import op_ack, op_log, op_send
 from herdr_fleet.statenote import op_state
 from herdr_fleet.tile import op_tile
+from herdr_fleet.worktrees import op_worktrees
 
 
 
@@ -69,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("status", parents=[common], help="show every seat, its state and drift")
     p.add_argument("--json", action="store_true", help="print one JSON object")
     p.add_argument("--hold", action="store_true", help="wait for Enter before exiting (overlay pane)")
+    p.add_argument("--context", action="store_true",
+                   help="add a CONTEXT column: each Claude seat's context size from its transcript (read-only)")
 
     p = sub.add_parser("restart", parents=[common, notes, wait],
                        help="quit idle seats and start them again in the same pane, then brief them")
@@ -102,7 +105,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--when-ready", dest="when_ready", metavar="MS", type=int,
                    help="wait up to MS ms for each target to be idle or done; refuse it if not")
     p.add_argument("--all", dest="all_seats", action="store_true", help="every live seat except the sender")
+    p.add_argument("--fyi", action="store_true",
+                   help='a report that awaits no reply (text starting with "FYI:" or "FYI " counts too)')
     p.add_argument("--dry-run", action="store_true", help="say what would be sent and send nothing")
+
+    p = sub.add_parser("ack", parents=[fleet], help="settle replies you owe by hand; sends nothing",
+                       description="Log an acknowledgement for each NAME whose message you owe a reply, so it "
+                                   "stops awaiting. Writes .herdr/messages.jsonl only; nothing is sent.")
+    p.add_argument("names", nargs="*", metavar="NAME", help="who you owe a reply (seat, contact, owner, ...)")
+    p.add_argument("--all", dest="all_owed", action="store_true", help="every message you currently owe")
+    p.add_argument("--as", dest="as_name", metavar="NAME", help="who you are (default: your pane's agent, or owner)")
 
     p = sub.add_parser("log", parents=[common], help="show the message log (.herdr/messages.jsonl)")
     p.add_argument("--seat", metavar="NAME", help="only messages from or to NAME")
@@ -120,6 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("key", metavar="KEY")
     q.add_argument("text", nargs="?", metavar="TEXT")
     q.add_argument("--file", dest="text_file", metavar="PATH", help="read the section text from this file")
+
+    p = sub.add_parser("worktrees", parents=[fleet], help="list the repository's Git worktrees (read-only)",
+                       description="One row per `git worktree list` entry: path, branch, age of the last commit, "
+                                   "changed files, merged into the default branch, and the seats whose "
+                                   "`worktrees` globs match. Never fetches or prunes.")
+    p.add_argument("--seat", metavar="NAME", help="only the worktrees matching this seat's globs")
+    p.add_argument("--json", action="store_true", help="print one JSON object")
 
     p = sub.add_parser("tile", parents=[common],
                        help="re-tile the live seats in place ([layout] grid or chain); moves panes only")
@@ -149,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 # Commands whose positional list may be split by options: `send A --dry-run TEXT`.
 LIST_POSITIONALS = {"send": "words", "up": "names", "restart": "names", "swap": "names", "kickoff": "names",
-                    "down": "names"}
+                    "down": "names", "ack": "names"}
 
 
 def parse(parser: argparse.ArgumentParser, argv: List[str]) -> argparse.Namespace:
@@ -219,11 +238,15 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     if command == "state":  # reads and writes the state note only
         return op_state(ctx, args.state_action, getattr(args, "key", None), getattr(args, "text", None),
                         getattr(args, "text_file", None))
+    if command == "worktrees":  # git only; no herdr command
+        return op_worktrees(ctx, args.seat, args.json)
+    if command == "ack":  # appends to the message log; herdr only to learn who you are (without --as)
+        return op_ack(ctx, args.names, args.all_owed, args.as_name)
     if command == "doctor":
         return _doctor(ctx)
     preflight(ctx)
     if command == "status":
-        return _status(ctx, args.json, args.hold, stdin)
+        return _status(ctx, args.json, args.hold, stdin, args.context)
     if command == "ui":
         op_ui(ctx, args.entrypoint)
         return EXIT_OK
@@ -244,7 +267,7 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     if command == "tile":
         return _finish(ctx, op_tile(ctx))
     if command == "send":
-        return op_send(ctx, args.words, args.message_file, args.as_name, args.when_ready, args.all_seats)
+        return op_send(ctx, args.words, args.message_file, args.as_name, args.when_ready, args.all_seats, args.fyi)
     raise UsageError("unknown command %s" % command)
 
 
@@ -272,9 +295,11 @@ def _finish(ctx: Ctx, report: Report, status_table: bool = False) -> int:
     return code
 
 
-def _status(ctx: Ctx, as_json: bool, hold: bool, stdin: TextIO) -> int:
-    data = collect_status(ctx)
-    ctx.say(json.dumps(data, indent=2, ensure_ascii=False) if as_json else render_status(data, ctx.env.get("HOME")))
+def _status(ctx: Ctx, as_json: bool, hold: bool, stdin: TextIO, context: bool = False) -> int:
+    data = collect_status(ctx, context=context)
+    hint = any(seat.worktrees for seat in ctx.fleet.seats)
+    ctx.say(json.dumps(data, indent=2, ensure_ascii=False) if as_json
+            else render_status(data, ctx.env.get("HOME"), worktrees_hint=hint))
     if hold:
         wait_for_enter(ctx, stdin)
     return EXIT_OK

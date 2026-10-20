@@ -12,7 +12,7 @@ import unittest
 import support
 from herdr_fleet.fleetfile import Fleet, Seat
 from herdr_fleet.herdr import Herdr, HerdrError, parse_integration_status, parse_version
-from herdr_fleet.kickoff import DEFAULT_TEMPLATE, compose, render, roster_table, strip_comments
+from herdr_fleet.kickoff import DEFAULT_TEMPLATE, ROSTER_SENTENCE, compose, render, roster_table, strip_comments
 from herdr_fleet.seats import (agent_args, at_shell_prompt, contains_in_order, find_agent_process,
                                process_argv, quit_command)
 from herdr_fleet.state import State, StateError, load_state, prune_state, save_state
@@ -49,6 +49,7 @@ class KickoffRendering(unittest.TestCase):
         self.assertTrue(text.startswith(
             '[from herdr-fleet] You are fablyn-dev, a claude agent in the "fablyn" fleet for /repo.'))
         self.assertIn("| fablyn-dev | claude | w2:p2 | /repo |", text)
+        self.assertIn("| fablyn-dev | claude | w2:p2 | /repo |\n\n" + ROSTER_SENTENCE, text)  # design 17.1
         self.assertIn("on up.", text)
         self.assertEqual(text, text.strip())
         self.assertTrue(DEFAULT_TEMPLATE.startswith("[from herdr-fleet]"))

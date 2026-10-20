@@ -74,11 +74,17 @@ def strip_comments(template: str) -> str:
     return "".join(kept)
 
 
+ROSTER_SENTENCE = ("Message a seat with `herdr-fleet send <name> \"...\"`: status reports go with `--fyi`; "
+                   "a message that asks for something does not.")
+
+
 def roster_table(rows: Sequence[Sequence[str]]) -> str:
-    """Markdown table of seats: rows of (name, kind, pane id, cwd)."""
+    """``{roster}``: a Markdown table of seats, rows of (name, kind, pane id, cwd), then
+    the roster sentence on how to message them (design 17.1)."""
     lines = ["| name | kind | pane | cwd |", "| --- | --- | --- | --- |"]
     for row in rows:
         lines.append("| " + " | ".join(str(cell) for cell in row) + " |")
+    lines += ["", ROSTER_SENTENCE]
     return "\n".join(lines)
 
 
