@@ -192,7 +192,7 @@ Every command except `init` and `install-cli` accepts `--fleet PATH` to pick the
 | `init [DIR] [--example NAME] [--force]` | Write the starter `.herdr` files at the root of DIR's Git work tree (else DIR; default the current directory), or copy `examples/NAME` with `--example` (`fablyn`). Never overwrites without `--force`. Runs no herdr command and does not need `HERDR_ENV`. Exit 0 when every file was created or kept, 1 when a write failed, 2 for an unknown example or a bad DIR. |
 | `up [NAME...] [--me NAME] [--dry-run] [--no-kickoff] [--note TEXT]` | Start every seat that is not live, then brief the ones it started. Skips seats whose name is live; adopts an unnamed agent of the right kind that herdr resumed in a seat's recorded pane (rename, no kickoff); reuses a recorded pane that is at a shell prompt; else splits a new pane. `--me NAME` names the agent in your own pane as seat NAME (rename only, no kickoff) and records it as `adopted`. If your pane is in another workspace than the fleet's, `up --me` warns with the exact `herdr pane move` that would join them; `--join` runs that move (your session keeps running) and records the new pane id. `--dry-run` prints the exact herdr commands and changes nothing. |
 | `status [--json] [--hold]` | Every seat: expected kind, live kind, pane, state (`idle`, `working`, `blocked`, `done`, `unknown` or `absent`), cwd (with `~`), Git branch, drift and notes. Then the contacts with their pane and state, the messages awaiting a reply, and `herdr integration status` for the kinds in use, flagging `outdated` and `not installed`. |
-| `send TARGET... (TEXT \| --file PATH) [--as NAME] [--when-ready MS] [--all] [--dry-run]` | Message seats, contacts or live agents (see Messages). |
+| `send TARGET... [TEXT] [--file PATH] [--as NAME] [--when-ready MS] [--all] [--dry-run]` | Message seats, contacts or live agents (see Messages). |
 | `log [--seat NAME] [--last N] [--json] [--owed]` | The message log, newest last (default the last 50); `--owed` lists the messages awaiting a reply. |
 | `state show \| keys \| set KEY (TEXT \| --file PATH)` | Read the state note, or replace one of its `## KEY` sections (see State note sections). |
 | `restart NAME... [--note TEXT \| --note-file PATH] [--wait MS] [--dry-run]` | Quit each seat, start it again in the same pane with the same name, and brief it with `reason = restart`. A seat that is not running is started (in its recorded pane if that is at a shell prompt, else a fresh split). |
@@ -212,7 +212,13 @@ herdr-fleet is a messenger only. It never reads or interprets an agent's output,
 
 ### send
 
-`herdr-fleet send TARGET... TEXT` sends `[from <sender>] TEXT` to each target, one `herdr agent prompt` each, in the order given. `--file PATH` reads the text from a UTF-8 file, and then every word is a target.
+`herdr-fleet send TARGET... TEXT` sends `[from <sender>] TEXT` to each target, one `herdr agent prompt` each, in the order given. The positional items are read as follows:
+
+- without `--file`, the last item is the text, so at least two items are needed (`send needs a target and a text, or --file`);
+- with `--file PATH`, the text comes from that UTF-8 file and every item is a target;
+- with `--all` and no `--file`, a single item is the text (`send --all "standup in 5"`).
+
+Options may go before, between or after the items (`send winner-chronicles --dry-run "Release 1.19.0 is live"`). Use `--` before a text that starts with `-`.
 
 - **Targets** are seat names, contact names, or the names of other live herdr agents. `--all` adds every live seat except the sender. An unknown name is a usage error, and nothing is sent.
 - **Sender.** This is the herdr name of the agent in your pane, found with `herdr pane current --current` and `herdr agent get`. `--as NAME` sets it explicitly, and it is `owner` when your pane has no named agent. Text that already starts with `[from` is sent as is.

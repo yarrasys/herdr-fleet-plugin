@@ -99,6 +99,7 @@ Messages (design section 16). The safety hook in `tests/support.py` stays strict
   - `--all` skips the sender; live agent names work and unknown names are a usage error before anything is sent;
   - `--when-ready` waits then sends, or refuses a target still busy; a stalled or timed-out prompt is reported, never resent, and logged with `"delivery": "unconfirmed"` (other herdr errors are not logged); `--dry-run`;
   - `log` marks unconfirmed entries with `?` after the bytes, owed replies count them, and entries written before 0.4.1 (no `delivery`) read as sent;
+  - argument placement (0.4.2): options before, between and after the items (`send A --dry-run TEXT`), `send --all TEXT`, `--file` with several targets around options, the two-item minimum, `--` before a text starting with `-`, unknown options still rejected, and the same for `restart A --dry-run B` and `state set KEY --fleet X TEXT`;
   - `--fleet PATH` on every fleet command from a directory with no fleet file, `--file` still an alias where it meant the fleet file, `send --fleet --file` and `state set --fleet --file`, `HERDR_FLEET_FILE`, and `init` refusing `--fleet`;
   - the `log` command (filters, `--json`, corrupt lines skipped, no herdr calls) and kickoffs logged as `kind = "kickoff"`;
   - owed replies as a pure function (latest message per pair, replies, kickoffs, equal times ordered by the log) and in `status`/`status --json`/`log --owed`;

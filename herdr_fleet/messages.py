@@ -179,8 +179,10 @@ def size_label(size: int) -> str:
     return "%d B" % size if size < 1000 else "%.1f KB" % (size / 1000.0)
 
 
-def message_text(words: Sequence[str], text_file: Optional[str]) -> Tuple[List[str], str]:
-    """(targets, text) from the positional words and --file (design 16.1)."""
+def message_text(words: Sequence[str], text_file: Optional[str], all_seats: bool = False) -> Tuple[List[str], str]:
+    """(targets, text) from the positional items and --file (design 16.1): with --file
+    every item is a target; otherwise the last item is the text, so at least two items
+    are needed, or one with --all (`send --all TEXT`)."""
     if text_file:
         try:
             with open(text_file, "r", encoding="utf-8") as handle:
@@ -189,8 +191,8 @@ def message_text(words: Sequence[str], text_file: Optional[str]) -> Tuple[List[s
             raise UsageError("cannot read --file %s: %s" % (text_file, exc))
         targets = list(words)
     else:
-        if not words:
-            raise UsageError("give the targets and the text, or --file PATH")
+        if len(words) < (1 if all_seats else 2):
+            raise UsageError("send needs a target and a text, or --file")
         targets, text = list(words[:-1]), words[-1]
     if not text.strip():
         raise UsageError("the message is empty")
@@ -232,7 +234,7 @@ def resolve_targets(ctx: Ctx, names: Sequence[str], agents: Sequence[Dict]) -> L
 def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_name: Optional[str] = None,
             when_ready_ms: Optional[int] = None, all_seats: bool = False) -> int:
     """Design 16.1. One line per target; exit 0 all sent, 3 some refused, 1 herdr failure."""
-    names, text = message_text(words, text_file)
+    names, text = message_text(words, text_file, all_seats)
     sender = resolve_sender(ctx, as_name)
     agents = ctx.herdr.agent_list()
     if all_seats:
@@ -242,7 +244,7 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
         if all_seats:
             ctx.say("nothing sent: no live seat besides %s" % sender)
             return EXIT_PARTIAL
-        raise UsageError("name at least one target, or use --all")
+        raise UsageError("send needs a target and a text, or --file")
     targets = resolve_targets(ctx, names, agents)
     message = text if text.lstrip().startswith("[from") else "[from %s] %s" % (sender, text)
     size = size_label(len(message.encode("utf-8")))

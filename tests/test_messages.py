@@ -152,6 +152,61 @@ class Send(LiveFleet):
         self.assertEqual(log_entries(self.repo), [])
 
 
+class SendArguments(LiveFleet):
+    """0.4.2: options may sit anywhere among the positional items (argparse splits them)."""
+
+    def test_option_between_target_and_text(self):  # the live bug
+        code, out, err = self.run_cli("send", "fablyn-dev", "--dry-run", "Release 1.19.0 is live")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("would send to fablyn-dev (idle)", out)
+
+    def test_options_before_between_and_after(self):
+        for argv in (["--as", "owner", "fablyn-dev", "fablyn-reviewer", "hi"],
+                     ["fablyn-dev", "--as", "owner", "fablyn-reviewer", "hi"],
+                     ["fablyn-dev", "fablyn-reviewer", "--as", "owner", "hi"],
+                     ["fablyn-dev", "fablyn-reviewer", "hi", "--as", "owner"]):
+            self.assertEqual(self.run_cli("send", *argv)[0], 0, argv)
+        self.assertEqual(self.prompts_to("fablyn-dev"), ["[from owner] hi"] * 4)
+        self.assertEqual(self.prompts_to("fablyn-reviewer"), ["[from owner] hi"] * 4)
+
+    def test_all_with_only_a_text(self):
+        code, out, _ = self.run_cli("send", "--all", "--as", "fablyn-dev", "standup")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([a[2] for a in self.argvs("agent", "prompt")], ["fablyn-orchestrator", "fablyn-reviewer"])
+        self.assertEqual(self.prompts_to("fablyn-reviewer"), ["[from fablyn-dev] standup"])
+
+    def test_file_with_several_targets_around_options(self):
+        brief = self.write_file("brief.md", "Brief\n")
+        code, out, _ = self.run_cli("send", "fablyn-dev", "--file", brief, "fablyn-reviewer", "--as", "owner",
+                                    "fablyn-orchestrator")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.argvs("agent", "prompt")), 3)
+
+    def test_two_items_minimum_without_file(self):
+        code, _, err = self.run_cli("send", "fablyn-dev")
+        self.assertEqual(code, 2)
+        self.assertIn("send needs a target and a text, or --file", err)
+        self.assertEqual(self.run_cli("send", "--dry-run", "only text")[0], 2)
+        self.assertEqual(self.run_cli("send", "--file", self.write_file("b.md", "x\n"))[0], 2)  # no target
+        self.assertEqual(self.argvs("agent", "prompt"), [])
+
+    def test_double_dash_and_unknown_options(self):
+        code, out, _ = self.run_cli("send", "fablyn-dev", "--dry-run", "--", "- a bullet")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.run_cli("send", "fablyn-dev", "--bogus", "x")[0], 2)
+
+    def test_other_commands_with_name_lists_and_state_set(self):
+        code, out, _ = self.run_cli("restart", "fablyn-dev", "--dry-run", "fablyn-reviewer")
+        self.assertEqual(code, 0, out)
+        self.assertIn("quit fablyn-reviewer", out)
+        self.assertEqual(self.run_cli("status", "stray")[0], 2)
+        self.write_fleet('state_note = ".herdr/STATE.md"\n' + self.read_fleet())
+        fleet = os.path.join(self.repo, ".herdr", "fleet.toml")
+        self.assertEqual(self.run_cli("state", "set", "next", "--fleet", fleet, "ship it")[0], 0)
+        with open(os.path.join(self.repo, ".herdr", "STATE.md")) as handle:
+            self.assertIn("ship it", handle.read())
+
+
 class LogCommand(LiveFleet):
     def test_log_lists_filters_and_skips_corrupt_lines(self):
         self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "first\nsecond line")

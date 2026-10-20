@@ -494,3 +494,7 @@ Invariant 1 extends to `send`: text reaches agents only through `agent prompt`. 
 ### 16.10 Version 0.4.1
 
 `--fleet PATH` chooses the fleet file on every command (`--file` stays an alias where it already meant that; `send` and `state` keep `--file` for their text). Sends that herdr reports as stalled or timed out are logged with `delivery = "unconfirmed"` and shown with `?` in `log`, since the text may have been delivered; they are never resent. Refusals and other errors are still not logged.
+
+### 16.11 Version 0.4.2
+
+Options may appear anywhere on the command line: commands with a name list (`send`, `restart`, `swap`, `kickoff`, `down`, `up`, `state set`) parse with `parse_known_args` and fold the remaining words back into the list in order; `--` still ends options. `send` item rules: without `--file` the last item is the text and at least two items are required (one with `--all`); with `--file` every item is a target.

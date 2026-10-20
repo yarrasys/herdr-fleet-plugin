@@ -94,8 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
                                    "prefixed [from <sender>]. Working targets get it queued; blocked, unknown and "
                                    "absent ones are refused. Here --file is the text; pick a fleet file with "
                                    "--fleet PATH.")
-    p.add_argument("words", nargs="*", metavar="TARGET... TEXT",
-                   help="seat, contact or live agent names, then the text (with --file, all are targets)")
+    p.add_argument("words", nargs="*", metavar="TARGET... [TEXT]",
+                   help="seat, contact or live agent names, then the text; with --file every item is a target, "
+                        "and with --all a single item is the text. Options may go anywhere.")
     p.add_argument("--file", dest="message_file", metavar="PATH", help="read the text from this UTF-8 file")
     p.add_argument("--as", dest="as_name", metavar="NAME", help="sender name (default: your pane's agent, or owner)")
     p.add_argument("--when-ready", dest="when_ready", metavar="MS", type=int,
@@ -146,6 +147,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Commands whose positional list may be split by options: `send A --dry-run TEXT`.
+LIST_POSITIONALS = {"send": "words", "up": "names", "restart": "names", "swap": "names", "kickoff": "names",
+                    "down": "names"}
+
+
+def parse(parser: argparse.ArgumentParser, argv: List[str]) -> argparse.Namespace:
+    """Parse with options anywhere. argparse fills a positional list from the first run
+    of words only and calls later words unrecognized; put them back, in order, into the
+    command's list (or `state set`'s TEXT). Unknown options are still an error; after
+    `--` every word is positional."""
+    args, extras = parser.parse_known_args(argv)
+    if not extras:
+        return args
+    words: List[str] = []
+    unknown: List[str] = []
+    for index, item in enumerate(extras):
+        if item == "--":
+            words.extend(extras[index + 1:])
+            break
+        (unknown if item.startswith("-") and item != "-" else words).append(item)
+    dest = LIST_POSITIONALS.get(args.command)
+    if not unknown and dest:
+        setattr(args, dest, list(getattr(args, dest) or []) + words)
+    elif not unknown and args.command == "state" and getattr(args, "text", "") is None and len(words) == 1:
+        args.text = words[0]
+    else:
+        parser.error("unrecognized arguments: %s" % " ".join(unknown or extras))
+    return args
+
+
 def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] = None,
          runner: Optional[Runner] = None, clock: Optional[Clock] = None, stdout: Optional[TextIO] = None,
          stderr: Optional[TextIO] = None, stdin: Optional[TextIO] = None, cwd: Optional[str] = None) -> int:
@@ -154,7 +185,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
     stderr = stderr or sys.stderr
     stdin = stdin or sys.stdin
     try:
-        args = build_parser().parse_args(list(argv) if argv is not None else None)
+        args = parse(build_parser(), list(argv) if argv is not None else sys.argv[1:])
     except SystemExit as exc:
         return int(exc.code or 0) if isinstance(exc.code, int) else EXIT_USAGE
     if args.command == "install-cli":
