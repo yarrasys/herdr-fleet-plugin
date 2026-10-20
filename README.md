@@ -100,7 +100,7 @@ description = "fleet menu"
 
 ## The fleet file
 
-`<repo>/.herdr/fleet.toml`. Discovery walks up from the current directory to the first directory containing `.herdr/fleet.toml`; that directory is the repo root. `--file PATH` or `HERDR_FLEET_FILE` overrides discovery (the repo root is then the parent of the `.herdr` directory holding the file, or the file's own directory). A full example lives in [examples/fablyn](examples/fablyn).
+`<repo>/.herdr/fleet.toml`. Discovery walks up from the current directory to the first directory containing `.herdr/fleet.toml`; that directory is the repo root. `--fleet PATH` (on every command but `init` and `install-cli`) or `HERDR_FLEET_FILE` overrides discovery (the repo root is then the parent of the `.herdr` directory holding the file, or the file's own directory). A full example lives in [examples/fablyn](examples/fablyn).
 
 ```toml
 workspace  = "fablyn"                  # optional: reuse the workspace with this label, else create it.
@@ -185,7 +185,7 @@ The text starts with `[from herdr-fleet]` unless the template starts with `[from
 
 ## Commands
 
-Most commands accept `--file PATH` to pick the fleet file; `send` and `state set` use `--file` for their text, so with those set `HERDR_FLEET_FILE` instead. Most accept `--notify` (also send the summary as a herdr notification). When no fleet file is found, the error says so and suggests `herdr-fleet init`.
+Every command except `init` and `install-cli` accepts `--fleet PATH` to pick the fleet file (`HERDR_FLEET_FILE` works too). On the commands where `--file PATH` already meant the fleet file it stays an alias. `send --file` and `state set --file` are the text to send or store. Most accept `--notify` (also send the summary as a herdr notification). When no fleet file is found, the error says so and suggests `herdr-fleet init`.
 
 | Command | What it does |
 | --- | --- |
@@ -217,19 +217,19 @@ herdr-fleet is a messenger only. It never reads or interprets an agent's output,
 - **Targets** are seat names, contact names, or the names of other live herdr agents. `--all` adds every live seat except the sender. An unknown name is a usage error, and nothing is sent.
 - **Sender.** This is the herdr name of the agent in your pane, found with `herdr pane current --current` and `herdr agent get`. `--as NAME` sets it explicitly, and it is `owner` when your pane has no named agent. Text that already starts with `[from` is sent as is.
 - **State rules.** The target's state is read just before sending. `idle` and `done` get the text. `working` gets it too: herdr queues it for the agent's next turn. `blocked`, `unknown` and absent targets are refused and nothing is sent. With `--when-ready MS`, herdr-fleet first waits up to MS ms (`herdr agent wait --until idle --until done`), and refuses a target that is still not idle or done. A stalled or timed-out prompt is reported and never resent.
-- **Output.** One line per target, e.g. `sent to fablyn-dev (working), 3.4 KB` or `refused fablyn-reviewer (blocked): nothing sent`. Exit 0 when every target was sent, 3 when some were refused, 1 on a herdr failure, 2 on a usage error. `--dry-run` says what would be sent. There is no manifest action and no menu entry for `send`; it takes arguments.
+- **Output.** One line per target, e.g. `sent to fablyn-dev (working), 3.4 KB`, `refused fablyn-reviewer (blocked): nothing sent` or `unconfirmed fablyn-dev, 3.4 KB: …` (the prompt stalled or timed out). Exit 0 when every target was sent, 3 when some were refused, 1 on a herdr failure, 2 on a usage error. `--dry-run` says what would be sent. There is no manifest action and no menu entry for `send`; it takes arguments.
 
 ### The message log and owed replies
 
-Every successful `send`, and every kickoff the plugin sends, is appended to `<repo>/.herdr/messages.jsonl`, which `.herdr/.gitignore` ignores. Each line is one JSON object. `first_line` is the first non-empty line after the `[from …]` prefix, up to 120 characters, and `file` is present only for `--file`. Refused sends are not logged.
+Every `send` that reached its target or may have (see `delivery` below), and every kickoff the plugin sends, is appended to `<repo>/.herdr/messages.jsonl`, which `.herdr/.gitignore` ignores. Each line is one JSON object. `first_line` is the first non-empty line after the `[from …]` prefix, up to 120 characters, and `file` is present only for `--file`. `delivery` is `sent`, or `unconfirmed` when `agent prompt` returned `agent_prompt_stalled` or `timeout`: the text may still have arrived, so it is logged, the command exits 1, and it is never resent. Refused sends are not logged.
 
 ```json
-{"time":"2026-10-20T10:31:04+11:00","from":"fablyn-orchestrator","to":"fablyn-reviewer","kind":"send","bytes":3412,"first_line":"Review round 3: commits a1b2c3..d4e5f6","file":"/private/tmp/brief-3.md"}
+{"time":"2026-10-20T10:31:04+11:00","from":"fablyn-orchestrator","to":"fablyn-reviewer","kind":"send","bytes":3412,"first_line":"Review round 3: commits a1b2c3..d4e5f6","delivery":"sent","file":"/private/tmp/brief-3.md"}
 ```
 
-`herdr-fleet log` prints `time  from → to  bytes  first_line` lines, newest last. `--seat NAME` keeps messages from or to NAME, `--last N` defaults to 50, and `--json` prints the entries. A corrupt line is skipped with a warning.
+`herdr-fleet log` prints `time  from → to  bytes  first_line` lines, newest last, with `?` after the bytes for an unconfirmed delivery. `--seat NAME` keeps messages from or to NAME, `--last N` defaults to 50, and `--json` prints the entries. A corrupt line is skipped with a warning.
 
-Owed replies come from the log alone. For each pair of senders, the latest `send` from A to B is *awaiting* until B sends A something later; within the same second, log order decides. Kickoffs come from the plugin and never create an obligation. `status` prints one line per awaiting message, oldest first, for example `awaiting: fablyn-reviewer owes fablyn-orchestrator since 10:31 (Review round 3: commits a1b2c3..d4e5f6)`. `status --json` carries them as `"owed"`, and `log --owed` prints the list on its own.
+Owed replies come from the log alone, unconfirmed messages included. For each pair of senders, the latest `send` from A to B is *awaiting* until B sends A something later; within the same second, log order decides. Kickoffs come from the plugin and never create an obligation. `status` prints one line per awaiting message, oldest first, for example `awaiting: fablyn-reviewer owes fablyn-orchestrator since 10:31 (Review round 3: commits a1b2c3..d4e5f6)`. `status --json` carries them as `"owed"`, and `log --owed` prints the list on its own.
 
 ### Contacts
 

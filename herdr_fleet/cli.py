@@ -33,9 +33,13 @@ from herdr_fleet.tile import op_tile
 
 
 def build_parser() -> argparse.ArgumentParser:
+    fleet = argparse.ArgumentParser(add_help=False)  # for commands whose --file means something else
+    fleet.add_argument("--fleet", dest="fleet", metavar="PATH",
+                       help="fleet file to use instead of discovering .herdr/fleet.toml (also HERDR_FLEET_FILE)")
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--file", metavar="PATH",
-                        help="fleet file to use instead of discovering .herdr/fleet.toml (also HERDR_FLEET_FILE)")
+    common.add_argument("--fleet", "--file", dest="fleet", metavar="PATH",
+                        help="fleet file to use instead of discovering .herdr/fleet.toml; --file is an alias "
+                             "(also HERDR_FLEET_FILE)")
     common.add_argument("--notify", action="store_true",
                         help="also send the result as a herdr notification (the manifest actions set this)")
     notes = argparse.ArgumentParser(add_help=False)
@@ -85,10 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--close-workspace", action="store_true",
                    help="close the workspace if herdr-fleet created it and no agent is left")
 
-    p = sub.add_parser("send", help="message seats, contacts or live agents: [from <you>] TEXT",
+    p = sub.add_parser("send", parents=[fleet], help="message seats, contacts or live agents: [from <you>] TEXT",
                        description="Send TEXT (or --file PATH) to each TARGET with one `herdr agent prompt`, "
                                    "prefixed [from <sender>]. Working targets get it queued; blocked, unknown and "
-                                   "absent ones are refused. Use HERDR_FLEET_FILE to pick a fleet file.")
+                                   "absent ones are refused. Here --file is the text; pick a fleet file with "
+                                   "--fleet PATH.")
     p.add_argument("words", nargs="*", metavar="TARGET... TEXT",
                    help="seat, contact or live agent names, then the text (with --file, all are targets)")
     p.add_argument("--file", dest="message_file", metavar="PATH", help="read the text from this UTF-8 file")
@@ -105,12 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--owed", action="store_true", help="only the messages still awaiting a reply")
 
     p = sub.add_parser("state", help="show or update sections of the state note (state_note)",
-                       description="Use HERDR_FLEET_FILE to pick a fleet file.")
+                       description="Pick a fleet file with --fleet PATH after the action (state set --fleet ...).")
     state_sub = p.add_subparsers(dest="state_action", metavar="ACTION")
     state_sub.required = True
-    state_sub.add_parser("show", help="print the state note")
-    state_sub.add_parser("keys", help="list the sections")
-    q = state_sub.add_parser("set", help="replace the section ## KEY (created if absent)")
+    state_sub.add_parser("show", parents=[fleet], help="print the state note")
+    state_sub.add_parser("keys", parents=[fleet], help="list the sections")
+    q = state_sub.add_parser("set", parents=[fleet], help="replace the section ## KEY (created if absent)")
     q.add_argument("key", metavar="KEY")
     q.add_argument("text", nargs="?", metavar="TEXT")
     q.add_argument("--file", dest="text_file", metavar="PATH", help="read the section text from this file")
@@ -155,7 +160,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
     if args.command == "install-cli":
         return op_install_cli(PLUGIN_ROOT, args.dir, stdout, env.get("PATH", ""))
     herdr = Herdr(find_binary(env), runner)
-    ctx = Ctx(herdr, env, clock or Clock(), stdout, stderr, cwd or os.getcwd(), file=getattr(args, "file", None),
+    ctx = Ctx(herdr, env, clock or Clock(), stdout, stderr, cwd or os.getcwd(), file=getattr(args, "fleet", None),
               notify=getattr(args, "notify", False), dry_run=getattr(args, "dry_run", False))
     try:
         return _dispatch(ctx, args, stdin)

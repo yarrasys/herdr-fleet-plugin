@@ -4,6 +4,7 @@ send-only exception to the safety hook, and pane-move lines."""
 from __future__ import annotations
 
 import datetime
+import io
 import json
 import os
 import unittest
@@ -11,6 +12,7 @@ import unittest
 import fake_herdr
 from support import CALLER_PANE, FleetCase, LiveFleet
 from herdr_fleet import messages
+from herdr_fleet.cli import main
 
 
 def log_entries(repo):
@@ -32,9 +34,9 @@ class Send(LiveFleet):
         self.assertEqual(out.strip(), "sent to fablyn-dev (idle), %d B" % len(text.encode()))
         self.assertIn(["pane", "current", "--current"], self.argvs("pane", "current"))  # sender from your pane
         (entry,) = log_entries(self.repo)
-        self.assertEqual({k: entry[k] for k in ("from", "to", "kind", "bytes", "first_line")},
+        self.assertEqual({k: entry[k] for k in ("from", "to", "kind", "bytes", "first_line", "delivery")},
                          {"from": "caller", "to": "fablyn-dev", "kind": "send", "bytes": len(text.encode()),
-                          "first_line": "Review round 3: commits a1b2c3..d4e5f6"})
+                          "first_line": "Review round 3: commits a1b2c3..d4e5f6", "delivery": "sent"})
         self.assertNotIn("file", entry)
         with open(os.path.join(self.repo, ".herdr", ".gitignore")) as handle:
             self.assertIn("messages.jsonl", handle.read().split())
@@ -125,14 +127,22 @@ class Send(LiveFleet):
         self.assertIn("refused fablyn-dev (working after --when-ready 5000 ms): nothing sent", out)
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
 
-    def test_stalled_prompt_is_reported_not_resent_not_logged(self):
+    def test_stalled_prompt_is_reported_not_resent_and_logged_unconfirmed(self):
         self.world["behaviors"]["prompt_errors"] = {"fablyn-dev": "agent_prompt_stalled"}
         code, out, _ = self.run_cli("send", "fablyn-dev", "fablyn-reviewer", "x")
         self.assertEqual(code, 1)
-        self.assertIn("failed fablyn-dev: herdr error agent_prompt_stalled", out)
-        self.assertIn("not resent", out)
+        self.assertIn("unconfirmed fablyn-dev, 15 B: herdr error agent_prompt_stalled", out)
+        self.assertIn("not resent; logged as unconfirmed", out)
         self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
-        self.assertEqual([e["to"] for e in log_entries(self.repo)], ["fablyn-reviewer"])
+        self.assertEqual([(e["to"], e["delivery"]) for e in log_entries(self.repo)],
+                         [("fablyn-dev", "unconfirmed"), ("fablyn-reviewer", "sent")])
+
+    def test_timeout_is_unconfirmed_too_and_other_errors_are_not_logged(self):
+        self.world["behaviors"]["prompt_errors"] = {"fablyn-dev": "timeout", "fablyn-reviewer": "agent_not_found"}
+        code, out, _ = self.run_cli("send", "fablyn-dev", "fablyn-reviewer", "x")
+        self.assertEqual(code, 1)
+        self.assertIn("failed fablyn-reviewer: herdr error agent_not_found", out)
+        self.assertEqual([(e["to"], e["delivery"]) for e in log_entries(self.repo)], [("fablyn-dev", "unconfirmed")])
 
     def test_dry_run(self):
         code, out, _ = self.run_cli("send", "--dry-run", "fablyn-dev", "x")
@@ -172,13 +182,79 @@ class LogCommand(LiveFleet):
         self.assertEqual(len(self.calls()), before)
 
 
+class Unconfirmed(LiveFleet):
+    def test_log_marks_unconfirmed_and_owed_counts_them(self):
+        self.world["behaviors"]["prompt_errors"] = {"fablyn-reviewer": "agent_prompt_stalled"}
+        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-reviewer", "Review round 3")
+        self.world["behaviors"]["prompt_errors"] = {}
+        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Task 4")
+        lines = self.run_cli("log")[1].splitlines()
+        self.assertRegex(lines[0], r"  fablyn-orchestrator → fablyn-reviewer  \d+\?  Review round 3$")
+        self.assertRegex(lines[1], r"  fablyn-orchestrator → fablyn-dev  \d+  Task 4$")
+        owed = [(o["to"], o["first_line"]) for o in json.loads(self.run_cli("log", "--owed", "--json")[1])]
+        self.assertEqual(owed, [("fablyn-reviewer", "Review round 3"), ("fablyn-dev", "Task 4")])
+
+    def test_entries_written_before_0_4_1_read_as_sent(self):
+        old = {"time": "2026-10-20T10:31:04+11:00", "from": "a", "to": "b", "kind": "send", "bytes": 3,
+               "first_line": "hi"}
+        self.assertEqual(messages.format_entry(old), "2026-10-20T10:31:04+11:00  a → b  3  hi")
+        self.assertEqual(len(messages.owed([old])), 1)
+
+
+class FleetOption(LiveFleet):
+    """--fleet PATH everywhere; --file stays an alias where it meant the fleet file."""
+
+    def setUp(self):
+        super().setUp()
+        self.elsewhere = os.path.join(self.tmp, "elsewhere")  # no fleet file here or above
+        os.makedirs(self.elsewhere)
+        self.fleet_path = os.path.join(self.repo, ".herdr", "fleet.toml")
+        self.write_fleet('state_note = ".herdr/STATE.md"\n' + self.read_fleet())
+
+    def run_elsewhere(self, *argv):
+        with open(self.log_path, "a") as handle:
+            handle.write(json.dumps({"command": list(argv)}) + "\n")
+        with open(self.world_path, "w") as handle:
+            json.dump(self.world, handle)
+        out, err = io.StringIO(), io.StringIO()
+        code = main(list(argv), env=self.env, runner=fake_herdr.Fake(self.world_path, self.log_path, CALLER_PANE),
+                    clock=self.clock, stdout=out, stderr=err, cwd=self.elsewhere)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_every_fleet_command_takes_fleet(self):
+        for argv in (["status", "--fleet", self.fleet_path], ["status", "--file", self.fleet_path],
+                     ["log", "--fleet", self.fleet_path], ["doctor", "--fleet", self.fleet_path],
+                     ["tile", "--dry-run", "--fleet", self.fleet_path],
+                     ["kickoff", "fablyn-dev", "--fleet", self.fleet_path],
+                     ["state", "keys", "--fleet", self.fleet_path], ["state", "show", "--fleet", self.fleet_path]):
+            code, out, err = self.run_elsewhere(*argv)
+            self.assertIn(code, (0,), (argv, out, err))
+        self.assertEqual(self.run_elsewhere("status")[0], 2)  # and without it, nothing is found
+
+    def test_send_and_state_set_keep_file_for_their_text(self):
+        brief = self.write_file("brief.md", "Round 4 brief\n")
+        code, out, _ = self.run_elsewhere("send", "--fleet", self.fleet_path, "--file", brief, "fablyn-dev")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.prompts_to("fablyn-dev"), ["[from caller] Round 4 brief\n"])
+        note = self.write_file("next.md", "ship it\n")
+        code, out, _ = self.run_elsewhere("state", "set", "next", "--fleet", self.fleet_path, "--file", note)
+        self.assertEqual(code, 0, out)
+        with open(os.path.join(self.repo, ".herdr", "STATE.md")) as handle:
+            self.assertIn("ship it", handle.read())
+
+    def test_herdr_fleet_file_still_works_and_init_has_no_fleet_option(self):
+        self.env["HERDR_FLEET_FILE"] = self.fleet_path
+        self.assertEqual(self.run_elsewhere("send", "fablyn-dev", "via the environment")[0], 0)
+        self.assertEqual(self.run_elsewhere("init", "--fleet", self.fleet_path)[0], 2)
+
+
 class KickoffsAreLogged(FleetCase):
     def test_up_logs_one_kickoff_per_seat(self):
         self.assertEqual(self.run_cli("up")[0], 0)
         entries = log_entries(self.repo)
-        self.assertEqual([(e["from"], e["to"], e["kind"]) for e in entries],
-                         [("herdr-fleet", n, "kickoff") for n in ("fablyn-orchestrator", "fablyn-dev",
-                                                                  "fablyn-reviewer")])
+        self.assertEqual([(e["from"], e["to"], e["kind"], e["delivery"]) for e in entries],
+                         [("herdr-fleet", n, "kickoff", "sent") for n in ("fablyn-orchestrator", "fablyn-dev",
+                                                                          "fablyn-reviewer")])
         self.assertTrue(entries[0]["first_line"].startswith("You are fablyn-orchestrator"))
         self.assertEqual(messages.owed(entries), [])  # kickoffs never create an obligation
 

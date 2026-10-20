@@ -490,3 +490,7 @@ Invariant 1 extends to `send`: text reaches agents only through `agent prompt`. 
 - Doctor permissions: non-Claude seats print `skip`; `Bash` or `Bash(*)` covers everything; an entry without a wildcard covers nothing; prefixes match on whole words, so `Bash(herdr:*)` does not cover `herdr-fleet`.
 - Status `CWD` is the live agent's `foreground_cwd`, else `cwd`, else the seat's configured cwd.
 - Verified live (20 Oct 2026): `send` to a working Haiku seat was queued by herdr and answered after the current turn; `--file`, the sender prefix, the log, the owed line and `state set` all behaved as specified.
+
+### 16.10 Version 0.4.1
+
+`--fleet PATH` chooses the fleet file on every command (`--file` stays an alias where it already meant that; `send` and `state` keep `--file` for their text). Sends that herdr reports as stalled or timed out are logged with `delivery = "unconfirmed"` and shown with `?` in `log`, since the text may have been delivered; they are never resent. Refusals and other errors are still not logged.

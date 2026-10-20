@@ -8,8 +8,10 @@ output, never routes replies and never decides who gets a message.
   agent (herdr queues the text for its next turn); ``blocked``, ``unknown``
   and absent targets are refused, and a stalled or timed-out prompt is never
   resent.
-- The log is ``<repo>/.herdr/messages.jsonl``: one JSON object per successful
-  ``send`` or kickoff, appended with ``O_APPEND``.
+- The log is ``<repo>/.herdr/messages.jsonl``: one JSON object per ``send``
+  or kickoff that herdr accepted (``"delivery": "sent"``) or that may have
+  arrived (``"delivery": "unconfirmed"``: the prompt stalled or timed out),
+  appended with ``O_APPEND``. Refused sends are never logged.
 - Owed replies are derived from the log alone (``owed``).
 """
 
@@ -52,9 +54,9 @@ def first_line(text: str) -> str:
 
 
 def make_entry(sender: str, to: str, kind: str, text: str, file: Optional[str] = None,
-               time: Optional[str] = None) -> Dict:
+               time: Optional[str] = None, delivery: str = "sent") -> Dict:
     entry = {"time": time or now_iso(), "from": sender, "to": to, "kind": kind,
-             "bytes": len(text.encode("utf-8")), "first_line": first_line(text)}
+             "bytes": len(text.encode("utf-8")), "first_line": first_line(text), "delivery": delivery}
     if file:
         entry["file"] = file
     return entry
@@ -157,8 +159,10 @@ def owed_lines(items: Sequence[Dict], today: Optional[datetime.date] = None) -> 
 
 
 def format_entry(entry: Dict) -> str:
-    return "%s  %s → %s  %s  %s" % (entry["time"], entry["from"], entry["to"], entry.get("bytes", "?"),
-                                   entry.get("first_line", ""))
+    """``time  from → to  bytes  first_line``; ``?`` after the bytes marks an unconfirmed delivery."""
+    unconfirmed = "?" if entry.get("delivery") == "unconfirmed" else ""
+    return "%s  %s → %s  %s%s  %s" % (entry["time"], entry["from"], entry["to"], entry.get("bytes", "?"),
+                                     unconfirmed, entry.get("first_line", ""))
 
 
 # -- send -----------------------------------------------------------------------------------
@@ -244,12 +248,12 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
     size = size_label(len(message.encode("utf-8")))
     codes = []
     for target in targets:
-        line, code = _deliver(ctx, target, message, size, when_ready_ms)
+        line, code, delivery = _deliver(ctx, target, message, size, when_ready_ms)
         ctx.say(line)
         codes.append(code)
-        if code == EXIT_OK and not ctx.dry_run:
+        if delivery and not ctx.dry_run:  # sent, or possibly delivered: log it (never refusals)
             entry = make_entry(sender, target.name, "send", message,
-                               os.path.abspath(text_file) if text_file else None)
+                               os.path.abspath(text_file) if text_file else None, delivery=delivery)
             try:
                 append(ctx.fleet.repo, entry)
             except OSError as exc:
@@ -259,13 +263,15 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
     return EXIT_PARTIAL if EXIT_PARTIAL in codes else EXIT_OK
 
 
-def _deliver(ctx: Ctx, target: Target, message: str, size: str, when_ready_ms: Optional[int]) -> Tuple[str, int]:
+def _deliver(ctx: Ctx, target: Target, message: str, size: str,
+             when_ready_ms: Optional[int]) -> Tuple[str, int, Optional[str]]:
+    """(output line, exit code, delivery to log: "sent", "unconfirmed" or None)."""
     if target.problem or not target.herdr:
-        return "refused %s (%s): nothing sent" % (target.name, target.problem or "absent"), EXIT_PARTIAL
+        return "refused %s (%s): nothing sent" % (target.name, target.problem or "absent"), EXIT_PARTIAL, None
     status = _status(ctx, target.herdr)
     if when_ready_ms and status not in SETTLED and status != "absent" and ctx.dry_run:
         return ("would wait up to %d ms for %s (%s), then send %s" % (when_ready_ms, target.name, status, size),
-                EXIT_OK)
+                EXIT_OK, None)
     if when_ready_ms and status not in SETTLED and status != "absent":
         try:
             ctx.herdr.agent_wait(target.herdr, ("idle", "done"), when_ready_ms)
@@ -274,17 +280,21 @@ def _deliver(ctx: Ctx, target: Target, message: str, size: str, when_ready_ms: O
         status = _status(ctx, target.herdr)
         if status not in SETTLED:
             return ("refused %s (%s after --when-ready %d ms): nothing sent" % (target.name, status, when_ready_ms),
-                    EXIT_PARTIAL)
+                    EXIT_PARTIAL, None)
     if status not in SEND_ALLOWED:
-        return "refused %s (%s): nothing sent" % (target.name, status), EXIT_PARTIAL
+        return "refused %s (%s): nothing sent" % (target.name, status), EXIT_PARTIAL, None
     if ctx.dry_run:
-        return "would send to %s (%s), %s" % (target.name, status, size), EXIT_OK
+        return "would send to %s (%s), %s" % (target.name, status, size), EXIT_OK, None
     outcome = safe_prompt(ctx.herdr, target.herdr, message, SEND_ALLOWED)
     if outcome.ok:
-        return "sent to %s (%s), %s" % (target.name, outcome.agent.get("agent_status") or status, size), EXIT_OK
+        return ("sent to %s (%s), %s" % (target.name, outcome.agent.get("agent_status") or status, size),
+                EXIT_OK, "sent")
     if outcome.status in ("blocked", "unknown", "absent"):  # herdr sent nothing
-        return "refused %s (%s): nothing sent" % (target.name, outcome.status), EXIT_PARTIAL
-    return "failed %s: %s" % (target.name, outcome.detail), EXIT_FAIL
+        return "refused %s (%s): nothing sent" % (target.name, outcome.status), EXIT_PARTIAL, None
+    if outcome.status == "unconfirmed":  # stalled or timed out: may have arrived; logged, never resent
+        return ("unconfirmed %s, %s: %s; logged as unconfirmed" % (target.name, size, outcome.detail),
+                EXIT_FAIL, "unconfirmed")
+    return "failed %s: %s" % (target.name, outcome.detail), EXIT_FAIL, None
 
 
 def _status(ctx: Ctx, target: str) -> str:

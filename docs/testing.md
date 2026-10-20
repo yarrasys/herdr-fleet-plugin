@@ -97,7 +97,9 @@ Messages (design section 16). The safety hook in `tests/support.py` stays strict
   - a working target gets the text queued; blocked, unknown and absent targets are refused, nothing is sent and nothing logged; a mix of sent and refused exits 3;
   - `--as`, the `owner` fallback (unnamed agent or no pane), the existing `[from` prefix kept, and `--file` (the log's `file` field, empty and missing files);
   - `--all` skips the sender; live agent names work and unknown names are a usage error before anything is sent;
-  - `--when-ready` waits then sends, or refuses a target still busy; a stalled prompt is reported, not resent and not logged; `--dry-run`;
+  - `--when-ready` waits then sends, or refuses a target still busy; a stalled or timed-out prompt is reported, never resent, and logged with `"delivery": "unconfirmed"` (other herdr errors are not logged); `--dry-run`;
+  - `log` marks unconfirmed entries with `?` after the bytes, owed replies count them, and entries written before 0.4.1 (no `delivery`) read as sent;
+  - `--fleet PATH` on every fleet command from a directory with no fleet file, `--file` still an alias where it meant the fleet file, `send --fleet --file` and `state set --fleet --file`, `HERDR_FLEET_FILE`, and `init` refusing `--fleet`;
   - the `log` command (filters, `--json`, corrupt lines skipped, no herdr calls) and kickoffs logged as `kind = "kickoff"`;
   - owed replies as a pure function (latest message per pair, replies, kickoffs, equal times ordered by the log) and in `status`/`status --json`/`log --owed`;
   - the `pane A → B` lines for a seat found in another pane, a restart that follows a moved seat, and `--join`.
@@ -139,7 +141,7 @@ Do this in a shell where you will not run real herdr commands afterwards, or `un
 
 ## Live smoke test
 
-Run by the designer on 19 Oct 2026 against herdr 0.9.4, from the designer's own pane, and passed. This is the procedure as run. It uses one Claude seat on the cheap Haiku model, a fleet file in a scratch directory passed with `--file`, and the seat's `cwd` set to a directory Claude Code already trusts, so the seat starts without a trust prompt. The fleet has no `workspace` key, so the seat splits from the pane the commands run in; herdr-fleet never starts into, restarts or quits that pane.
+Run by the designer on 19 Oct 2026 against herdr 0.9.4, from the designer's own pane, and passed. This is the procedure as run. It uses one Claude seat on the cheap Haiku model, a fleet file in a scratch directory passed with `--file` (since 0.4.1 an alias of `--fleet`, which is the documented spelling), and the seat's `cwd` set to a directory Claude Code already trusts, so the seat starts without a trust prompt. The fleet has no `workspace` key, so the seat splits from the pane the commands run in; herdr-fleet never starts into, restarts or quits that pane.
 
 If the seat does stop at a trust or permission prompt, `up` reports it as blocked, notifies with the `request` sound and sends it nothing. Only the owner answers that prompt (AGENTS.md); then run `kickoff fleet-smoke`.
 
