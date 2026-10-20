@@ -26,7 +26,9 @@ FLEET_DIR = ".herdr"
 FLEET_NAME = "fleet.toml"
 DIRECTIONS = ("right", "down")
 
-TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "quit_timeout_ms"}
+TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "contacts", "quit_timeout_ms"}
+CONTACT_KEYS = {"name", "match", "note"}
+MATCH_KEYS = {"cwd", "kind", "name"}
 LAYOUT_KEYS = {"mode", "columns", "direction", "ratio"}
 MODES = ("chain", "grid")
 SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "from", "env", "kickoff",
@@ -61,6 +63,17 @@ class Seat:
 
 
 @dataclass
+class Contact:
+    """A ``[[contacts]]`` entry (design 16.4): a peer the team messages but never manages."""
+
+    name: str
+    cwd: Optional[str]          # resolved: absolute, ~ expanded
+    kind: Optional[str]
+    agent_name: Optional[str]   # herdr name to match
+    note: str
+
+
+@dataclass
 class Fleet:
     path: str
     repo: str
@@ -75,6 +88,13 @@ class Fleet:
     warnings: List[str] = field(default_factory=list)
     mode: str = "chain"              # chain | grid (design section 14)
     columns: Optional[int] = None    # grid only
+    contacts: List[Contact] = field(default_factory=list)
+
+    def contact(self, name: str) -> Optional[Contact]:
+        for contact in self.contacts:
+            if contact.name == name:
+                return contact
+        return None
 
     def seat(self, name: str) -> Optional[Seat]:
         for seat in self.seats:
@@ -191,12 +211,14 @@ def load_fleet(path: str) -> Fleet:
         seats.append(seat)
     if mode == "grid":
         _grid_overrides(seats, raw_seats, direction, ratio, warnings)
+    contacts = _parse_contacts(data.get("contacts", []), repo, [s.name for s in seats], errors, warnings)
 
     if errors:
         raise FleetError(["%s: %s" % (path, e) for e in errors])
     return Fleet(path=path, repo=repo, workspace=workspace, cwd=base_cwd, state_note=state_note,
                  kickoff=default_kickoff, direction=direction, ratio=ratio,
-                 quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns)
+                 quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns,
+                 contacts=contacts)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
@@ -270,6 +292,43 @@ def _grid_overrides(seats: List[Seat], raw_seats: List[Dict], direction: str, ra
             warnings.append("agents[%d] (%s): %s ignored in grid mode"
                             % (seat.index, seat.name, ", ".join(ignored)))
         seat.split, seat.ratio, seat.from_seat = direction, ratio, None
+
+
+def _parse_contacts(raw: object, repo: str, seat_names: List[str], errors: List[str],
+                    warnings: List[str]) -> List[Contact]:
+    """``[[contacts]]`` (design 16.4): names follow the herdr pattern and never collide
+    with seats; ``match`` needs at least one of cwd, kind, name."""
+    if not isinstance(raw, list) or not all(isinstance(c, dict) for c in raw):
+        errors.append("contacts: must be an array of tables ([[contacts]])")
+        return []
+    contacts: List[Contact] = []
+    for index, table in enumerate(raw):
+        where = "contacts[%d]" % index
+        _unknown_keys(table, CONTACT_KEYS, where, warnings)
+        name = table.get("name")
+        if not isinstance(name, str) or not NAME_RE.match(name):
+            errors.append("%s.name: %r must match [a-z][a-z0-9_-]{0,31}" % (where, name))
+            continue
+        where = "contacts[%d] (%s)" % (index, name)
+        if name in seat_names:
+            errors.append("%s.name: %r is already a seat name" % (where, name))
+        if any(c.name == name for c in contacts):
+            errors.append("%s.name: duplicate contact %r" % (where, name))
+        match = table.get("match")
+        if not isinstance(match, dict) or not match:
+            errors.append("%s.match: required table with cwd, kind and/or name" % where)
+            continue
+        _unknown_keys(match, MATCH_KEYS, where + ".match", warnings)
+        cwd = _opt_str(match, "cwd", where + ".match.cwd", errors)
+        kind = _opt_str(match, "kind", where + ".match.kind", errors)
+        agent_name = _opt_str(match, "name", where + ".match.name", errors)
+        if agent_name and agent_name in seat_names:
+            errors.append("%s.match.name: %r is a seat; contacts are never seats" % (where, agent_name))
+        if not (cwd or kind or agent_name):
+            errors.append("%s.match: needs at least one of cwd, kind, name" % where)
+        note = _opt_str(table, "note", where + ".note", errors) or ""
+        contacts.append(Contact(name, resolve_path(cwd, repo) if cwd else None, kind, agent_name, note))
+    return contacts
 
 
 def _unknown_keys(table: Dict, allowed: set, where: str, warnings: List[str]) -> None:

@@ -20,12 +20,14 @@ from typing import Dict, List, Mapping, Optional, Sequence
 from herdr_fleet.fleetfile import Fleet, Seat
 
 PREFIX = "[from herdr-fleet]"
-PLACEHOLDERS = ("name", "kind", "args", "repo", "cwd", "workspace", "roster", "state", "note", "reason")
+PLACEHOLDERS = ("name", "kind", "args", "repo", "cwd", "workspace", "roster", "contacts", "state", "note",
+                "reason")
 
 DEFAULT_TEMPLATE = """[from herdr-fleet] You are {name}, a {kind} agent in the "{workspace}" fleet for {repo}.
 Read AGENTS.md there. This message was sent by the fleet tool on {reason}.
 Team (herdr names; message them with `herdr agent prompt <name> "..."`):
 {roster}
+{contacts}
 {state}
 {note}
 """
@@ -102,7 +104,7 @@ def read_state_note(fleet: Fleet) -> str:
 
 
 def compose(seat: Seat, fleet: Fleet, workspace: str, roster: str, reason: str,
-            note: Optional[str] = None, state_text: Optional[str] = None) -> str:
+            note: Optional[str] = None, state_text: Optional[str] = None, contacts: str = "") -> str:
     """The full kickoff message for one seat."""
     values: Dict[str, str] = {
         "name": seat.name,
@@ -112,6 +114,7 @@ def compose(seat: Seat, fleet: Fleet, workspace: str, roster: str, reason: str,
         "cwd": seat.cwd,
         "workspace": workspace or "",
         "roster": roster,
+        "contacts": contacts,
         "state": read_state_note(fleet) if state_text is None else state_text,
         "note": note or "",
         "reason": reason,

@@ -101,7 +101,7 @@ class StateFile(unittest.TestCase):
         self.assertEqual(data["repo"], self.repo)
         self.assertEqual(data["agents"]["a"]["pane_id"], "w1:p2")
         with open(os.path.join(self.repo, ".herdr", ".gitignore")) as handle:
-            self.assertEqual(handle.read(), "fleet.state.json\n")
+            self.assertEqual(handle.read(), "fleet.state.json\nmessages.jsonl\n")
         self.assertEqual([f for f in os.listdir(os.path.join(self.repo, ".herdr")) if f.endswith(".tmp")], [])
 
     def test_gitignore_line_appended_once(self):
@@ -113,7 +113,7 @@ class StateFile(unittest.TestCase):
         save_state(state)
         save_state(state)
         with open(os.path.join(self.repo, ".herdr", ".gitignore")) as handle:
-            self.assertEqual(handle.read(), "other\nfleet.state.json\n")
+            self.assertEqual(handle.read(), "other\nfleet.state.json\nmessages.jsonl\n")
 
     def test_corrupt_state_is_an_error(self):
         os.makedirs(os.path.join(self.repo, ".herdr"))
@@ -146,7 +146,7 @@ class StateFile(unittest.TestCase):
         # m's pane was moved (the old id is gone, m is live elsewhere): re-pointed, every field kept
         self.assertEqual(state.agents["m"], {"pane_id": "w5:p3", "created_pane": True, "adopted": True,
                                              "kind": "claude"})
-        self.assertIn("state: m moved from gone to w5:p3", messages)
+        self.assertIn("m: pane gone → w5:p3", messages)
         self.assertIsNone(state.workspace_id)
         self.assertFalse(state.created_workspace)
         self.assertEqual(len(messages), 3)

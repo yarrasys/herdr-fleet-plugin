@@ -66,7 +66,7 @@ def install_fake_herdr(directory: str, cwd: str) -> Dict[str, str]:
     fake_herdr.put_agent(world, CALLER_PANE, "claude", name="caller", status="working")
     with open(os.path.join(directory, "world.json"), "w") as handle:
         json.dump(world, handle)
-    return {"PATH": bindir + os.pathsep + os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", directory),
+    return {"PATH": bindir + os.pathsep + os.environ.get("PATH", ""), "HOME": directory,  # never the real ~/.claude
             "HERDR_ENV": "1", "HERDR_BIN_PATH": herdr, "HERDR_PANE_ID": CALLER_PANE,
             "HERDR_WORKSPACE_ID": CALLER_WS, "FAKE_HERDR_WORLD": os.path.join(directory, "world.json"),
             "FAKE_HERDR_LOG": os.path.join(directory, "calls.jsonl")}
@@ -111,7 +111,7 @@ class FleetCase(unittest.TestCase):
         fake_herdr.add_workspace(self.world, CALLER_WS, "caller", self.repo)
         fake_herdr.put_agent(self.world, CALLER_PANE, "claude", name="caller", status="working")
         self.clock = FakeClock()
-        self.env: Dict[str, str] = {"HERDR_ENV": "1", "HERDR_BIN_PATH": "/fake/bin/herdr",
+        self.env: Dict[str, str] = {"HERDR_ENV": "1", "HERDR_BIN_PATH": "/fake/bin/herdr", "HOME": self.tmp,
                                     "HERDR_PANE_ID": CALLER_PANE, "HERDR_WORKSPACE_ID": CALLER_WS,
                                     "PATH": os.environ.get("PATH", "")}
         if self.fleet_text is not None:
@@ -161,6 +161,8 @@ class FleetCase(unittest.TestCase):
             json.dump(self.world, handle)
         out, err = io.StringIO(), io.StringIO()
         env = env if env is not None else self.env
+        with open(self.log_path, "a", encoding="utf-8") as handle:  # marks which command made the calls below
+            handle.write(json.dumps({"command": list(argv)}) + "\n")
         runner = fake_herdr.Fake(self.world_path, self.log_path, env.get("HERDR_PANE_ID"))
         code = main(list(argv), env=env, runner=runner, clock=self.clock,
                     stdout=out, stderr=err, stdin=io.StringIO(stdin), cwd=self.repo)
@@ -174,7 +176,7 @@ class FleetCase(unittest.TestCase):
         if not os.path.exists(self.log_path):
             return []
         with open(self.log_path, "r", encoding="utf-8") as handle:
-            return [json.loads(line) for line in handle if line.strip()]
+            return [entry for entry in (json.loads(line) for line in handle if line.strip()) if "argv" in entry]
 
     def argvs(self, *prefix: str) -> List[List[str]]:
         return [c["argv"] for c in self.calls() if c["argv"][:len(prefix)] == list(prefix)]
@@ -189,17 +191,27 @@ class FleetCase(unittest.TestCase):
         return None
 
     def assert_safety(self) -> None:
-        """Design section 7 invariants, checked against the full call log."""
+        """Design section 7 invariants, checked against the full call log. The one
+        exception (design 16.1): a prompt issued by `send` may reach a working agent."""
         caller = self.env.get("HERDR_PANE_ID")
-        for call in self.calls():
+        command: List[str] = []
+        entries = []
+        if os.path.exists(self.log_path):
+            with open(self.log_path, "r", encoding="utf-8") as handle:
+                entries = [json.loads(line) for line in handle if line.strip()]
+        for call in entries:
+            if "command" in call:
+                command = call["command"]
+                continue
             argv, info = call["argv"], call["info"]
             self.assertTrue(argv, "bare herdr was run")
             self.assertNotIn(tuple(argv[:2]), fake_herdr.FORBIDDEN, "forbidden command: %s" % argv)
             self.assertFalse(any(a in ("send-keys", "send-text") for a in argv[:2]), argv)
             self.assertNotEqual(argv[:2], ["pane", "run"], argv)
             if argv[:2] == ["agent", "prompt"]:
-                self.assertIn(info.get("target_status"), ("idle", "done", None),
-                              "prompted an agent in state %s: %s" % (info.get("target_status"), argv))
+                allowed = ("idle", "done", None) + (("working",) if command[:1] == ["send"] else ())
+                self.assertIn(info.get("target_status"), allowed,
+                              "%s prompted an agent in state %s: %s" % (command[:1], info.get("target_status"), argv))
             if argv[:2] == ["agent", "start"] and "--help" not in argv:
                 pane = argv[argv.index("--pane") + 1]
                 self.assertNotEqual(pane, caller, "started into the caller's pane")

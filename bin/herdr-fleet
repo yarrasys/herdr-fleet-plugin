@@ -19,5 +19,11 @@ if ROOT not in sys.path:
 
 from herdr_fleet.cli import main  # noqa: E402
 
+for _stream in (sys.stdout, sys.stderr):  # never crash on "→" under an ASCII locale
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
+
 if __name__ == "__main__":
     sys.exit(main())

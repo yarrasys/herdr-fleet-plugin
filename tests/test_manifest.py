@@ -140,6 +140,9 @@ class ManifestCommandsRun(unittest.TestCase):
         self.assertEqual([a[:2] for a in calls], [["notification", "show"]])  # nothing else reaches herdr
 
     def test_doctor_action_from_the_plugin_root(self):
+        os.makedirs(os.path.join(self.repo, ".claude"))
+        with open(os.path.join(self.repo, ".claude", "settings.json"), "w") as handle:
+            json.dump({"permissions": {"allow": ["Bash(herdr agent:*)", "Bash(herdr-fleet:*)"]}}, handle)
         context = {"workspace_id": "w1", "focused_pane_id": "w1:p1", "focused_pane_cwd": self.repo}
         proc = self.run_cmd(self.action_command("doctor"), ROOT, HERDR_PLUGIN_ACTION_ID="yarrasys.fleet.doctor",
                             HERDR_PLUGIN_CONTEXT_JSON=json.dumps(context))

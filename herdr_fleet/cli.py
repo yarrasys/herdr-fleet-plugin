@@ -26,6 +26,8 @@ from herdr_fleet.ops import op_down, op_install_cli, op_kickoff, op_restart, op_
 from herdr_fleet.scaffold import available_examples, run_init
 from herdr_fleet.seats import Clock
 from herdr_fleet.state import StateError
+from herdr_fleet.messages import op_log, op_send
+from herdr_fleet.statenote import op_state
 from herdr_fleet.tile import op_tile
 
 
@@ -83,6 +85,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--close-workspace", action="store_true",
                    help="close the workspace if herdr-fleet created it and no agent is left")
 
+    p = sub.add_parser("send", help="message seats, contacts or live agents: [from <you>] TEXT",
+                       description="Send TEXT (or --file PATH) to each TARGET with one `herdr agent prompt`, "
+                                   "prefixed [from <sender>]. Working targets get it queued; blocked, unknown and "
+                                   "absent ones are refused. Use HERDR_FLEET_FILE to pick a fleet file.")
+    p.add_argument("words", nargs="*", metavar="TARGET... TEXT",
+                   help="seat, contact or live agent names, then the text (with --file, all are targets)")
+    p.add_argument("--file", dest="message_file", metavar="PATH", help="read the text from this UTF-8 file")
+    p.add_argument("--as", dest="as_name", metavar="NAME", help="sender name (default: your pane's agent, or owner)")
+    p.add_argument("--when-ready", dest="when_ready", metavar="MS", type=int,
+                   help="wait up to MS ms for each target to be idle or done; refuse it if not")
+    p.add_argument("--all", dest="all_seats", action="store_true", help="every live seat except the sender")
+    p.add_argument("--dry-run", action="store_true", help="say what would be sent and send nothing")
+
+    p = sub.add_parser("log", parents=[common], help="show the message log (.herdr/messages.jsonl)")
+    p.add_argument("--seat", metavar="NAME", help="only messages from or to NAME")
+    p.add_argument("--last", metavar="N", type=int, default=50, help="the last N entries (default 50)")
+    p.add_argument("--json", action="store_true", help="print JSON")
+    p.add_argument("--owed", action="store_true", help="only the messages still awaiting a reply")
+
+    p = sub.add_parser("state", help="show or update sections of the state note (state_note)",
+                       description="Use HERDR_FLEET_FILE to pick a fleet file.")
+    state_sub = p.add_subparsers(dest="state_action", metavar="ACTION")
+    state_sub.required = True
+    state_sub.add_parser("show", help="print the state note")
+    state_sub.add_parser("keys", help="list the sections")
+    q = state_sub.add_parser("set", help="replace the section ## KEY (created if absent)")
+    q.add_argument("key", metavar="KEY")
+    q.add_argument("text", nargs="?", metavar="TEXT")
+    q.add_argument("--file", dest="text_file", metavar="PATH", help="read the section text from this file")
+
     p = sub.add_parser("tile", parents=[common],
                        help="re-tile the live seats in place ([layout] grid or chain); moves panes only")
     p.add_argument("--dry-run", action="store_true", help="print the pane moves and change nothing")
@@ -124,7 +156,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         return op_install_cli(PLUGIN_ROOT, args.dir, stdout, env.get("PATH", ""))
     herdr = Herdr(find_binary(env), runner)
     ctx = Ctx(herdr, env, clock or Clock(), stdout, stderr, cwd or os.getcwd(), file=getattr(args, "file", None),
-              notify=args.notify, dry_run=getattr(args, "dry_run", False))
+              notify=getattr(args, "notify", False), dry_run=getattr(args, "dry_run", False))
     try:
         return _dispatch(ctx, args, stdin)
     except FleetError as exc:
@@ -146,6 +178,11 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     command = args.command
     if command == "init":  # pure file writing: no preflight, no herdr command
         return _init(ctx, args)
+    if command == "log":  # reads .herdr/messages.jsonl only
+        return op_log(ctx, args.seat, args.last, args.json, args.owed)
+    if command == "state":  # reads and writes the state note only
+        return op_state(ctx, args.state_action, getattr(args, "key", None), getattr(args, "text", None),
+                        getattr(args, "text_file", None))
     if command == "doctor":
         return _doctor(ctx)
     preflight(ctx)
@@ -170,6 +207,8 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         return _finish(ctx, op_down(ctx, args.names, args.wait, args.close_panes, args.close_workspace))
     if command == "tile":
         return _finish(ctx, op_tile(ctx))
+    if command == "send":
+        return op_send(ctx, args.words, args.message_file, args.as_name, args.when_ready, args.all_seats)
     raise UsageError("unknown command %s" % command)
 
 
@@ -188,7 +227,7 @@ def _finish(ctx: Ctx, report: Report, status_table: bool = False) -> int:
         ctx.say("dry run: nothing was changed")
     if status_table and not ctx.dry_run:
         ctx.say("")
-        ctx.say(render_status(collect_status(ctx, integrations=False)))
+        ctx.say(render_status(collect_status(ctx, integrations=False), ctx.env.get("HOME")))
     code = report.exit_code()
     if ctx.notify_enabled:
         outcome = {EXIT_OK: "done", EXIT_PARTIAL: "needs attention"}.get(code, "failed")
@@ -199,7 +238,7 @@ def _finish(ctx: Ctx, report: Report, status_table: bool = False) -> int:
 
 def _status(ctx: Ctx, as_json: bool, hold: bool, stdin: TextIO) -> int:
     data = collect_status(ctx)
-    ctx.say(json.dumps(data, indent=2) if as_json else render_status(data))
+    ctx.say(json.dumps(data, indent=2, ensure_ascii=False) if as_json else render_status(data, ctx.env.get("HOME")))
     if hold:
         wait_for_enter(ctx, stdin)
     return EXIT_OK
@@ -227,7 +266,7 @@ def _doctor(ctx: Ctx) -> int:
         ctx.say("%-4s  %s: %s" % (level, name, detail))
     failed = any(level == "fail" for level, _, _ in checks)
     if ctx.notify_enabled:
-        problems = ["%s %s: %s" % c for c in checks if c[0] != "ok"]
+        problems = ["%s %s: %s" % c for c in checks if c[0] in ("warn", "fail")]
         title = "Fleet doctor: %s" % ("failed" if failed else "warnings" if problems else "all checks ok")
         ctx.notify(title, "\n".join(problems) or "all checks passed", "request" if problems else "done")
     return EXIT_FAIL if failed else EXIT_OK

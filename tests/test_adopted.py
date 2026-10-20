@@ -127,7 +127,7 @@ class AdoptedInference(LiveFleet):
         del self.world["panes"]["w2:p2"]
         code, out, _ = self.run_cli("swap")
         self.assertEqual(code, 0, out)
-        self.assertIn("state: fablyn-dev moved from w2:p2 to w3:p5", out)
+        self.assertIn("fablyn-dev: pane w2:p2 → w3:p5", out)
         self.assertIn("fablyn-dev: skipped - adopted session", out)
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
         entry = self.read_state()["agents"]["fablyn-dev"]

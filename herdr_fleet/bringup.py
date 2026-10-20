@@ -18,10 +18,12 @@ from typing import Dict, Optional, Sequence
 from herdr_fleet.context import Ctx, OpError, Report
 from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, has_agent, render_cmd, start_argv, workspace_create_argv
+from herdr_fleet.contacts import contacts_block
 from herdr_fleet.kickoff import compose, roster_table
+from herdr_fleet.messages import log_kickoff
 from herdr_fleet.placement import Placed, Target, existing_panes, place_chain
-from herdr_fleet.seats import at_shell_prompt, describe_foreground, live_by_name, safe_prompt, start_in_pane
-from herdr_fleet.state import now_iso, refresh_pane
+from herdr_fleet.seats import at_shell_prompt, describe_foreground, safe_prompt, start_in_pane
+from herdr_fleet.state import now_iso, pane_moved, refresh_pane
 
 
 def label_of(ctx: Ctx, workspace_id: str) -> str:
@@ -149,9 +151,19 @@ def ensure_seat(ctx: Ctx, seat: Seat, target: Target, live: Dict[str, Dict], rep
     return start_claimed(ctx, seat, claim, placed, report)
 
 
+def follow_pane(ctx: Ctx, name: str, pane: str, kind: Optional[str] = None) -> Dict:
+    """Record that a live seat is in ``pane`` now (keeping its entry) and say so
+    when that differs from the recorded pane."""
+    old = ctx.state.pane_of(name)
+    entry = refresh_pane(ctx.state, name, pane, kind=kind)
+    if old and old != pane:
+        ctx.say(pane_moved(name, old, pane))
+    return entry
+
+
 def _already_live(ctx: Ctx, seat: Seat, agent: Dict, report: Report) -> str:
     pane = str(agent.get("pane_id"))
-    entry = refresh_pane(ctx.state, seat.name, pane, kind=agent.get("agent"))
+    entry = follow_pane(ctx, seat.name, pane, kind=agent.get("agent"))
     status = agent.get("agent_status") or "unknown"
     if entry.get("blocked_at_startup"):
         report.add(seat.name, "live", "in %s (%s) but never briefed; run `herdr-fleet kickoff %s` once it is idle"
@@ -235,14 +247,16 @@ def send_kickoffs(ctx: Ctx, seats: Sequence[Seat], reason: str, note: Optional[s
         report.add("kickoff", "plan", "herdr agent prompt (reason %s) to %s"
                    % (reason, ", ".join(s.name for s in ordered)))
         return
-    live = live_by_name(ctx.herdr)
+    agents = ctx.herdr.agent_list()
+    live = {str(a["name"]): a for a in agents if a.get("name")}
     rows = [(s.name, (live.get(s.name) or {}).get("agent") or s.kind,
              (live.get(s.name) or {}).get("pane_id") or ctx.state.pane_of(s.name) or "-", s.cwd)
             for s in ctx.fleet.seats]
     roster = roster_table(rows)
+    contacts = contacts_block(ctx.fleet, agents)
     for seat in ordered:
         try:
-            text = compose(seat, ctx.fleet, label, roster, reason, note)
+            text = compose(seat, ctx.fleet, label, roster, reason, note, contacts=contacts)
         except OSError as exc:
             report.add(seat.name, "not briefed", "cannot read kickoff template: %s" % exc, "fail")
             continue
@@ -250,6 +264,9 @@ def send_kickoffs(ctx: Ctx, seats: Sequence[Seat], reason: str, note: Optional[s
         if outcome.ok:
             ctx.state.update(seat.name, last_kickoff_at=now_iso(), blocked_at_startup=False)
             ctx.save()
+            problem = log_kickoff(ctx.fleet.repo, seat.name, text)
+            if problem:
+                ctx.warn(problem)
             report.add(seat.name, "briefed", "kickoff sent (%s)" % reason)
         else:
             report.add(seat.name, "not briefed", outcome.detail, "partial")

@@ -90,6 +90,30 @@ Adopted seats, `--join` and `tile` (design section 15). The fake herdr supports 
   - no test sees a prompt, start, split, close or rename from `tile`.
 - `tests/test_manifest.py` checks the `tile` action entry verbatim.
 
+Messages (design section 16). The safety hook in `tests/support.py` stays strict for every command except one. `run_cli` writes a `{"command": argv}` marker into the call log, and a prompt to a `working` agent is accepted only when the marker says `send`. `blocked` and `unknown` are refused for every command, `send` included. A test proves the hook still fails for a prompt to a working agent from any other command.
+
+- `tests/test_messages.py`:
+  - `send` to one seat: the exact prompt text with the `[from <sender>]` prefix, the sender found through `pane current` and `agent get`, the one-line output and the log entry;
+  - a working target gets the text queued; blocked, unknown and absent targets are refused, nothing is sent and nothing logged; a mix of sent and refused exits 3;
+  - `--as`, the `owner` fallback (unnamed agent or no pane), the existing `[from` prefix kept, and `--file` (the log's `file` field, empty and missing files);
+  - `--all` skips the sender; live agent names work and unknown names are a usage error before anything is sent;
+  - `--when-ready` waits then sends, or refuses a target still busy; a stalled prompt is reported, not resent and not logged; `--dry-run`;
+  - the `log` command (filters, `--json`, corrupt lines skipped, no herdr calls) and kickoffs logged as `kind = "kickoff"`;
+  - owed replies as a pure function (latest message per pair, replies, kickoffs, equal times ordered by the log) and in `status`/`status --json`/`log --owed`;
+  - the `pane A → B` lines for a seat found in another pane, a restart that follows a moved seat, and `--join`.
+- `tests/test_contacts.py`:
+  - `[[contacts]]` validation (name pattern, seat collisions, duplicates, missing `match`, a `match.name` that is a seat);
+  - resolution by `cwd`/`foreground_cwd`, `kind` and `name` (zero, one, several);
+  - `send` to a contact's pane id, with refusals listing the candidates, and `--all` never reaching contacts;
+  - the status block and `{contacts}` in kickoffs (empty without contacts);
+  - a lifecycle sweep (`up`, `status`, `kickoff`, `restart`, `swap`, `tile`, `down --close-panes --close-workspace`, `up`) with contact agents in the fleet's own tab, asserting that no prompt, rename, start, wait, split, close or move ever names a contact's pane.
+- `tests/test_statenote.py`: `state set` replaces or appends a section with a stamped heading, keeps text outside sections and `###` subsections, `--file`, `keys`, `show`, atomic writes, usage errors, and no herdr calls.
+- `tests/test_permissions.py`:
+  - the coverage rule (`:*`, ` *`, word prefixes, bare `Bash`, exact entries not counting);
+  - the doctor lines with no settings (exact suggested entries), with entries spread over the three files (HOME is the test's temp dir, never the real `~/.claude`), and with only the missing ones named;
+  - unreadable settings;
+  - the status `CWD` (with `~`) and `BRANCH` columns, using a real `git init` (skipped without git).
+
 ### Running the CLI against the fake by hand
 
 ```bash

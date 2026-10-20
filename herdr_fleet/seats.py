@@ -6,7 +6,8 @@
   agent and what argv it runs, for drift detection.
 - ``safe_prompt``: the only path by which text reaches an agent. It re-reads
   the agent immediately before sending and refuses anything not ``idle`` or
-  ``done``; ``agent_prompt_stalled`` and ``timeout`` are reported, never resent.
+  ``done`` (``send`` alone also allows ``working``; ``blocked`` and ``unknown``
+  never); ``agent_prompt_stalled`` and ``timeout`` are reported, never resent.
 - ``start_in_pane``: shell check, ``agent start``, retry on ``agent_pane_busy``
   every 250 ms for up to 10 s, ``agent_not_ready`` reported as blocked.
 - ``quit_agent``: the per-kind quit command through ``safe_prompt``, then poll
@@ -142,14 +143,20 @@ class Outcome:
     agent: Dict = field(default_factory=dict)
 
 
-def safe_prompt(herdr: Herdr, target: str, text: str) -> Outcome:
-    """Send text to an agent only if it is idle or done right now (invariants 1-3)."""
+SEND_ALLOWED = SETTLED + ("working",)  # design 16.1: `send` may queue text for a working agent
+
+
+def safe_prompt(herdr: Herdr, target: str, text: str, allow: Sequence[str] = SETTLED) -> Outcome:
+    """Send text to an agent only if its state right now is in ``allow``
+    (invariants 1-3): idle or done for every command; ``send`` alone also
+    allows working (SEND_ALLOWED). Blocked and unknown are never allowed."""
+    allow = tuple(s for s in allow if s not in ("blocked", "unknown"))
     try:
         agent = herdr.agent_get(target)
     except HerdrError as exc:
         return Outcome(False, "absent", "no live agent %s (%s)" % (target, describe(exc)))
     status = str(agent.get("agent_status") or "unknown")
-    if status not in SETTLED:
+    if status not in allow:
         return Outcome(False, status, "agent %s is %s; nothing sent" % (target, status), agent)
     try:
         herdr.agent_prompt(target, text)

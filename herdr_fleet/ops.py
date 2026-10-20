@@ -17,7 +17,7 @@ import shlex
 from typing import Dict, List, Optional, Sequence, TextIO
 
 from herdr_fleet import PLUGIN_ID
-from herdr_fleet.bringup import (claim_seat, ensure_seat, label_for, label_of, require_caller_context,
+from herdr_fleet.bringup import (claim_seat, ensure_seat, follow_pane, label_for, label_of, require_caller_context,
                                 resolve_target, send_kickoffs, start_claimed, start_seat)
 from herdr_fleet.checks import drift_reasons, is_adopted
 from herdr_fleet.context import Ctx, Report, UsageError
@@ -26,7 +26,7 @@ from herdr_fleet.herdr import HerdrError, describe, has_agent, pane_move_argv, r
 from herdr_fleet.placement import Target, place_chain, place_grid
 from herdr_fleet.seats import (QUIT_CONFIG_HINT, SETTLED, at_shell_prompt, describe_foreground,
                                live_by_name, quit_agent, quit_command)
-from herdr_fleet.state import prune_state, refresh_pane
+from herdr_fleet.state import pane_moved, prune_state
 
 WAIT_UNTIL = ("idle", "done", "blocked")
 
@@ -194,6 +194,7 @@ def _join_or_warn(ctx: Ctx, seat: Seat, caller: Dict, target: Target, live: Dict
             return
         ctx.state.update(seat.name, pane_id=moved)
         ctx.save()
+        ctx.say(pane_moved(seat.name, pane, moved))
         report.add(seat.name, "joined", "moved your pane %s into %s %s; it is now %s" % (pane, there, tab, moved))
     # From here on the caller is in the fleet's workspace: guard its new pane id,
     # and in an existing workspace let new seats split off it (design 14.2).
@@ -295,6 +296,8 @@ def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_
         agent = settle(ctx, seat, agent, wait_ms, report)
         if agent is None:
             continue
+        if not ctx.dry_run:
+            follow_pane(ctx, seat.name, str(agent.get("pane_id")))
         then = ", then " + render_cmd(start_argv(seat.name, seat.kind, str(agent.get("pane_id")), seat.args))
         pane = _quit_live(ctx, seat, agent, report, then)
         if pane is None or ctx.dry_run:
@@ -372,7 +375,7 @@ def op_down(ctx: Ctx, names: Sequence[str], wait_ms: Optional[int] = None, close
             continue
         pane = _quit_live(ctx, seat, agent, report)
         if pane and not ctx.dry_run and ctx.state.pane_of(seat.name) != pane:
-            refresh_pane(ctx.state, seat.name, pane)
+            follow_pane(ctx, seat.name, pane)
     ctx.save()
     if close_panes:
         _close_panes(ctx, seats, report)

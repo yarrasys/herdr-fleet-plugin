@@ -15,12 +15,15 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 - ``fleetfile`` / ``state``: the two files on disk; ``kickoff``: templates.
 - ``context``: per-invocation context and preconditions; ``menu``: the popup;
   ``notify``: ``herdr notification show``.
+- ``messages``: ``send``, the message log and owed replies; ``contacts``: peers
+  the team messages but never manages; ``statenote``: ``state`` sections;
+  ``permissions``: the advisory Claude Code permission check in ``doctor``.
 - ``scaffold``: ``init``, which writes a starter fleet file (no herdr calls).
 """
 
 import os
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

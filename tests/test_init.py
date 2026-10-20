@@ -89,8 +89,10 @@ class Starter(InitCase):
         self.assertEqual((seat.name, seat.kind, seat.args), ("project-dev", "claude", []))
         self.assertEqual(seat.kickoff or fleet.kickoff, os.path.join(project, ".herdr", "kickoff", "default.md"))
         self.assertEqual(fleet.state_note, os.path.join(project, ".herdr", "STATE.md"))
-        self.assertEqual(self.read(project, ".herdr", "STATE.md"), b"Where things stand: (nothing yet).\n")
-        self.assertEqual(self.read(project, ".herdr", ".gitignore"), b"fleet.state.json\n")
+        self.assertEqual(self.read(project, ".herdr", "STATE.md"),
+                         b"Where things stand: (nothing yet).\n\n## production\n\n## in flight\n\n## next\n\n"
+                         b"## backlog\n\n")
+        self.assertEqual(self.read(project, ".herdr", ".gitignore"), b"fleet.state.json\nmessages.jsonl\n")
         self.assertIn(b"<!--", self.read(project, ".herdr", "kickoff", "default.md").splitlines()[0])
         self.assertEqual(fleet.mode, "chain")
         text = self.read(project, ".herdr", "fleet.toml").decode()

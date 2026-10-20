@@ -24,6 +24,7 @@ from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, pane_move_argv, pane_park_argv, render_cmd
 from herdr_fleet.layout import describe_shape, grid_plan, placeholder
 from herdr_fleet.seats import live_by_name
+from herdr_fleet.state import pane_moved
 
 PARK_LABEL = "park"
 
@@ -112,6 +113,7 @@ def op_tile(ctx: Ctx) -> Report:
 
 def _execute(ctx: Ctx, moves: List[Move], panes: Dict[str, str], workspace: str, tab: str, report: Report) -> None:
     """Park every seat, then bring each back in plan order. Stop at the first failure."""
+    original = dict(panes)
     for index, move in enumerate(moves):
         try:
             panes[move.seat] = ctx.herdr.pane_move_new_tab(panes[move.seat], workspace, PARK_LABEL)
@@ -120,11 +122,16 @@ def _execute(ctx: Ctx, moves: List[Move], panes: Dict[str, str], workspace: str,
             return
     for index, move in enumerate(moves):
         source = panes[move.source_seat]
+        before = original[move.seat]
         try:
             panes[move.seat] = ctx.herdr.pane_move_to_tab(panes[move.seat], tab, move.direction, move.ratio, source)
         except HerdrError as exc:
             _stop(moves[index:], moves[index:], move, "moving back", exc, panes, tab, report)
             return
+        if panes[move.seat] != before:
+            ctx.say(pane_moved(move.seat, before, panes[move.seat]))
+            ctx.state.update(move.seat, pane_id=panes[move.seat])
+            ctx.save()
         report.add(move.seat, "moved", "%s %s (%s), ratio %s"
                    % ("right of" if move.direction == "right" else "below", move.source_seat, source,
                       move.ratio if move.ratio is not None else "herdr's default"))

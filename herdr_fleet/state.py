@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 from herdr_fleet.herdr import Herdr, HerdrError
 
 STATE_NAME = "fleet.state.json"
+IGNORED = (STATE_NAME, "messages.jsonl")  # .herdr/.gitignore entries (design sections 5 and 16.2)
 VERSION = 1
 
 
@@ -103,7 +104,7 @@ def save_state(state: State) -> None:
     """Write atomically and make sure ``.herdr/.gitignore`` ignores the file."""
     folder = os.path.dirname(state.path)
     os.makedirs(folder, exist_ok=True)
-    _ensure_gitignore(folder)
+    ensure_gitignore(folder)
     fd, tmp = tempfile.mkstemp(prefix=".fleet.state.", suffix=".tmp", dir=folder)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -116,6 +117,12 @@ def save_state(state: State) -> None:
         raise
     state.existed = True
     state.dirty = False
+
+
+def pane_moved(name: str, old: str, new: str) -> str:
+    """The line printed whenever a seat's pane id changes (design 16.7), so notes that
+    hard-code pane ids can be corrected."""
+    return "%s: pane %s → %s" % (name, old, new)
 
 
 def refresh_pane(state: State, name: str, pane: str, kind: Optional[str] = None) -> Dict:
@@ -154,7 +161,7 @@ def prune_state(state: State, herdr: Herdr) -> List[str]:
             if name in live:
                 state.agents[name]["pane_id"] = live[name]
                 state.dirty = True
-                messages.append("state: %s moved from %s to %s" % (name, pane, live[name]))
+                messages.append(pane_moved(name, pane, live[name]))
                 continue
             state.drop(name)
             messages.append("state: dropped %s (pane %s no longer exists)" % (name, pane))
@@ -175,18 +182,22 @@ def _empty(repo: str) -> Dict:
             "created_workspace": False, "agents": {}}
 
 
-def _ensure_gitignore(folder: str) -> None:
+def ensure_gitignore(folder: str) -> None:
+    """Make ``.herdr/.gitignore`` ignore the files herdr-fleet writes there
+    (the state file and the message log), appending only missing lines."""
     path = os.path.join(folder, ".gitignore")
     lines: List[str] = []
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as handle:
             lines = handle.read().splitlines()
-    if STATE_NAME in (line.strip() for line in lines):
+    present = {line.strip() for line in lines}
+    missing = [name for name in IGNORED if name not in present]
+    if not missing:
         return
     with open(path, "a", encoding="utf-8") as handle:
-        if lines and lines[-1] != "" and not _ends_with_newline(path):
+        if lines and not _ends_with_newline(path):
             handle.write("\n")
-        handle.write(STATE_NAME + "\n")
+        handle.write("".join(name + "\n" for name in missing))
 
 
 def _ends_with_newline(path: str) -> bool:
