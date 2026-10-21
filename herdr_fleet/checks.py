@@ -1,5 +1,6 @@
 """Read-only inspection: drift (design 4.4), status (4.2, 16.3, 16.4, 16.7, 17.2,
-17.4, 18.6's watcher and queued lines) and doctor (4.7, 16.6, 17.3, 18.7's hooks line).
+17.4, 18.6's watcher and queued lines, 19.1's watcher strip) and doctor (4.7, 16.6,
+17.3, 18.7's hooks line).
 
 Nothing here changes herdr. ``collect_status`` may rewrite the state file
 when it prunes ids herdr no longer knows, which every command does. Git is
@@ -15,7 +16,7 @@ import sys
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from herdr_fleet import MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, hooks, inbox, messages, permissions
-from herdr_fleet import watch
+from herdr_fleet import watchpane
 from herdr_fleet.context import Ctx
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import Herdr, HerdrError, describe
@@ -147,7 +148,7 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
         "owed": messages.owed(_log_entries(ctx)),
     }
     data["queued"], data["queued_oldest"] = queued_summary(fleet)
-    data["watcher"] = watch.watcher_status(fleet.repo)
+    data["watcher"] = watchpane.watcher_status(ctx)
     if integrations:
         data["integrations"] = integration_rows(herdr, fleet.kinds())
     return data
@@ -259,8 +260,10 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
                                               "  (%s)" % c["note"] if c["note"] else ""))
     lines.extend(messages.owed_lines(data.get("owed", [])))
     queued = queued_line(data)
-    if queued:  # design 18.6: whether anything will deliver it, then what waits
-        lines.append(watch.watcher_line(data.get("watcher") or {}))
+    watcher = data.get("watcher") or {}
+    if queued or watchpane.shown(watcher):  # design 18.6 and 19.1: who delivers, then what waits
+        lines.append(watchpane.status_line(watcher))
+    if queued:
         lines.append(queued)
     for row in data.get("integrations", []):
         mark = "  <- %s" % row["status"] if row["flag"] else ""

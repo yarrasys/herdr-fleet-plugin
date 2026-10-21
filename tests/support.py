@@ -38,6 +38,9 @@ HOOK_CALLS = (["agent", "get"],)
 # local `herdr --version` of the common preconditions.
 WATCH_CALLS = (["agent", "wait"], ["agent", "get"], ["agent", "list"], ["agent", "prompt"],
                ["notification", "show"], ["--version"])
+# Design 19.3: only `up` (also from the popup menu) and `ui` open plugin panes; only `up` resizes.
+PLUGIN_PANE_COMMANDS = ("up", "ui", "menu")
+RESIZE_COMMANDS = ("up", "menu")
 
 THREE_SEATS = """
 workspace = "fablyn"
@@ -206,9 +209,12 @@ class FleetCase(unittest.TestCase):
         `deliver`, `watch` and kickoffs carry queued messages to idle or done seats only
         (invariant 11), `inbox` runs nothing but the caller lookup (`inbox --hook` only
         `agent get`), `watch` only its five commands and never an endless wait
-        (invariants 12, 13), and `hooks` runs no herdr command at all."""
+        (invariants 12, 13), and `hooks` runs no herdr command at all. Design 19.3:
+        `plugin pane open` comes from `up` or `ui` only, and a watcher pane is never
+        prompted, started into or sent anything."""
         caller = self.env.get("HERDR_PANE_ID")
         command: List[str] = []
+        strips = set()
         entries = []
         if os.path.exists(self.log_path):
             with open(self.log_path, "r", encoding="utf-8") as handle:
@@ -230,6 +236,16 @@ class FleetCase(unittest.TestCase):
                 if argv[:2] == ["agent", "wait"]:
                     self.assertIn("--timeout", argv, "watch waited without a timeout: %s" % argv)
             self.assertNotEqual(command[:1], ["hooks"], "hooks ran a herdr command: %s" % argv)
+            if argv[:3] == ["plugin", "pane", "open"]:
+                self.assertIn(command[0], PLUGIN_PANE_COMMANDS, "%s opened a plugin pane: %s" % (command[:1], argv))
+                if info.get("plugin_pane"):
+                    strips.add(info["plugin_pane"])
+            if argv[:2] == ["pane", "resize"]:
+                self.assertIn(command[0], RESIZE_COMMANDS, "%s resized a pane: %s" % (command[:1], argv))
+            if argv[:2] == ["agent", "prompt"] or argv[:2] == ["agent", "rename"]:
+                self.assertNotIn(argv[2], strips, "a watcher pane was addressed as an agent: %s" % argv)
+            if argv[:2] == ["agent", "start"] and "--pane" in argv:
+                self.assertNotIn(argv[argv.index("--pane") + 1], strips, "agent started into a watcher pane")
             self.assertNotIn(tuple(argv[:2]), fake_herdr.FORBIDDEN, "forbidden command: %s" % argv)
             self.assertFalse(any(a in ("send-keys", "send-text") for a in argv[:2]), argv)
             self.assertNotEqual(argv[:2], ["pane", "run"], argv)
@@ -293,11 +309,13 @@ def grid_fleet(text=FOUR_SEATS, layout=GRID):
 
 class GridCase(FleetCase):
     def rects(self, area):
-        """Rebuild each pane's rectangle from the splits the fake herdr received."""
+        """Rebuild each pane's rectangle from the splits the fake herdr received, as shares
+        of ``area``. The watcher strip (a plugin pane, design 19) is left out: cells are
+        shares of the grid area above it."""
         rects = {area: (0.0, 0.0, 1.0, 1.0)}
         for pid, pane in self.world["panes"].items():  # creation order
             split = pane.get("split")
-            if not split or split["from"] not in rects:
+            if not split or split["from"] not in rects or pane.get("plugin"):
                 continue
             x, y, w, h = rects[split["from"]]
             r = float(split["ratio"])

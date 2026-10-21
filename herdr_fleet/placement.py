@@ -12,12 +12,17 @@ splits panes; ``bringup`` starts the agents.
   ``direction`` and ``ratio`` (the anchor keeps ``ratio``). When seats placed
   by an earlier run are already in the workspace, new seats are appended with
   the chain rule instead.
+
+Both take ``on_area``: called once with the first pane of a fresh layout (the
+root pane, the grid area, or the first chained seat's pane) before anything
+else splits it, so ``up`` can open the watcher strip below the whole layout
+(design 19.1).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from herdr_fleet.context import Ctx, Report
 from herdr_fleet.fleetfile import Seat
@@ -27,6 +32,7 @@ from herdr_fleet.layout import describe_shape, grid_plan, placeholder
 GRID_AREA_RATIO = 0.5  # share the anchor keeps when [layout] ratio is unset
 
 Placed = Dict[str, Tuple[str, bool]]  # seat name -> (pane, created by this run)
+AreaHook = Optional[Callable[[str], None]]
 
 
 @dataclass
@@ -100,20 +106,25 @@ def split_pane(ctx: Ctx, seat: Seat, source: Optional[str], report: Report, dire
 
 
 def place_chain(ctx: Ctx, needs: Sequence[Seat], target: Target, live: Dict[str, Dict], report: Report,
-                fallback: Optional[str] = None) -> Placed:
+                fallback: Optional[str] = None, on_area: AreaHook = None) -> Placed:
     """Chain rule, in file order. ``fallback`` is used when no earlier seat has
-    a pane (grid append: the last placed seat's pane), then the anchor."""
+    a pane (grid append: the last placed seat's pane), then the anchor.
+    ``on_area`` gets the first pane placed, before the next seat splits it."""
     placed: Placed = {}
     cache: Dict[str, Optional[str]] = {}
     for seat in needs:
         if target.free_pane and target.free_for == seat.name:
             placed[seat.name] = (target.free_pane, False)  # root pane: never closed by --close-panes
             target.free_pane = None
-            continue
-        source = chain_source(ctx, seat, live, target, placed, cache) or fallback or target.anchor
-        pane = split_pane(ctx, seat, source, report)
-        if pane:
+        else:
+            source = chain_source(ctx, seat, live, target, placed, cache) or fallback or target.anchor
+            pane = split_pane(ctx, seat, source, report)
+            if not pane:
+                continue
             placed[seat.name] = (pane, True)
+        if on_area is not None:
+            on_area(placed[seat.name][0])
+            on_area = None
     return placed
 
 
@@ -130,8 +141,10 @@ def existing_panes(ctx: Ctx, needs: Sequence[Seat], live: Dict[str, Dict], targe
     return panes
 
 
-def place_grid(ctx: Ctx, needs: Sequence[Seat], target: Target, live: Dict[str, Dict], report: Report) -> Placed:
-    """Design 14.2: an even grid for the seats placed in this run."""
+def place_grid(ctx: Ctx, needs: Sequence[Seat], target: Target, live: Dict[str, Dict], report: Report,
+               on_area: AreaHook = None) -> Placed:
+    """Design 14.2: an even grid for the seats placed in this run. ``on_area`` gets
+    the grid area before the grid is split out of it (not when appending)."""
     if not needs:
         return {}
     fleet = ctx.fleet
@@ -152,6 +165,8 @@ def place_grid(ctx: Ctx, needs: Sequence[Seat], target: Target, live: Dict[str, 
         created = True
     names = [s.name for s in needs]
     report.add("layout", "grid", "%s in %s" % (describe_shape(names, fleet.columns), area))
+    if on_area is not None:
+        on_area(area)
     placed: Placed = {first.name: (area, created)}
     refs = {area: area}
     for step in grid_plan(names, area, fleet.columns):

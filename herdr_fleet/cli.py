@@ -65,7 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     sub.required = True
 
-    p = sub.add_parser("up", parents=[common], help="start every seat that is not running, then brief it")
+    p = sub.add_parser("up", parents=[common],
+                       help="start every seat that is not running, brief it, and start the watcher below the seats")
     p.add_argument("names", nargs="*", metavar="NAME", help="only these seats (default: all)")
     p.add_argument("--me", metavar="NAME", help="adopt the agent in your own pane as seat NAME (rename only)")
     p.add_argument("--join", action="store_true",
@@ -73,6 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="print the plan and change nothing")
     p.add_argument("--no-kickoff", action="store_true", help="start seats but send no kickoff")
     p.add_argument("--note", metavar="TEXT", help="text for {note} in the kickoff")
+    p.add_argument("--no-watch", action="store_true",
+                   help="do not start the watcher strip (watch = false in the fleet file does the same)")
 
     p = sub.add_parser("status", parents=[common], help="show every seat, its state and drift")
     p.add_argument("--json", action="store_true", help="print one JSON object")
@@ -95,7 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("down", parents=[common, wait], help="quit seats; optionally close what herdr-fleet created")
     p.add_argument("names", nargs="*", metavar="NAME", help="only these seats (default: all)")
-    p.add_argument("--close-panes", action="store_true", help="close panes herdr-fleet created, once at a shell")
+    p.add_argument("--close-panes", action="store_true",
+                   help="close panes herdr-fleet created, once at a shell, and then the watcher strip `up` opened")
     p.add_argument("--close-workspace", action="store_true",
                    help="close the workspace if herdr-fleet created it and no agent is left")
 
@@ -339,7 +343,8 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         return run_menu(ctx, stdin)
     note = _note(args)
     if command == "up":
-        report = op_up(ctx, args.names, me=args.me, no_kickoff=args.no_kickoff, note=args.note, join=args.join)
+        report = op_up(ctx, args.names, me=args.me, no_kickoff=args.no_kickoff, note=args.note, join=args.join,
+                       no_watch=args.no_watch)
         return _finish(ctx, report, status_table=True)
     if command == "restart":
         return _finish(ctx, op_restart(ctx, args.names, note, args.wait, drop_inbox=args.drop_inbox))

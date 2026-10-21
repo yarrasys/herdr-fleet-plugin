@@ -80,10 +80,11 @@ def resolve_target(ctx: Ctx, report: Report, first: Optional[Seat] = None) -> Ta
 
 def _first_pane(ctx: Ctx, workspace_id: str) -> Optional[str]:
     """A pane to split from in a workspace the caller is not in: the first pane
-    of its active tab (never started into, only split)."""
+    of its active tab (never started into, only split), never the watcher strip."""
     active = next((w.get("active_tab_id") for w in ctx.herdr.workspace_list()
                    if w.get("workspace_id") == workspace_id), None)
-    panes = ctx.herdr.pane_list(workspace_id)
+    strip = ctx.state.watch_pane
+    panes = [p for p in ctx.herdr.pane_list(workspace_id) if p.get("pane_id") != strip]
     for pane in panes:
         if pane.get("tab_id") == active:
             return str(pane["pane_id"])

@@ -12,6 +12,12 @@ layout. (Moving a pane to the tab it is already in is a no-op in herdr 0.9.4,
 hence the round trip.) Processes, agent names and pane ids survive; the
 temporary tabs vanish once empty. Only ``pane move`` runs: no agent is
 prompted, quit or started.
+
+The watcher strip ``up`` opened (design 19.1), when it is in the same tab, is
+parked after the seats and brought back under the first seat's pane, which
+keeps ``1 - [watch] ratio``, before any seat comes back; so it spans the whole
+layout afterwards. A strip in another tab or workspace is reported and left
+alone; a failed strip move is reported and the seats are tiled anyway.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from herdr_fleet import watchpane
 from herdr_fleet.context import Ctx, OpError, Report
 from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, pane_move_argv, pane_park_argv, render_cmd
@@ -99,20 +106,27 @@ def op_tile(ctx: Ctx) -> Report:
     shape = describe_shape([s.name for s in seats], fleet.columns) if fleet.mode == "grid" \
         else "chain of %d seats" % len(seats)
     report.add("layout", fleet.mode, "%s in tab %s" % (shape, tab))
-    report.add(seats[0].name, "kept", "anchors the layout in %s" % panes[seats[0].name])
+    anchor = seats[0].name
+    report.add(anchor, "kept", "anchors the layout in %s" % panes[anchor])
+    strip = watchpane.tile_strip(ctx, workspace, tab, report)
     if ctx.dry_run:
+        if strip:
+            report.add("watcher", "plan", watchpane.tile_plan(ctx, strip, anchor, panes[anchor], workspace, tab,
+                                                              PARK_LABEL))
         for move in moves:
             pane, source = panes[move.seat], panes[move.source_seat]
             report.add(move.seat, "plan", "%s, then %s" % (
                 render_cmd(pane_park_argv(pane, workspace, PARK_LABEL)),
                 render_cmd(pane_move_argv(pane, tab, move.direction, move.ratio, source))))
         return report
-    _execute(ctx, moves, panes, workspace, tab, report)
+    _execute(ctx, moves, panes, workspace, tab, report, (strip, anchor) if strip else None)
     return report
 
 
-def _execute(ctx: Ctx, moves: List[Move], panes: Dict[str, str], workspace: str, tab: str, report: Report) -> None:
-    """Park every seat, then bring each back in plan order. Stop at the first failure."""
+def _execute(ctx: Ctx, moves: List[Move], panes: Dict[str, str], workspace: str, tab: str, report: Report,
+             strip: Optional[Tuple[str, str]] = None) -> None:
+    """Park every seat, move the watcher strip (pane, anchor seat) under the anchor, then
+    bring each seat back in plan order. Stop at the first failed seat move."""
     original = dict(panes)
     for index, move in enumerate(moves):
         try:
@@ -120,6 +134,9 @@ def _execute(ctx: Ctx, moves: List[Move], panes: Dict[str, str], workspace: str,
         except HerdrError as exc:
             _stop(moves, moves[:index], move, "parking", exc, panes, tab, report)
             return
+    if strip:
+        pane, anchor = strip
+        watchpane.tile_move(ctx, pane, anchor, panes[anchor], workspace, tab, PARK_LABEL, report)
     for index, move in enumerate(moves):
         source = panes[move.source_seat]
         before = original[move.seat]

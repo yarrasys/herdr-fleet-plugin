@@ -294,6 +294,27 @@ class Herdr:
             argv += ["--placement", placement]
         return self.run(*argv)
 
+    def plugin_split_open(self, plugin_id: str, entrypoint: str, target_pane: str, direction: str, cwd: str,
+                          env: Optional[Dict[str, str]] = None) -> Dict:
+        """Open a plugin pane as a split of ``target_pane`` without moving focus (design 19);
+        return the new pane's record (``result.plugin_pane.pane``)."""
+        argv = plugin_split_argv(plugin_id, entrypoint, target_pane, direction, cwd, env)
+        pane = (self.run(*argv).get("plugin_pane") or {}).get("pane") or {}
+        if not pane.get("pane_id"):
+            raise HerdrError("bad_output", "plugin pane open returned no pane id", argv)
+        return dict(pane)
+
+    def pane_layout(self, pane_id: str) -> Dict:
+        """The layout snapshot of the tab holding ``pane_id`` (``result.layout``: ``area``,
+        ``panes`` with ``rect``, ``splits`` with ``direction``, ``ratio`` and ``rect``)."""
+        return dict(self.run("pane", "layout", "--pane", pane_id).get("layout") or {})
+
+    def pane_resize(self, pane_id: str, direction: str, amount: float) -> Dict:
+        """Move the nearest split on ``pane_id``'s edge (``result.resize``, whose ``layout``
+        is the snapshot afterwards). herdr adds ``amount`` to that split's first-child
+        ratio for right and down, subtracts it for left and up (design 19.4)."""
+        return dict(self.run(*pane_resize_argv(pane_id, direction, amount)).get("resize") or {})
+
 
 def render_cmd(argv: Sequence[str]) -> str:
     """A herdr argv as a copy-pasteable shell command (for plans and messages)."""
@@ -320,6 +341,21 @@ def pane_move_argv(pane_id: str, tab_id: str, direction: str = "right", ratio: O
     if ratio is not None:
         argv += ["--ratio", str(ratio)]
     return argv + ["--no-focus"]
+
+
+def plugin_split_argv(plugin_id: str, entrypoint: str, target_pane: str, direction: str, cwd: str,
+                      env: Optional[Dict[str, str]] = None) -> List[str]:
+    """The exact ``plugin pane open --placement split`` argv ``up`` uses for the watcher
+    strip (design 19.1). ``--no-focus``: herdr's CLI focuses the new pane by default."""
+    argv = ["plugin", "pane", "open", "--plugin", plugin_id, "--entrypoint", entrypoint, "--placement", "split",
+            "--target-pane", target_pane, "--direction", direction, "--cwd", cwd]
+    for key in sorted(env or {}):
+        argv += ["--env", "%s=%s" % (key, env[key])]
+    return argv + ["--no-focus"]
+
+
+def pane_resize_argv(pane_id: str, direction: str, amount: float) -> List[str]:
+    return ["pane", "resize", "--pane", pane_id, "--direction", direction, "--amount", str(amount)]
 
 
 def pane_park_argv(pane_id: str, workspace_id: str, label: str) -> List[str]:

@@ -1,5 +1,6 @@
-"""Operations that change the fleet: up (design 4.1), restart (4.3), swap
-(4.4), kickoff (4.5) and down (4.6), plus ``ui`` and ``install-cli``.
+"""Operations that change the fleet: up (design 4.1, with the watcher strip of
+section 19), restart (4.3), swap (4.4), kickoff (4.5) and down (4.6), plus
+``ui`` and ``install-cli``.
 
 Each operation returns a ``Report``; ``cli`` prints it and maps it to an exit
 code. Text reaches agents only through ``seats.safe_prompt``; agents start
@@ -16,7 +17,7 @@ import os
 import shlex
 from typing import Callable, Dict, List, Optional, Sequence, TextIO
 
-from herdr_fleet import PLUGIN_ID, inbox
+from herdr_fleet import PLUGIN_ID, inbox, watchpane
 from herdr_fleet.bringup import (claim_seat, ensure_seat, follow_pane, label_for, label_of, require_caller_context,
                                 resolve_target, send_kickoffs, start_claimed, start_seat)
 from herdr_fleet.checks import drift_reasons, is_adopted
@@ -24,7 +25,7 @@ from herdr_fleet.context import Ctx, Report, UsageError
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import HerdrError, describe, has_agent, pane_move_argv, render_cmd, start_argv
 from herdr_fleet.messages import drop_queued
-from herdr_fleet.placement import Target, place_chain, place_grid
+from herdr_fleet.placement import Target, existing_panes, place_chain, place_grid
 from herdr_fleet.seats import (QUIT_CONFIG_HINT, SETTLED, at_shell_prompt, describe_foreground,
                                live_by_name, quit_agent, quit_command)
 from herdr_fleet.state import pane_moved, prune_state
@@ -85,9 +86,10 @@ def drop_inboxes(ctx: Ctx, seats: Sequence[Seat], report: Report) -> None:
 
 
 def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: bool = False,
-          note: Optional[str] = None, join: bool = False) -> Report:
-    """Design 4.1 and 14: classify every seat, find or create the workspace,
-    place the seats that need panes (chain or grid), start them, brief them."""
+          note: Optional[str] = None, join: bool = False, no_watch: bool = False) -> Report:
+    """Design 4.1, 14 and 19: classify every seat, find or create the workspace,
+    place the seats that need panes (chain or grid), start them, brief them, and
+    start the watcher in a strip below them unless one runs already."""
     report = Report("up")
     fleet = ctx.fleet
     selected = {s.name for s in select_seats(fleet, names)}
@@ -98,6 +100,7 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
     refuse_unknown_kinds(ctx)
     require_caller_context(ctx)
     prune(ctx)
+    strip = watchpane.prepare(ctx, no_watch, report)
     live = live_by_name(ctx.herdr)
     caller = _adopt_caller(ctx, fleet.seat(me), live, report) if me else None
     if not me:
@@ -108,13 +111,20 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
     target = resolve_target(ctx, report, needs[0] if needs else None)
     if caller is not None:
         _join_or_warn(ctx, fleet.seat(me), caller, target, live, join, report)
+    # Design 19.1: on a fresh layout the strip is split from its first pane before
+    # anything else is, so it spans every seat; otherwise it opens after the kickoffs.
+    fresh = strip is not None and bool(needs) and not existing_panes(ctx, needs, live, target)
     place = place_grid if fleet.mode == "grid" else place_chain
-    placed = place(ctx, needs, target, live, report)
+    placed = place(ctx, needs, target, live, report, on_area=strip.open_at if fresh else None)
     started = [s for s in order if start_claimed(ctx, s, claims[s.name], placed, report)]
     if started and no_kickoff:
         ctx.say("kickoffs skipped (--no-kickoff)")
     elif started:
         send_kickoffs(ctx, started, "up", note, target.label, report)
+    if strip is not None:
+        up = bool(started) or any(s.name in live for s in fleet.seats) \
+            or any(c.state in ("live", "adopted") for c in claims.values())
+        strip.open_after(live, placed, target, up)
     ctx.save()
     return report
 
@@ -399,6 +409,8 @@ def op_down(ctx: Ctx, names: Sequence[str], wait_ms: Optional[int] = None, close
     ctx.save()
     if close_panes:
         _close_panes(ctx, seats, report)
+        if not names:  # design 19.1: after the seats; `down NAME...` never touches the strip
+            watchpane.close_strip(ctx, report)
     if close_workspace:
         _close_workspace(ctx, report)
     ctx.save()

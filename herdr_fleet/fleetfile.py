@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:
     import tomllib  # Python 3.11+
@@ -27,11 +27,15 @@ FLEET_NAME = "fleet.toml"
 DIRECTIONS = ("right", "down")
 
 TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "contacts", "quit_timeout_ms",
-            "restart_hint_tokens"}
+            "restart_hint_tokens", "watch"}
 CONTACT_KEYS = {"name", "match", "note"}
 MATCH_KEYS = {"cwd", "kind", "name"}
 LAYOUT_KEYS = {"mode", "columns", "direction", "ratio"}
 MODES = ("chain", "grid")
+WATCH_KEYS = {"ratio", "position"}
+WATCH_POSITIONS = ("bottom",)        # design 19.1: the only position in 0.8.0
+WATCH_RATIO = 0.12                   # the strip's default share of the area it is split from
+WATCH_RATIO_RANGE = (0.1, 0.4)       # herdr clamps every split ratio to 0.1-0.9 (19.4)
 SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "from", "env", "kickoff",
              "kickoff_text", "quit", "notes", "worktrees"}
 
@@ -92,6 +96,9 @@ class Fleet:
     columns: Optional[int] = None    # grid only
     contacts: List[Contact] = field(default_factory=list)
     restart_hint_tokens: Optional[int] = None  # status --context: "consider restart" at or above (17.4)
+    watch: bool = True                         # design 19: `up` starts the watcher in a strip
+    watch_ratio: float = WATCH_RATIO           # [watch] ratio, clamped to WATCH_RATIO_RANGE
+    watch_position: str = "bottom"             # [watch] position
 
     def contact(self, name: str) -> Optional[Contact]:
         for contact in self.contacts:
@@ -220,13 +227,15 @@ def load_fleet(path: str) -> Fleet:
     if mode == "grid":
         _grid_overrides(seats, raw_seats, direction, ratio, warnings)
     contacts = _parse_contacts(data.get("contacts", []), repo, [s.name for s in seats], errors, warnings)
+    watch, watch_ratio, watch_position = _parse_watch(data.get("watch", True), errors, warnings)
 
     if errors:
         raise FleetError(["%s: %s" % (path, e) for e in errors])
     return Fleet(path=path, repo=repo, workspace=workspace, cwd=base_cwd, state_note=state_note,
                  kickoff=default_kickoff, direction=direction, ratio=ratio,
                  quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns,
-                 contacts=contacts, restart_hint_tokens=hint_tokens)
+                 contacts=contacts, restart_hint_tokens=hint_tokens, watch=watch, watch_ratio=watch_ratio,
+                 watch_position=watch_position)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
@@ -314,6 +323,31 @@ def _grid_overrides(seats: List[Seat], raw_seats: List[Dict], direction: str, ra
             warnings.append("agents[%d] (%s): %s ignored in grid mode"
                             % (seat.index, seat.name, ", ".join(ignored)))
         seat.split, seat.ratio, seat.from_seat = direction, ratio, None
+
+
+def _parse_watch(value: object, errors: List[str], warnings: List[str]) -> Tuple[bool, float, str]:
+    """``watch = false`` (or ``true``) at the top level, or a ``[watch]`` table with ``ratio``
+    and ``position`` (design 19.1). TOML cannot hold both, so the table means "on"."""
+    if isinstance(value, bool):
+        return value, WATCH_RATIO, "bottom"
+    if not isinstance(value, dict):
+        errors.append("watch: must be true, false or a [watch] table")
+        return True, WATCH_RATIO, "bottom"
+    _unknown_keys(value, WATCH_KEYS, "[watch]", warnings)
+    ratio = _ratio(value.get("ratio"), "watch.ratio", errors)
+    if ratio is None:
+        ratio = WATCH_RATIO
+    low, high = WATCH_RATIO_RANGE
+    if not low <= ratio <= high:
+        clamped = min(max(ratio, low), high)
+        warnings.append("watch.ratio: %s is outside %s-%s; using %s" % (ratio, low, high, clamped))
+        ratio = clamped
+    position = value.get("position", "bottom")
+    if position not in WATCH_POSITIONS:
+        errors.append("watch.position: %r is not supported (only %s)"
+                      % (position, ", ".join('"%s"' % p for p in WATCH_POSITIONS)))
+        position = "bottom"
+    return True, float(ratio), str(position)
 
 
 def _parse_contacts(raw: object, repo: str, seat_names: List[str], errors: List[str],

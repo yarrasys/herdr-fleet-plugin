@@ -38,6 +38,15 @@ acts, writes it back and appends one JSON line to the call log (env
   id, answering ``result.move_result.pane`` and ``previous_pane_id`` like live herdr;
   a cross-workspace move leaves the old id as an alias that ``pane current
   --current`` (resolved from the caller's HERDR_PANE_ID) still follows.
+- ``plugin pane open --placement split --target-pane P --direction D`` splits P 50/50
+  (herdr 0.9.5 has no ratio option) into a pane marked ``plugin`` and ``created``; the
+  ``watch`` entrypoint's pane runs ``python3 <root>/bin/herdr-fleet watch``. It is
+  focused unless ``--no-focus`` (the CLI's default is to focus it).
+- ``pane layout`` and ``pane resize`` answer the 0.9.5 shapes (``result.layout``,
+  ``result.resize``) from ``geometry``: the tab's splits replayed in creation order on a
+  200x50 cell area, rounded as herdr rounds. ``pane resize`` follows herdr's rule: the
+  nearest split on the pane's named edge (else the opposite edge) gains the amount
+  for right and down and loses it for left and up, clamped to 0.1-0.9.
 - The log records facts the safety tests assert on: the target's state at
   every ``agent prompt``, the state every ``agent get`` answered, whether a
   pane was at a shell at every ``agent start``, and whether a closed pane or
@@ -567,16 +576,83 @@ class Sim:
         return _ok({"type": "ok"}, "cli:notification:show")
 
     def _plugin_pane(self, args: List[str]) -> Result:
-        """``plugin pane open`` answers with the new pane at result.plugin_pane.pane (live 0.9.4)."""
+        """``plugin pane open`` answers with the new pane at result.plugin_pane.pane (live 0.9.4,
+        0.9.5). With ``--placement split --target-pane P`` the pane splits P 50/50."""
         if args[:1] != ["open"]:
             return _ok({"type": "ok"}, "cli:plugin:pane")
         _, opts, _ = _opts(args[1:], ("--plugin", "--entrypoint", "--placement", "--cwd", "--env",
                                       "--width", "--height", "--workspace", "--target-pane", "--direction"))
-        ws = next(iter(self.w["workspaces"]), "w1")
+        entrypoint = (opts.get("--entrypoint") or [""])[0]
+        target = (opts.get("--target-pane") or [None])[0]
+        cwd = (opts.get("--cwd") or ["/tmp"])[0]
+        split = None
+        if target is not None:
+            if target not in self.w["panes"]:
+                return _err("pane_not_found", "pane %s not found" % target)
+            ws = self.w["panes"][target]["workspace_id"]
+            if (opts.get("--placement") or [""])[0] == "split":
+                split = {"from": target, "direction": (opts.get("--direction") or ["right"])[0], "ratio": "0.5"}
+        else:
+            ws = (opts.get("--workspace") or [next(iter(self.w["workspaces"]), "w1")])[0]
         pid = "%s:p%d" % (ws, self._next())
-        add_pane(self.w, pid, ws, (opts.get("--cwd") or ["/tmp"])[0])
-        pane = dict(self._pane_record(pid), label=(opts.get("--entrypoint") or [""])[0])
-        return _ok({"plugin_pane": {"pane": pane}, "type": "plugin_pane_opened"}, "cli:plugin:pane:open")
+        procs = None
+        if entrypoint == "watch":
+            argv = ["python3", "/plugins/yarrasys.fleet/bin/herdr-fleet", "watch"]
+            procs = [{"name": "python3", "argv0": "python3", "argv": argv, "cmdline": " ".join(argv), "cwd": cwd,
+                      "pid": 700}]
+        add_pane(self.w, pid, ws, cwd, procs=procs, created=True)
+        record = self.w["panes"][pid]
+        if target is not None:
+            record["tab_id"] = self.w["panes"][target]["tab_id"]
+        record.update(plugin=entrypoint, split=split,
+                      env=dict(item.split("=", 1) for item in opts.get("--env", [])))
+        focus = "--no-focus" not in opts
+        self.info.update(plugin_pane=pid, focus=focus)
+        pane = dict(self._pane_record(pid), label=entrypoint, focused=focus)
+        plugin = (opts.get("--plugin") or [""])[0]
+        return _ok({"plugin_pane": {"entrypoint": entrypoint, "pane": pane, "plugin_id": plugin},
+                    "type": "plugin_pane_opened"}, "cli:plugin:pane:open")
+
+    def _pane_layout(self, args: List[str]) -> Result:
+        _, opts, _ = _opts(args, ("--pane",))
+        pid = (opts.get("--pane") or [self.w.get("caller")])[0]
+        if pid not in self.w["panes"]:
+            return _err("pane_not_found", "pane %s not found" % pid)
+        return _ok({"layout": self._snapshot(pid), "type": "pane_layout"}, "cli:pane:layout")
+
+    def _pane_resize(self, args: List[str]) -> Result:
+        _, opts, _ = _opts(args, ("--pane", "--direction", "--amount"))
+        pid = (opts.get("--pane") or [self.w.get("caller")])[0]
+        if pid not in self.w["panes"]:
+            return _err("pane_not_found", "pane not found")
+        nav = opts["--direction"][0]
+        amount = min(abs(float((opts.get("--amount") or ["0.05"])[0])), 0.5)
+        tab = self.w["panes"][pid]["tab_id"]
+        rects, splits = geometry(self.w, tab)
+        changed = False
+        chosen = resize_split(splits, rects.get(pid), nav) if pid in rects else None
+        if chosen is not None:
+            record = self.w["panes"][chosen["owner"]]["split"]
+            old = float(record.get("ratio") or 0.5)
+            grows = nav in ("right", "down")
+            new = round(min(max(old + (amount if grows else -amount), 0.1), 0.9), 4)
+            changed = new != old
+            record["ratio"] = new
+            self.info["resized"] = {"owner": chosen["owner"], "from": old, "to": new}
+        snapshot = self._snapshot(pid)
+        return _ok({"resize": {"changed": changed, "pane_id": pid, "focused_pane_id": snapshot["focused_pane_id"],
+                               "layout": snapshot, "reason": None if changed else "unchanged"},
+                    "type": "pane_resize"}, "cli:pane:resize")
+
+    def _snapshot(self, pid: str) -> Dict:
+        tab = self.w["panes"][pid]["tab_id"]
+        rects, splits = geometry(self.w, tab)
+        first = next(iter(rects), pid)
+        return {"workspace_id": self.w["panes"][pid]["workspace_id"], "tab_id": tab, "zoomed": False,
+                "area": _rect_json(AREA), "focused_pane_id": first,
+                "panes": [{"pane_id": p, "focused": p == first, "rect": _rect_json(r)} for p, r in rects.items()],
+                "splits": [{"id": "split-%d" % i, "direction": sp["direction"], "ratio": sp["ratio"],
+                            "rect": _rect_json(sp["rect"])} for i, sp in enumerate(splits)]}
 
     def _plugin_config_dir(self, args: List[str]) -> Result:
         if not self.w.get("config_dir"):
@@ -585,6 +661,71 @@ class Sim:
 
     def _plugin_list(self, args: List[str]) -> Result:
         return _ok({"plugins": [], "type": "plugin_list"}, "cli:plugin")
+
+
+AREA = (0, 0, 200, 50)  # the cell area pane layouts are computed on
+
+
+def _rect_json(rect) -> Dict:
+    return {"x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3]}
+
+
+def geometry(world: Dict, tab: str):
+    """``({pane: (x, y, w, h)}, [split])`` for a tab, replaying the recorded splits in creation
+    order: each split divides its source's current cells, the source keeping ``ratio``
+    (rounded as herdr 0.9.5 rounds). A split is ``{direction, ratio, rect, pos, owner}``,
+    ``owner`` being the pane whose ``split`` record holds the ratio (the second child)."""
+    rects: Dict[str, Tuple[int, int, int, int]] = {}
+    splits: List[Dict] = []
+    for pid, pane in world["panes"].items():
+        if pane["tab_id"] != tab:
+            continue
+        split = pane.get("split")
+        if not split or split.get("from") not in rects:
+            if not rects:
+                rects[pid] = AREA
+            continue
+        x, y, w, h = rects[split["from"]]
+        ratio = float(split.get("ratio") or 0.5)
+        if split["direction"] == "right":
+            first = int(round(w * ratio))
+            rects[split["from"]], rects[pid] = (x, y, first, h), (x + first, y, w - first, h)
+            pos = x + first
+        else:
+            first = int(round(h * ratio))
+            rects[split["from"]], rects[pid] = (x, y, w, first), (x, y + first, w, h - first)
+            pos = y + first
+        splits.append({"direction": split["direction"], "ratio": ratio, "rect": (x, y, w, h), "pos": pos,
+                       "owner": pid})
+    return rects, splits
+
+
+def _overlap(a_start: int, a_len: int, b_start: int, b_len: int) -> bool:
+    return a_start < b_start + b_len and a_start + a_len > b_start
+
+
+def resize_split(splits: List[Dict], rect, nav: str) -> Optional[Dict]:
+    """herdr 0.9.5's ``nearest_resize_split``: the nearest split of the matching direction on
+    the pane's ``nav`` edge (within one cell), else on the opposite edge."""
+    if rect is None:
+        return None
+    x, y, w, h = rect
+    want = "down" if nav in ("up", "down") else "right"
+
+    def on(edge_nav: str) -> Optional[Dict]:
+        edge = {"up": y, "down": y + h, "left": x, "right": x + w}[edge_nav]
+        found = []
+        for split in splits:
+            sx, sy, sw, sh = split["rect"]
+            if split["direction"] != want:
+                continue
+            across = _overlap(sx, sw, x, w) if want == "down" else _overlap(sy, sh, y, h)
+            if across and abs(split["pos"] - edge) <= 1:
+                found.append((abs(split["pos"] - edge), split))
+        return min(found, key=lambda item: item[0])[1] if found else None
+
+    opposite = {"up": "down", "down": "up", "left": "right", "right": "left"}[nav]
+    return on(nav) or on(opposite)
 
 
 def main() -> int:

@@ -1,8 +1,9 @@
 """The state file ``<repo>/.herdr/fleet.state.json`` (design section 5).
 
 It records, per seat, the pane the seat lives in, whether herdr-fleet created
-that pane, the kind and args the seat was started with, and timestamps; and
-for the fleet, the workspace and whether herdr-fleet created it. Pane and
+that pane, the kind and args the seat was started with, and timestamps; for
+the fleet, the workspace and whether herdr-fleet created it; and the watcher
+strip ``up`` opened (``"watch"``, design 19), which is never a seat. Pane and
 workspace ids are valid for one herdr server, so ``prune_state`` drops ids
 herdr no longer knows. Writes are atomic (temp file in ``.herdr`` then
 rename) and keep ``.herdr/.gitignore`` ignoring the state file.
@@ -79,6 +80,30 @@ class State:
         return self.data.get("workspace_id")
 
     @property
+    def watch(self) -> Optional[Dict]:
+        """The watcher strip ``up`` opened: ``{"pane_id", "created_pane", "started"}`` or None."""
+        entry = self.data.get("watch")
+        return entry if isinstance(entry, dict) and entry.get("pane_id") else None
+
+    @property
+    def watch_pane(self) -> Optional[str]:
+        entry = self.watch
+        return str(entry["pane_id"]) if entry else None
+
+    def set_watch(self, pane_id: str, created: bool, started: str) -> None:
+        self.data["watch"] = {"pane_id": pane_id, "created_pane": created, "started": started}
+        self.dirty = True
+
+    def update_watch(self, **fields: object) -> None:
+        if self.watch is not None:
+            self.data["watch"].update(fields)
+            self.dirty = True
+
+    def drop_watch(self) -> None:
+        if self.data.pop("watch", None) is not None:
+            self.dirty = True
+
+    @property
     def created_workspace(self) -> bool:
         return bool(self.data.get("created_workspace"))
 
@@ -141,7 +166,8 @@ def refresh_pane(state: State, name: str, pane: str, kind: Optional[str] = None)
 
 
 def prune_state(state: State, herdr: Herdr) -> List[str]:
-    """Drop recorded panes and workspace that herdr no longer knows. A seat whose
+    """Drop recorded panes (the seats' and the watcher strip's) and the workspace that
+    herdr no longer knows. A seat whose
     recorded pane is gone but which is live by name elsewhere (its pane was moved,
     e.g. to another workspace, which changes the id) is re-pointed instead, with
     every field kept. Only "not found" errors prune; any other herdr error propagates."""
@@ -165,6 +191,17 @@ def prune_state(state: State, herdr: Herdr) -> List[str]:
                 continue
             state.drop(name)
             messages.append("state: dropped %s (pane %s no longer exists)" % (name, pane))
+    strip = state.watch_pane
+    if strip:  # design 19.1: a recorded watcher pane that is gone is dropped like a seat's pane
+        try:
+            herdr.pane_get(strip)
+        except HerdrError as exc:
+            if "not_found" not in exc.code:
+                raise
+            state.drop_watch()
+            messages.append("state: dropped the watcher pane %s (no longer exists)" % strip)
+    elif "watch" in state.data:
+        state.drop_watch()
     workspace = state.workspace_id
     if workspace:
         try:

@@ -23,6 +23,7 @@ The suite takes a few seconds. Nothing in it talks to a real herdr: `HERDR_BIN_P
 - stateful simulation of `workspace`, `pane` and `agent` commands with the JSON shapes of herdr 0.9.4;
 - behaviours for the hard cases: `agent_pane_busy` for a fresh split, `agent_not_ready`, start errors, a quit that takes N polls of `agent get` before the agent is gone, an agent that never quits, processes that linger after exit, stalled prompts, and `agent wait` outcomes;
 - scripted `agent wait` results for the watcher (`wait_results`: per agent, a list of `idle`, `done`, `working`, `blocked`, `timeout` or `not_found`, consumed one per wait). A state that `--until` does not name times out, as live herdr would; `timeout` without `--timeout` answers `fake_wait_forever`, because live herdr would never return. `status_after_wait` changes the agent's state right after a wait answered, as when a seat starts working during the debounce. The log records each wait's `--until` and `--timeout`. In-process calls are serialised by a lock, and the program form takes a file lock, so the watcher's waiter threads can share one world.
+- the watcher strip of 0.8.0 (design 19): `plugin pane open --placement split --target-pane P --direction D` splits P 50/50 (live herdr 0.9.5 has no ratio option) into a pane marked `plugin` and `created`, in P's workspace and tab, with the `--env` values recorded; the `watch` entrypoint's pane runs `python3 …/bin/herdr-fleet watch`; the answer is the live `result.plugin_pane` (`entrypoint`, `pane`, `plugin_id`), and the pane is focused unless `--no-focus`. `pane layout` and `pane resize` answer the 0.9.5 shapes (`result.layout`: `area`, `panes` with `rect`, `splits` with `direction`, `ratio` and `rect`; `result.resize`: `changed`, `pane_id`, `focused_pane_id`, `layout`, `reason`) from `fake_herdr.geometry`, which replays the tab's recorded splits on a 200x50 cell area with herdr's rounding. `pane resize` follows herdr 0.9.5's source (`src/layout.rs`): the nearest split of the matching direction on the pane's named edge, else the opposite edge, gains the amount for `right` and `down` and loses it for `left` and `up`, clamped to 0.1-0.9; the amount is taken as `abs()` and capped at 0.5.
 
 Most tests call `herdr_fleet.cli.main` in-process with the fake as the runner and an instant clock, so 250 ms polls and 10 s or 20 s timeouts cost nothing. `tests/test_cli_subprocess.py` runs `bin/herdr-fleet` as a real process with the fake installed as an executable on `HERDR_BIN_PATH`, exactly as herdr would. `tests/test_manifest.py` checks `herdr-plugin.toml` and runs its commands the way herdr does: actions from the plugin root with an action's context JSON, pane entrypoints through `sh -c` from the repo directory that `ui` passes as `--cwd`.
 
@@ -39,7 +40,8 @@ Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry
 - an `inbox` command ran nothing but the caller lookup (`pane current`, `agent get`), and nothing at all with `--as` (design 18.5);
 - `deliver`, `watch` and kickoffs carrying queued messages prompted only idle or done agents (invariant 11); only `send` may reach a working one;
 - `watch` ran nothing but `agent wait`, `agent get`, `agent list`, `agent prompt`, `notification show` and the preflight's `herdr --version`, and every `agent wait` carried `--timeout` (invariants 12 and 13);
-- `inbox --hook` ran nothing but `agent get` (invariant 14), and `hooks` ran no herdr command at all.
+- `inbox --hook` ran nothing but `agent get` (invariant 14), and `hooks` ran no herdr command at all;
+- `plugin pane open` came only from `up` (also through the popup menu) or `ui`, `pane resize` only from `up`, and a pane opened as a plugin pane was never prompted, renamed or started into (design 19.3).
 
 Tests that need git use `GitCase` from `tests/support.py`: a real temporary repository (`git init`, `git commit`, `git worktree add`) with HOME set to the test's temp dir and no system git config. The plugin's git calls go through a logging shim on `PATH`, and `tearDown` asserts invariant 8 on them: only `rev-parse`, `symbolic-ref`, `worktree list`, `log`, `status`, `merge-base`, `ls-files` and `cat-file`, never `fetch` or `prune`. These tests are skipped when git is missing.
 
@@ -177,6 +179,22 @@ Versions 0.6.1 (design 18.6, the watcher) and 0.7.0 (18.7, hooks):
   - `inbox --hook prompt`: counts what waits (not what is past its ttl), moves and logs nothing;
   - usage errors for `--hook` with `--as`, another mode or an unknown event.
 - `tests/test_manifest.py`: the `watch` action and pane entries, the action opening the pane with `--placement split` at the focused pane's repository, and the pane command run as a real process that writes the lock with its own pid and stops cleanly on SIGTERM and on SIGINT, removing it.
+
+Version 0.8.0 (design 19, the watcher strip), `tests/test_watchpane.py`:
+
+- a fresh workspace: the strip is opened from the root pane (exact `plugin pane open` argv with `--placement split`, `--direction down`, `--cwd`, `--env HERDR_FLEET_FILE=…`, `--no-focus`) before any `pane split`, then `pane layout` and `pane resize --pane <root> --direction down --amount 0.38`, and the fake's geometry shows the strip across the full width with 6 of 50 rows and every seat above it, in chain and in grid mode; `[watch] ratio = 0.25` gives `--amount 0.25`;
+- beside the caller: chain mode splits the strip from the first seat's pane before the second split; grid mode from the grid area, so the strip spans the grid and not the caller's share;
+- an existing layout: the strip opens under the last seat's pane after the kickoffs, sized from the layout;
+- skips: `--no-watch`, `watch = false`, a live lock (`watcher: already running (pid N)`), a recorded strip still running the watcher (`starting`), an idle recorded strip (exit 3, no second strip), an error while inspecting it (exit 3, no second strip), and a fleet with no seat up;
+- the state entry `"watch"` (`pane_id`, `created_pane: true`, `started`), never among the seats; a strip that is gone is dropped (`up` says so) and the next `up` opens a new one;
+- warnings and fallbacks: a failed resize (exit 0), an unreadable layout (`about 12%`), a failed open (exit 3, seats still briefed), and a focus change reported when herdr returns the pane focused;
+- `status`: `watcher: starting (pane P)`, `watcher: running (pid N, pane P, since HH:MM)`, `watcher: not running (watcher pane P idle)`, the line shown whenever a lock is held even with nothing queued, `"pane"` and `"pane_state"` in JSON only when a strip is recorded, and the seat table unchanged;
+- `tile`: the strip parked after the seats and moved back under the anchor with `--ratio 0.88` before any seat returns, seat order kept, the geometry afterwards (strip full width at the bottom, grid above), `--dry-run`, a strip in another tab left alone, and a failed strip move that still tiles the seats (exit 3);
+- `down --close-panes`: the strip closed after the seats (and its entry dropped), an idle strip closed, a strip running something else kept (exit 3), one not created by `up` never closed, nothing without `--close-panes` or with names; `restart` and `swap` ignore it;
+- the fleet file: defaults, `watch = false`, the `[watch]` table, the ratio clamped to 0.1-0.4 with a warning, errors for an unsupported `position`, a ratio outside (0, 1) and a `watch` that is neither boolean nor table;
+- the safety hook failing for a `plugin pane open` or `pane resize` from another command and for a prompt or start aimed at a watcher pane.
+
+All 437 tests of 0.7.0 pass unchanged with the strip on by default. `GridCase.rects` leaves plugin panes out, so its cells stay shares of the grid area above the strip.
 
 ### Running the CLI against the fake by hand
 
@@ -425,3 +443,87 @@ python3 bin/herdr-fleet hooks install --remove --fleet "$G"; cat "$H/.claude/set
 | 25 | `removed the Stop and UserPromptSubmit hooks from …`; the file holds no `hooks` key |
 
 Then `down --close-panes` both fleets, `herdr plugin unlink yarrasys.fleet` if it was linked only for this test, and remove `$S` and `$H`.
+
+## Live smoke test for 0.8.0 (to run by hand)
+
+Not run yet. For the designer or the owner, inside herdr, from this repository. The plugin must be linked so the strip runs this clone's `watch` entrypoint, and `HERDR_FLEET_BIN` exported so seats and the launcher run it too. Two Haiku seats in a scratch fleet, running in a directory Claude Code already trusts. Wait for the seats to be idle between steps unless a step says otherwise. Never answer a seat's prompt on its behalf; if a seat is blocked, the owner answers it and runs `kickoff`.
+
+### A fresh workspace
+
+```bash
+cd /Users/nabsha/work/yarrasys/projects/herdr-fleet-plugin
+export HERDR_FLEET_BIN="$PWD/bin/herdr-fleet"
+herdr plugin link "$PWD"
+W=$(mktemp -d /tmp/fleet-strip.XXXXXX); mkdir -p "$W/.herdr"; F="$W/.herdr/fleet.toml"
+cat > "$F" <<EOF
+workspace = "fleet-strip"
+cwd = "$PWD"
+
+[layout]
+mode = "grid"
+
+[[agents]]
+name = "strip-a"
+kind = "claude"
+args = ["--model", "claude-haiku-5-5"]
+env = { HERDR_FLEET_BIN = "$HERDR_FLEET_BIN" }
+kickoff_text = "[from herdr-fleet] Strip smoke test ({reason}). You are {name}. Reply with the single word READY, then wait. Run no tools unless a message asks you to."
+
+[[agents]]
+name = "strip-b"
+kind = "claude"
+args = ["--model", "claude-haiku-5-5"]
+env = { HERDR_FLEET_BIN = "$HERDR_FLEET_BIN" }
+kickoff_text = "[from herdr-fleet] Strip smoke test ({reason}). You are {name}. Reply with the single word READY, then wait. Run no tools unless a message asks you to."
+EOF
+python3 bin/herdr-fleet up --dry-run --fleet "$F"                               # 1
+python3 bin/herdr-fleet up --fleet "$F"                                         # 2
+P=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["watch"]["pane_id"])' "$W/.herdr/fleet.state.json")
+herdr pane layout --pane "$P"                                                   # 3
+python3 bin/herdr-fleet status --fleet "$F"; cat "$W/.herdr/watch.lock"         # 4 (a few seconds after 2)
+python3 bin/herdr-fleet up --fleet "$F"                                         # 5
+python3 bin/herdr-fleet send --queue --as owner strip-a "Reply with the single word STRIP" --fleet "$F"   # 6
+python3 bin/herdr-fleet tile --dry-run --fleet "$F"; python3 bin/herdr-fleet tile --fleet "$F"           # 7
+herdr pane layout --pane "$P"                                                   # 8
+python3 bin/herdr-fleet down --close-panes --close-workspace --fleet "$F"      # 9
+ls -a "$W/.herdr"; cat "$W/.herdr/fleet.state.json"                             # 10
+```
+
+| Step | Expected |
+| --- | --- |
+| 1 | a `watcher: plan - herdr plugin pane open … --placement split --target-pane '<root pane of fleet-strip>' --direction down … --no-focus, then herdr pane resize … --direction down --amount 0.38` line; nothing opens |
+| 2 | `watcher: started - herdr-fleet watch in pane P below <root>, 12% of the area`; the strip spans the bottom of the new workspace with both seats above it; your own pane keeps the focus (if the line says `herdr moved the focus to it`, note it: `--no-focus` was not honoured) |
+| 3 | one `down` split whose rect is the whole tab, `ratio` about 0.88; the strip's rect is the full width and about an eighth of the height |
+| 4 | `watcher: running (pid N, pane P, since HH:MM)` with nothing queued; the lock names that pid and the fleet file |
+| 5 | `watcher: already running (pid N)`; no second strip |
+| 6 | the strip prints `waiting on strip-a (1 queued)` and about 5 s later `delivered 1 to strip-a`; the seat answers STRIP |
+| 7 | the dry run shows the strip parked and moved back under `strip-a` with `--ratio 0.88`, before the seats; the real run prints `watcher: moved - below strip-a (…), ratio 0.88`, and the watcher keeps running (its pane shows no `stopped`) |
+| 8 | the strip still spans the full width at the bottom, about 12% high |
+| 9 | the seats quit, their created panes close, then `watcher: pane closed - P (the watcher stopped)`; the workspace closes |
+| 10 | no `watch.lock`; the state file has no `"watch"` entry |
+
+### Live seats beside your pane
+
+```bash
+sed -i '' '/^workspace = /d' "$F"
+python3 bin/herdr-fleet up --no-watch --fleet "$F"                              # 11
+python3 bin/herdr-fleet status --fleet "$F"                                     # 12
+python3 bin/herdr-fleet up --fleet "$F"                                         # 13
+python3 bin/herdr-fleet tile --fleet "$F"                                       # 14
+herdr pane close <the strip's pane id>                                          # 15
+python3 bin/herdr-fleet status --fleet "$F"; ls -a "$W/.herdr"                  # 16
+python3 bin/herdr-fleet up --fleet "$F"                                         # 17
+python3 bin/herdr-fleet down --close-panes --fleet "$F"                        # 18
+```
+
+| Step | Expected |
+| --- | --- |
+| 11 | the seats split off your pane; no strip and no `watcher` line |
+| 12 | no `watcher:` line (no lock, no strip, nothing queued) |
+| 13 | `watcher: started - herdr-fleet watch in pane P below <strip-b's pane>, 12% of the area`, printed after the kickoff lines, under the last seat only |
+| 14 | the strip moves under `strip-a` and spans both seats, not your pane |
+| 15, 16 | the watcher stops through SIGHUP: `status` shows `watcher: not running` (the strip is pruned from the state file) and `watch.lock` is gone. If herdr keeps the pane open with nothing running, `status` shows `watcher: not running (watcher pane P idle)` instead; note which |
+| 17 | a new strip opens (or, if step 16 showed an idle pane, `watcher: not running - its pane P is idle`, exit 3, and no second strip) |
+| 18 | the seats quit and their panes close, then the strip closes |
+
+Then `herdr plugin unlink yarrasys.fleet` if it was linked only for this test, and remove `$W`.

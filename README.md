@@ -47,7 +47,7 @@ Installing the plugin does not give a repository a fleet; `init` does. From anyw
 herdr-fleet init              # writes the starter files at the repository root
 $EDITOR .herdr/fleet.toml     # name the seats, pick kinds and models
 herdr-fleet doctor            # check the file, herdr and the kinds
-herdr-fleet up                # start every seat beside your pane and brief it
+herdr-fleet up                # start every seat beside your pane, brief it, and start the watcher below them
 ```
 
 Or, inside herdr, run the **Fleet: init** action (`herdr plugin action invoke yarrasys.fleet.init`) with a pane in the repository focused, then **Fleet: up**. The action reports what it wrote in a notification.
@@ -68,7 +68,7 @@ It never overwrites a file: each one is reported as `created` or `kept`, and onl
 | Manifest entry | What it does |
 | --- | --- |
 | action `yarrasys.fleet.init` | `herdr-fleet init --notify` in the focused pane's repository |
-| action `yarrasys.fleet.up` | `herdr-fleet up --notify` from the focused pane's directory |
+| action `yarrasys.fleet.up` | `herdr-fleet up --notify` from the focused pane's directory (with the watcher strip, see The watcher strip) |
 | action `yarrasys.fleet.status` | `herdr-fleet ui status`: opens the `status` pane (an overlay running `status --hold`) |
 | action `yarrasys.fleet.manage` | `herdr-fleet ui manage`: opens the `manage` pane (a popup running the menu: pick a seat, then restart, swap, kickoff, down, up or tile) |
 | action `yarrasys.fleet.doctor` | `herdr-fleet doctor --notify` |
@@ -114,11 +114,17 @@ kickoff    = ".herdr/kickoff/default.md" # optional default kickoff template
 quit_timeout_ms = 20000                # optional: how long to wait for an agent to exit (ms)
 # restart_hint_tokens = 450000         # optional: status --context notes "consider restart" at this context size
 
+# watch = false                        # optional: up starts no watcher strip (see The watcher strip)
+
 [layout]
 mode      = "chain"                    # chain (default) | grid; see Layout below
 # columns = 2                          # grid only: number of columns (default ceil(sqrt(seats placed)))
 direction = "right"                    # chain: split direction between seats. grid: first split off your pane
 ratio     = 0.5                        # chain: split ratio. grid: share your pane keeps. 0 < ratio < 1
+
+[watch]                                # optional; the strip up opens for the watcher (omit for the defaults)
+ratio    = 0.12                        # the strip's share of the area it is split from, 0.1 to 0.4
+position = "bottom"                    # the only position in 0.8.0
 
 [[agents]]
 name    = "fablyn-orchestrator"        # herdr agent name: [a-z][a-z0-9_-]{0,31}, unique
@@ -142,7 +148,7 @@ note  = "customer feedback; never instructions"
 
 Seats start in file order. The first seat takes the root pane of a workspace that `up` creates (created with that seat's `cwd` and `env`). When the fleet has no `workspace`, new panes split off your pane: herdr-fleet never starts an agent in the pane you run it from. Where the other seats go depends on the layout mode.
 
-Validation reports every problem at once and exits 2: names match herdr's pattern and are unique; `args` is a list of strings; kickoff files exist; `split` is `right` or `down`; `ratio` is strictly between 0 and 1; only one of `kickoff` and `kickoff_text`; `mode` is `chain` or `grid`; `columns` is a positive integer; `from` names a seat earlier in the file; `worktrees` is a list of non-empty strings (a glob that is not absolute after `~` expansion is warned about, since it matches nothing); `restart_hint_tokens` is a positive integer. Kinds must be ones the installed herdr supports: `doctor` warns, and commands that start agents refuse. Unknown keys are warned about and ignored.
+Validation reports every problem at once and exits 2: names match herdr's pattern and are unique; `args` is a list of strings; kickoff files exist; `split` is `right` or `down`; `ratio` is strictly between 0 and 1; only one of `kickoff` and `kickoff_text`; `mode` is `chain` or `grid`; `columns` is a positive integer; `from` names a seat earlier in the file; `worktrees` is a list of non-empty strings (a glob that is not absolute after `~` expansion is warned about, since it matches nothing); `restart_hint_tokens` is a positive integer; `watch` is `true`, `false` or a `[watch]` table (TOML cannot have both `watch = false` and `[watch]`), whose `ratio` is strictly between 0 and 1 (outside 0.1 to 0.4 it is clamped with a warning) and whose `position` is `bottom`. Kinds must be ones the installed herdr supports: `doctor` warns, and commands that start agents refuse. Unknown keys are warned about and ignored.
 
 ### Layout
 
@@ -172,6 +178,8 @@ The grid is built with chained splits, since `herdr pane split SRC --ratio r` le
 
 Seats in other workspaces are reported as `elsewhere` and left alone. The seats being tiled must share one tab, or `tile` refuses. If a move fails, `tile` stops and names the seats it did not re-tile. `tile --dry-run` prints every move. Use it after changing `[layout]`, or when a run left the panes uneven.
 
+The watcher strip (see The watcher strip), when it is in the same tab, is parked after the seats and moved back under the first seat's pane with `--ratio 1 - [watch] ratio` before any seat comes back, so afterwards it spans the whole layout. A strip in another tab or workspace is reported and left alone; if moving the strip fails, `tile` says so and tiles the seats anyway.
+
 ### Kickoff templates
 
 Each seat gets one `herdr agent prompt <name> "<text>"` after every seat has started, in file order, so the roster is complete (put the orchestrator last to brief it last). Placeholders use Python `str.format_map` rules (`{{` and `}}` are literal braces); anything that is not one of these is left exactly as written:
@@ -196,8 +204,8 @@ Every command except `init` and `install-cli` accepts `--fleet PATH` to pick the
 | Command | What it does |
 | --- | --- |
 | `init [DIR] [--example NAME] [--force]` | Write the starter `.herdr` files at the root of DIR's Git work tree (else DIR; default the current directory), or copy `examples/NAME` with `--example` (`fablyn`). Never overwrites without `--force`. Runs no herdr command and does not need `HERDR_ENV`. Exit 0 when every file was created or kept, 1 when a write failed, 2 for an unknown example or a bad DIR. |
-| `up [NAME...] [--me NAME] [--dry-run] [--no-kickoff] [--note TEXT]` | Start every seat that is not live, then brief the ones it started. Skips seats whose name is live; adopts an unnamed agent of the right kind that herdr resumed in a seat's recorded pane (rename, no kickoff); reuses a recorded pane that is at a shell prompt; else splits a new pane. `--me NAME` names the agent in your own pane as seat NAME (rename only, no kickoff) and records it as `adopted`. If your pane is in another workspace than the fleet's, `up --me` warns with the exact `herdr pane move` that would join them; `--join` runs that move (your session keeps running) and records the new pane id. `--dry-run` prints the exact herdr commands and changes nothing. |
-| `status [--json] [--hold] [--context]` | Every seat: expected kind, live kind, pane, state (`idle`, `working`, `blocked`, `done`, `unknown` or `absent`), cwd (with `~`), Git branch, drift and notes. When every live seat (at least two) has the same cwd, the CWD column goes and the header line says `cwd ~/…` once; the same for BRANCH (`branch main`). Then the contacts with their pane and state, the messages awaiting a reply, whether a watcher runs and the queued messages per mailbox (`watcher: running (pid 123 since 10:00)` or `watcher: not running`, then `queued: fablyn-dev 3 (oldest 10:09), owner 1`, both only while something is queued), and `herdr integration status` for the kinds in use, flagging `outdated` and `not installed`. When a seat declares `worktrees`, a last line points at `herdr-fleet worktrees`. `--context` adds a CONTEXT column (see Context size). `--json` always keeps `cwd` and `branch` per seat, and adds `"queued": {name: count}`, `"queued_oldest": {name: time}` and `"watcher": {"running", "pid", "since"}`. |
+| `up [NAME...] [--me NAME] [--dry-run] [--no-kickoff] [--note TEXT] [--no-watch]` | Start every seat that is not live, then brief the ones it started, then start the watcher in a strip below the seats unless one runs already (see The watcher strip; `--no-watch` or `watch = false` skips it). Skips seats whose name is live; adopts an unnamed agent of the right kind that herdr resumed in a seat's recorded pane (rename, no kickoff); reuses a recorded pane that is at a shell prompt; else splits a new pane. `--me NAME` names the agent in your own pane as seat NAME (rename only, no kickoff) and records it as `adopted`. If your pane is in another workspace than the fleet's, `up --me` warns with the exact `herdr pane move` that would join them; `--join` runs that move (your session keeps running) and records the new pane id. `--dry-run` prints the exact herdr commands and changes nothing. |
+| `status [--json] [--hold] [--context]` | Every seat: expected kind, live kind, pane, state (`idle`, `working`, `blocked`, `done`, `unknown` or `absent`), cwd (with `~`), Git branch, drift and notes. When every live seat (at least two) has the same cwd, the CWD column goes and the header line says `cwd ~/…` once; the same for BRANCH (`branch main`). Then the contacts with their pane and state, the messages awaiting a reply, whether a watcher runs and the queued messages per mailbox (`watcher: running (pid 123, pane w1H:p7, since 10:00)`, `watcher: running (pid 123 since 10:00)` for one started by hand, `watcher: starting (pane w1H:p7)`, `watcher: not running (watcher pane w1H:p7 idle)` or `watcher: not running`, then `queued: fablyn-dev 3 (oldest 10:09), owner 1`; the watcher line is printed whenever a watcher runs or `up` opened a strip, and otherwise, like the `queued:` line, only while something is queued), and `herdr integration status` for the kinds in use, flagging `outdated` and `not installed`. When a seat declares `worktrees`, a last line points at `herdr-fleet worktrees`. `--context` adds a CONTEXT column (see Context size). `--json` always keeps `cwd` and `branch` per seat, and adds `"queued": {name: count}`, `"queued_oldest": {name: time}` and `"watcher": {"running", "pid", "since"}`, plus `"pane"` and `"pane_state"` (`watcher`, `idle` or `busy`) when `up` opened a strip. |
 | `send TARGET... [TEXT] [--file PATH] [--fyi] [--queue \| --now] [--reply-to ID] [--ttl DURATION] [--as NAME] [--when-ready MS] [--all] [--dry-run]` | Message seats, contacts, `owner` or live agents through their inbox (see Messages and Inbox). `--fyi` marks a report that awaits no reply and never wakes an idle seat; `--queue` only queues; `--now` delivers or refuses, never queues; `--reply-to` names the message this answers; `--ttl 30m\|2h\|1d` drops it if still queued by then. |
 | `deliver [NAME...] [--fyi] [--dry-run]` | Hand queued messages to the seats that can take them now: an idle or done seat gets its whole queue as one prompt; a working, blocked, unknown or absent one keeps it. Without names: every seat and contact with a queued message that is not FYI (`--fyi`: any), and `owner` (a notification). |
 | `inbox [--as NAME] [--read \| --count \| --history NAME \| --redeliver ID] [--json]` | Your own mailbox: list what is queued for you, `--read` it (print and mark read), `--count` it, replay your delivered messages with NAME (`--history`), or queue a delivered message again (`--redeliver`). Runs no herdr command except finding who you are, and none with `--as`. `inbox --hook stop\|prompt` is what the Claude Code hooks run (see Claude Code hooks). |
@@ -211,7 +219,7 @@ Every command except `init` and `install-cli` accepts `--fleet PATH` to pick the
 | `swap [NAME...] [--note …] [--wait MS] [--dry-run]` | Restart exactly the seats that drifted from the file, and start absent ones. Drift: the live kind differs, or the running process's argv does not contain the file's `args` in order, or the state file recorded a different kind or args at start. Without names, adopted seats are skipped (`skipped - adopted session; name it explicitly to swap it`); `swap NAME` acts on them. `--dry-run` lists what would change and why. |
 | `kickoff NAME... [--note …] [--drop-inbox]` | Resend the kickoff (`reason = kickoff`), e.g. after you answered a seat's startup prompt. It carries what was queued for the seat, unless `--drop-inbox`. |
 | `tile [--dry-run]` | Re-tile the seats live in the fleet's workspace into the `[layout]` grid or chain with pane moves only (see Re-tiling). |
-| `down [NAME...] [--wait MS] [--close-panes] [--close-workspace]` | Quit seats. `--close-panes` then closes the panes herdr-fleet created, once they are back at a shell. `--close-workspace` closes the workspace only if herdr-fleet created it and no agent is left in it. |
+| `down [NAME...] [--wait MS] [--close-panes] [--close-workspace]` | Quit seats. `--close-panes` then closes the panes herdr-fleet created, once they are back at a shell, and after them the watcher strip `up` opened (which stops the watcher); `down NAME...` never touches the strip. `--close-workspace` closes the workspace only if herdr-fleet created it and no agent is left in it. |
 | `doctor` | Read-only checks: python, herdr binary and version, `HERDR_ENV`, server reachable, fleet file, the fleet file against its committed copies (`fleet file vs git`), kinds, kickoff files, `state_note`, integration status, a quit command per seat, Claude Code permissions per Claude seat, whether the Claude Code hooks are installed (`ok hooks: installed` or `info hooks: not installed (herdr-fleet hooks install)`, for fleets with a Claude seat), the state file. Exit 1 on any `fail`. |
 | `install-cli [--dir DIR] [--dev]` | Write the `herdr-fleet` launcher into DIR (default `~/.local/bin`) and print the plugin root (see Install). `--dev` symlinks this checkout instead. |
 | `ui status\|manage\|watch`, `menu` | Used by the manifest: open the overlay, popup or watch pane; the popup's numbered menu. |
@@ -275,7 +283,7 @@ When a batch would exceed 16 KiB, the seat gets `[from herdr-fleet] 4 messages w
 
 ### The watcher
 
-`herdr-fleet watch` runs in the foreground, in a shell or in the pane that **Fleet: watch** opens, and delivers queued messages as seats become idle, so nobody has to remember `deliver`. Only you start it, and Ctrl-C (or closing its pane) stops it.
+`herdr-fleet watch` runs in the foreground, in the strip that `up` opens below the seats (see The watcher strip), in the pane that **Fleet: watch** opens, or in a shell, and delivers queued messages as seats become idle, so nobody has to remember `deliver`. Ctrl-C, or closing its pane, stops it.
 
 - For each seat or contact with a queued message that is not FYI, it runs `herdr agent wait NAME --until idle --until done --timeout 30000` in a thread. The wait happens inside the herdr server; after a timeout the next wait starts. Every 2 s it re-reads the mailboxes, which are plain files, so a message for another seat gets its own waiter.
 - When a seat turns idle or done, it waits `--debounce` (default 5000 ms) so that a burst of messages becomes one turn, checks the state again with `herdr agent get`, and if the seat is still idle or done delivers the whole queue as one prompt, as `deliver` would. You get a `delivered 3 to fablyn-dev` notification. If the seat went back to work meanwhile, it waits again. A blocked seat is never prompted.
@@ -286,6 +294,18 @@ When a batch would exceed 16 KiB, the seat gets `[from herdr-fleet] 4 messages w
 - `watch --once` delivers what can be delivered right now (seats already idle or done), prints `deliver`'s lines and exits; it takes no lock.
 
 It reads the fleet file once when it starts; restart it after adding a seat.
+
+#### The watcher strip
+
+`up` starts the watcher for you, in a plugin pane you can see: the plugin's `watch` entrypoint, opened with `herdr plugin pane open --plugin yarrasys.fleet --entrypoint watch --placement split --target-pane <pane> --direction down --cwd <repo root> --env HERDR_FLEET_FILE=<fleet file> --no-focus`, so the installed plugin's copy runs, for the same fleet file (`--fleet` included), and your focus stays where it is.
+
+- **Where.** On a fresh layout the strip is split from the first pane of the layout before any other seat is placed: the root pane of a workspace `up` creates, the grid area, or the first chained seat's pane. The seats then fill the space above it, and the strip spans all of them. When seats are already placed, it opens under the last seat's pane in the fleet's workspace, after the kickoffs; `herdr-fleet tile` then stretches it across the layout.
+- **Size.** herdr splits 50/50, so `up` reads the split with `herdr pane layout` and grows the pane above with `herdr pane resize --pane <above> --direction down --amount <0.5 - ratio>` until the strip has `[watch] ratio` (default 12%) of the area it was split from. herdr keeps every split between 10% and 90%, hence the 0.1 lower bound. A failed resize is only a warning; if the layout cannot be read, the amount assumes the 50/50 split and the output says `about`.
+- **When not.** `watch = false` at the top of the fleet file, or `up --no-watch`. If `.herdr/watch.lock` names a live process, `up` prints `watcher: already running (pid N)` and opens nothing; if the strip it recorded is still open, it opens no second one (and says so when that pane no longer runs the watcher). It never starts one for a fleet with no seat up.
+- **Never a seat.** The strip is recorded in the state file as `"watch": {"pane_id", "created_pane": true, "started"}`. It hosts no agent: it is not in the seat table, drift or any seat loop, and nothing is ever prompted or typed into it. `restart` and `swap` ignore it. `status` shows it in the watcher line; a strip that is gone is dropped from the state file like a seat's pane.
+- **Stopping it.** Close the pane (the watcher gets SIGHUP and removes its lock), or run `down --close-panes`, which closes it after the seats when it runs the watcher or sits at a shell. Without `--close-panes` the watcher keeps running, with nothing to deliver.
+
+`herdr-fleet watch` in any pane and **Fleet: watch** keep working; `up` simply skips when their lock is alive. `up --dry-run` prints the strip's `plugin pane open` and `pane resize`.
 
 **Why the watcher costs nothing.** An agent spends tokens only during a turn, and every turn re-reads its whole context. Waiting for a seat to go idle happens in the herdr server, never in an agent, and every delivery is a batch, so a seat is woken once however many messages piled up:
 
@@ -412,7 +432,7 @@ herdr-fleet never answers anything for you. In code and in tests:
 7. `worktrees`, the doctor's `fleet file vs git` check and `status --context` only read: no `git fetch`, no `git worktree prune`, no write under `~/.claude`, and no herdr command beyond `agent list` and `agent get`.
 8. `status --context` keeps only token counts and timestamps from a transcript; no transcript content is ever shown.
 9. `ack` only writes the message log and sends nothing. `send --fyi` only marks the message as an FYI in the log, and keeps it from waking an idle seat.
-10. Queued messages are delivered only to `idle` or `done` seats (apart from `send`'s typed-ahead delivery of rule 2), only through `herdr agent prompt`, and only by a command someone ran or the watcher you started. Nothing herdr-fleet starts keeps running in the background: `watch` is a foreground process you start and stop. No agent is ever asked to poll; waits happen in the herdr server (`agent wait`) or in a silent hook.
+10. Queued messages are delivered only to `idle` or `done` seats (apart from `send`'s typed-ahead delivery of rule 2), only through `herdr agent prompt`, and only by a command someone ran or the watcher you or `up` started. Nothing herdr-fleet starts keeps running in the background: `watch` is a foreground process in a pane you can see and close; `up` records the strip it opens, and `down --close-panes` closes it. No agent is ever asked to poll; waits happen in the herdr server (`agent wait`) or in a silent hook.
 11. The watcher never prompts a `blocked` or `unknown` seat, never answers a dialog, never repeats an unconfirmed delivery, and never starts, restarts or quits anything.
 12. A hook-delivered batch is the seat reading its own inbox inside its own process; herdr-fleet never writes to an agent through a hook, and a hook prints nothing on any error.
 13. Message bodies are stored as written, only under the repository's `.herdr/inbox/`, and read only to show them (a batch, a listing, a history).
@@ -448,7 +468,7 @@ An adopted session usually runs with its owner's own args (for example a hand-st
 
 ## The state file
 
-`<repo>/.herdr/fleet.state.json`, created on the first `up`, records the workspace and, per seat, the pane, whether herdr-fleet created it, the kind and args it started with, and timestamps. herdr-fleet also creates `<repo>/.herdr/.gitignore` (or appends to it) so the state file, the message log (`messages.jsonl`), the inbox (`inbox/`) and `watch.lock` (the running watcher) are never committed. It lives in the repo rather than the plugin state directory so the manifest actions and an agent running the CLI share it.
+`<repo>/.herdr/fleet.state.json`, created on the first `up`, records the workspace, the watcher strip `up` opened (`"watch"`), and, per seat, the pane, whether herdr-fleet created it, the kind and args it started with, and timestamps. herdr-fleet also creates `<repo>/.herdr/.gitignore` (or appends to it) so the state file, the message log (`messages.jsonl`), the inbox (`inbox/`) and `watch.lock` (the running watcher) are never committed. It lives in the repo rather than the plugin state directory so the manifest actions and an agent running the CLI share it.
 
 Pane and workspace ids are valid for one herdr server. Every command checks the ids it is about to use and drops the ones herdr no longer knows. There is one exception: a seat whose recorded pane is gone but which is still live by name elsewhere (its pane was moved to another workspace, which changes its id) is re-pointed to its new pane, and every other field is kept. When a live seat turns up in a different pane while its recorded pane still exists, the entry follows it but no longer counts the pane as created by herdr-fleet, so `--close-panes` will not close it. Whenever herdr-fleet moves a seat's pane or finds it moved (`--join`, `tile`, a pane moved by hand, a seat found live elsewhere), it prints `<seat>: pane w1A:p1 → w1H:p5`, so notes that hard-code pane ids can be corrected. Writes are atomic.
 
@@ -456,7 +476,7 @@ Lifecycle:
 
 - `up` adds or updates an entry per seat; `restart` and `swap` update `kind`, `args` and `started_at`; kickoffs set `last_kickoff_at`.
 - `down` quits the seats but keeps their entries and pane ids, so the next `up` starts the seats again in the same panes.
-- `down --close-panes` drops the entry of every seat whose pane it closed, since nothing is left to reuse; the next `up` splits new panes for them. Seats whose panes were not created by herdr-fleet keep their entries. The workspace fields stay.
+- `down --close-panes` drops the entry of every seat whose pane it closed, since nothing is left to reuse; the next `up` splits new panes for them. Seats whose panes were not created by herdr-fleet keep their entries. The workspace fields stay. It also closes the watcher strip and drops `"watch"`.
 - `down --close-workspace` clears the workspace fields once the workspace is closed.
 - The file itself is never deleted. Remove it by hand to forget the layout.
 
