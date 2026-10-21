@@ -176,7 +176,8 @@ class FleetCase(unittest.TestCase):
         env = env if env is not None else self.env
         with open(self.log_path, "a", encoding="utf-8") as handle:  # marks which command made the calls below
             handle.write(json.dumps({"command": list(argv)}) + "\n")
-        runner = fake_herdr.Fake(self.world_path, self.log_path, env.get("HERDR_PANE_ID"))
+        runner = fake_herdr.Fake(self.world_path, self.log_path, env.get("HERDR_PANE_ID"),
+                                 os.path.join(self.repo, ".herdr", "inbox"))
         code = main(list(argv), env=env, runner=runner, clock=self.clock,
                     stdout=out, stderr=err, stdin=io.StringIO(stdin), cwd=cwd or self.repo)
         with open(self.world_path, "r", encoding="utf-8") as handle:
@@ -204,10 +205,12 @@ class FleetCase(unittest.TestCase):
         return None
 
     def assert_safety(self) -> None:
-        """Design section 7 invariants, checked against the full call log. The one
-        exception (design 16.1, 18.3): a prompt issued by `send` may reach a working agent;
-        `deliver`, `watch` and kickoffs carry queued messages to idle or done seats only
-        (invariant 11), `inbox` runs nothing but the caller lookup (`inbox --hook` only
+        """Design section 7 invariants, checked against the full call log. The exception
+        (design 16.1, 18.3, 20.8): a prompt issued by `send` may reach a working agent, and
+        so may one from `watch` or `deliver` that carries a message queued on refusal (the
+        fake records, at every prompt, which mailboxes and ids held one) or comes from
+        `deliver --now`; kickoffs reach idle or done seats only (invariant 11),
+        `inbox` runs nothing but the caller lookup (`inbox --hook` only
         `agent get`), `watch` only its five commands and never an endless wait
         (invariants 12, 13), and `hooks` runs no herdr command at all. Design 19.3:
         `plugin pane open` comes from `up` or `ui` only, and a watcher pane is never
@@ -250,7 +253,7 @@ class FleetCase(unittest.TestCase):
             self.assertFalse(any(a in ("send-keys", "send-text") for a in argv[:2]), argv)
             self.assertNotEqual(argv[:2], ["pane", "run"], argv)
             if argv[:2] == ["agent", "prompt"]:
-                allowed = ("idle", "done", None) + (("working",) if command[:1] == ["send"] else ())
+                allowed = ("idle", "done", None) + (("working",) if typed_ahead_allowed(command, argv, info) else ())
                 self.assertIn(info.get("target_status"), allowed,
                               "%s prompted an agent in state %s: %s" % (command[:1], info.get("target_status"), argv))
             if argv[:2] == ["agent", "start"] and "--help" not in argv:
@@ -263,6 +266,22 @@ class FleetCase(unittest.TestCase):
                 self.assertFalse(info.get("had_agent"), "closed a pane hosting an agent: %s" % argv)
             if argv[:2] == ["workspace", "close"] and call["exit"] == 0:
                 self.assertTrue(info.get("created"), "closed a workspace herdr-fleet did not create")
+
+
+def typed_ahead_allowed(command: List[str], argv: List[str], info: Dict) -> bool:
+    """May this prompt reach a working agent? `send` always (design 16.1); `watch` and
+    `deliver` only for a mailbox holding a message queued on refusal at that moment
+    (the prompt names the seat, or carries one of those ids), and `deliver --now`
+    (design 20.8). Nothing else, kickoffs included."""
+    if command[:1] == ["send"]:
+        return True
+    if command[:1] == ["deliver"] and "--now" in command:
+        return True
+    if command[:1] in (["watch"], ["deliver"]):
+        boxes, ids = info.get("refusal_boxes") or [], info.get("refusal_ids") or []
+        text = argv[3] if len(argv) > 3 else ""
+        return info.get("target_name") in boxes or any("#" + ident in text for ident in ids)
+    return False
 
 
 ARGS = ["--model", "claude-opus-5-5"]

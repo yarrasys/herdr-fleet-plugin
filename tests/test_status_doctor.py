@@ -61,9 +61,11 @@ class Status(LiveFleet):
         code, out, _ = self.run_cli("status")
         self.assertEqual(code, 0, out)
         rows = {l.split()[0]: l for l in out.splitlines()[2:6]}
-        self.assertIn("blocked (blocked at startup)", rows["fablyn-orchestrator"])
+        self.assertIn("blocked (<1m) (blocked at startup)", rows["fablyn-orchestrator"])  # 20.5: with its age
         self.assertIn("idle (kickoff pending)", rows["fablyn-dev"])
-        self.assertNotIn("(", rows["fablyn-reviewer"])  # unknown: no label
+        self.assertIn("unknown (<1m)", rows["fablyn-reviewer"])  # unknown: its age (20.5), no startup label
+        self.assertNotIn("startup", rows["fablyn-reviewer"])
+        self.assertNotIn("pending", rows["fablyn-reviewer"])
         self.assertNotIn("(", rows["helper"])  # absent: no label
         for state_name in ("working", "done"):
             self.status_of("w2:p2", state_name)

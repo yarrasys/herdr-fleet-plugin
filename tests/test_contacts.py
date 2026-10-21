@@ -129,7 +129,7 @@ class SendToContact(ContactCase):
         fake_herdr.put_agent(self.world, "w3:p5", "claude", name="twin")
         code, out, _ = self.run_cli("send", "winner-chronicles", "x")
         self.assertEqual(code, 0)
-        self.assertRegex(out, r"queued for winner-chronicles \(ambiguous: 2 live agents match cwd %s: w3:p4, "
+        self.assertRegex(out, r"queued in herdr-fleet for winner-chronicles \(ambiguous: 2 live agents match cwd %s: w3:p4, "
                               r"w3:p5 \(twin\)\) #[0-9a-f]{6}" % re.escape(self.winner))
         code, out, _ = self.run_cli("send", "--now", "winner-chronicles", "x")
         self.assertEqual(code, 1)

@@ -27,12 +27,15 @@ FLEET_NAME = "fleet.toml"
 DIRECTIONS = ("right", "down")
 
 TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "contacts", "quit_timeout_ms",
-            "restart_hint_tokens", "watch"}
+            "restart_hint_tokens", "watch", "inbox_print_max"}
 CONTACT_KEYS = {"name", "match", "note"}
 MATCH_KEYS = {"cwd", "kind", "name"}
 LAYOUT_KEYS = {"mode", "columns", "direction", "ratio"}
 MODES = ("chain", "grid")
-WATCH_KEYS = {"ratio", "position"}
+WATCH_KEYS = {"ratio", "position", "notify_blocked_after"}
+INBOX_PRINT_MAX = 8192               # design 20.4: bytes of one message `inbox --read` prints in full
+DURATION_RE = re.compile(r"^([1-9][0-9]*)([mhd])$")  # the --ttl grammar (30m, 2h, 1d)
+DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
 WATCH_POSITIONS = ("bottom",)        # design 19.1: the only position in 0.8.0
 WATCH_RATIO = 0.12                   # the strip's default share of the area it is split from
 WATCH_RATIO_RANGE = (0.1, 0.4)       # herdr clamps every split ratio to 0.1-0.9 (19.4)
@@ -99,6 +102,8 @@ class Fleet:
     watch: bool = True                         # design 19: `up` starts the watcher in a strip
     watch_ratio: float = WATCH_RATIO           # [watch] ratio, clamped to WATCH_RATIO_RANGE
     watch_position: str = "bottom"             # [watch] position
+    notify_blocked_after: Optional[int] = None  # [watch] notify_blocked_after in seconds (design 20.5)
+    inbox_print_max: int = INBOX_PRINT_MAX     # design 20.4
 
     def contact(self, name: str) -> Optional[Contact]:
         for contact in self.contacts:
@@ -187,6 +192,10 @@ def load_fleet(path: str) -> Fleet:
                                     or hint_tokens <= 0):
         errors.append("restart_hint_tokens: must be a positive integer (tokens)")
         hint_tokens = None
+    print_max = data.get("inbox_print_max", INBOX_PRINT_MAX)
+    if not isinstance(print_max, int) or isinstance(print_max, bool) or print_max <= 0:
+        errors.append("inbox_print_max: must be a positive integer (bytes)")
+        print_max = INBOX_PRINT_MAX
 
     layout = data.get("layout", {})
     if not isinstance(layout, dict):
@@ -227,7 +236,7 @@ def load_fleet(path: str) -> Fleet:
     if mode == "grid":
         _grid_overrides(seats, raw_seats, direction, ratio, warnings)
     contacts = _parse_contacts(data.get("contacts", []), repo, [s.name for s in seats], errors, warnings)
-    watch, watch_ratio, watch_position = _parse_watch(data.get("watch", True), errors, warnings)
+    watch, watch_ratio, watch_position, blocked_after = _parse_watch(data.get("watch", True), errors, warnings)
 
     if errors:
         raise FleetError(["%s: %s" % (path, e) for e in errors])
@@ -235,7 +244,7 @@ def load_fleet(path: str) -> Fleet:
                  kickoff=default_kickoff, direction=direction, ratio=ratio,
                  quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns,
                  contacts=contacts, restart_hint_tokens=hint_tokens, watch=watch, watch_ratio=watch_ratio,
-                 watch_position=watch_position)
+                 watch_position=watch_position, notify_blocked_after=blocked_after, inbox_print_max=print_max)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
@@ -325,14 +334,22 @@ def _grid_overrides(seats: List[Seat], raw_seats: List[Dict], direction: str, ra
         seat.split, seat.ratio, seat.from_seat = direction, ratio, None
 
 
-def _parse_watch(value: object, errors: List[str], warnings: List[str]) -> Tuple[bool, float, str]:
-    """``watch = false`` (or ``true``) at the top level, or a ``[watch]`` table with ``ratio``
-    and ``position`` (design 19.1). TOML cannot hold both, so the table means "on"."""
+def parse_duration(text: object) -> Optional[int]:
+    """``30m``, ``2h`` or ``1d`` (the ``--ttl`` grammar) in seconds; None when malformed."""
+    match = DURATION_RE.match(text.strip()) if isinstance(text, str) else None
+    return int(match.group(1)) * DURATION_UNITS[match.group(2)] if match else None
+
+
+def _parse_watch(value: object, errors: List[str],
+                 warnings: List[str]) -> Tuple[bool, float, str, Optional[int]]:
+    """``watch = false`` (or ``true``) at the top level, or a ``[watch]`` table with ``ratio``,
+    ``position`` (design 19.1) and ``notify_blocked_after`` (20.5). TOML cannot hold both,
+    so the table means "on"."""
     if isinstance(value, bool):
-        return value, WATCH_RATIO, "bottom"
+        return value, WATCH_RATIO, "bottom", None
     if not isinstance(value, dict):
         errors.append("watch: must be true, false or a [watch] table")
-        return True, WATCH_RATIO, "bottom"
+        return True, WATCH_RATIO, "bottom", None
     _unknown_keys(value, WATCH_KEYS, "[watch]", warnings)
     ratio = _ratio(value.get("ratio"), "watch.ratio", errors)
     if ratio is None:
@@ -347,7 +364,13 @@ def _parse_watch(value: object, errors: List[str], warnings: List[str]) -> Tuple
         errors.append("watch.position: %r is not supported (only %s)"
                       % (position, ", ".join('"%s"' % p for p in WATCH_POSITIONS)))
         position = "bottom"
-    return True, float(ratio), str(position)
+    blocked_after = None
+    if "notify_blocked_after" in value:
+        blocked_after = parse_duration(value["notify_blocked_after"])
+        if blocked_after is None:
+            errors.append("watch.notify_blocked_after: %r must be a duration such as \"3m\", \"2h\" or \"1d\""
+                          % (value["notify_blocked_after"],))
+    return True, float(ratio), str(position), blocked_after
 
 
 def _parse_contacts(raw: object, repo: str, seat_names: List[str], errors: List[str],

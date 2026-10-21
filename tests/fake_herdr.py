@@ -47,8 +47,11 @@ acts, writes it back and appends one JSON line to the call log (env
   200x50 cell area, rounded as herdr rounds. ``pane resize`` follows herdr's rule: the
   nearest split on the pane's named edge (else the opposite edge) gains the amount
   for right and down and loses it for left and up, clamped to 0.1-0.9.
-- The log records facts the safety tests assert on: the target's state at
-  every ``agent prompt``, the state every ``agent get`` answered, whether a
+- The log records facts the safety tests assert on: the target's state (and name) at
+  every ``agent prompt``, with the mailboxes and short ids that held a message queued
+  on refusal (``queued_by: refusal`` in ``<inbox>/<name>/new/``) at that moment when
+  the runner knows the fleet's inbox (``Fake(..., inbox=...)`` or ``FAKE_HERDR_INBOX``;
+  design 20.8), the state every ``agent get`` answered, whether a
   pane was at a shell at every ``agent start``, and whether a closed pane or
   workspace was created by a command in this world (``split``/``workspace
   create``) rather than set up by a test.
@@ -148,10 +151,12 @@ LOCK = threading.Lock()  # one call at a time reads, changes and writes the worl
 class Fake:
     """Callable runner: ``Fake(world_path, log_path)([binary, *argv])``."""
 
-    def __init__(self, world_path: str, log_path: str, caller: Optional[str] = None):
+    def __init__(self, world_path: str, log_path: str, caller: Optional[str] = None,
+                 inbox: Optional[str] = None):
         self.world_path = world_path
         self.log_path = log_path
         self.caller = caller  # the calling process's HERDR_PANE_ID, for `pane current --current`
+        self.inbox = inbox    # the fleet's .herdr/inbox, read (never written) at every `agent prompt`
 
     def __call__(self, argv: List[str]) -> Result:
         with LOCK:
@@ -164,7 +169,7 @@ class Fake:
         info: Dict = {}
         if self.caller:
             world["caller"] = self.caller
-        code, out, err = Sim(world, info).handle(args)
+        code, out, err = Sim(world, info, self.inbox).handle(args)
         with open(self.world_path, "w", encoding="utf-8") as handle:
             json.dump(world, handle)
         with open(self.log_path, "a", encoding="utf-8") as handle:
@@ -203,11 +208,37 @@ def _opts(args: List[str], valued: Tuple[str, ...]) -> Tuple[List[str], Dict[str
     return positional, options, rest
 
 
+def refusal_queued(inbox: Optional[str]) -> Tuple[List[str], List[str]]:
+    """(mailboxes, short ids) of queued messages whose header says ``queued_by: refusal``."""
+    boxes: List[str] = []
+    ids: List[str] = []
+    if not inbox or not os.path.isdir(inbox):
+        return boxes, ids
+    for name in sorted(os.listdir(inbox)):
+        folder = os.path.join(inbox, name, "new")
+        if not os.path.isdir(folder):
+            continue
+        for filename in sorted(os.listdir(folder)):
+            if not filename.endswith(".md"):
+                continue
+            try:
+                with open(os.path.join(folder, filename), "r", encoding="utf-8") as handle:
+                    head = handle.read().split("\n\n", 1)[0]
+            except OSError:
+                continue
+            if "queued_by: refusal" in head.splitlines():
+                ids.append(filename[:-3].rsplit("-", 1)[-1])
+                if name not in boxes:
+                    boxes.append(name)
+    return boxes, ids
+
+
 class Sim:
-    def __init__(self, world: Dict, info: Dict):
+    def __init__(self, world: Dict, info: Dict, inbox: Optional[str] = None):
         self.w = world
         self.info = info
         self.b = world.get("behaviors", {})
+        self.inbox = inbox
 
     # -- helpers -----------------------------------------------------------
 
@@ -362,6 +393,9 @@ class Sim:
         p = self.w["panes"][pid]
         status = p["agent"]["agent_status"]
         self.info["target_status"] = status
+        self.info["target_name"] = p["agent"].get("name")
+        if self.inbox:
+            self.info["refusal_boxes"], self.info["refusal_ids"] = refusal_queued(self.inbox)
         if status == "blocked":
             return _err("agent_blocked", "agent %s is blocked" % target)
         name = p["agent"].get("name") or pid
@@ -737,7 +771,8 @@ def main() -> int:
     import fcntl  # several fake processes at once (a watcher's threads) take turns with the world
     with open(world + ".lock", "a") as guard:
         fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
-        code, out, err = Fake(world, log, os.environ.get("HERDR_PANE_ID"))([sys.argv[0]] + sys.argv[1:])
+        code, out, err = Fake(world, log, os.environ.get("HERDR_PANE_ID"),
+                              os.environ.get("FAKE_HERDR_INBOX"))([sys.argv[0]] + sys.argv[1:])
     sys.stdout.write(out)
     sys.stderr.write(err)
     return code

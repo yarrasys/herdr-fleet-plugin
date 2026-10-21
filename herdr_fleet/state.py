@@ -7,15 +7,23 @@ strip ``up`` opened (``"watch"``, design 19), which is never a seat. Pane and
 workspace ids are valid for one herdr server, so ``prune_state`` drops ids
 herdr no longer knows. Writes are atomic (temp file in ``.herdr`` then
 rename) and keep ``.herdr/.gitignore`` ignoring the state file.
+
+``state_seen`` (design 20.5) is the one field several commands write at once (the
+watcher, ``status``, ``send``, ``deliver``): ``record_seen`` reads the file fresh,
+changes only those entries and writes it back, all under a lock on the ``.herdr``
+directory that ``save_state`` takes too, and ``save_state`` keeps the ``state_seen``
+already on disk, so neither side loses the other's changes.
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import fcntl
 import json
 import os
 import tempfile
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Mapping, Optional
 
 from herdr_fleet.herdr import Herdr, HerdrError
 
@@ -125,23 +133,116 @@ def load_state(repo: str) -> State:
     return State(path, data, existed=True)
 
 
+@contextlib.contextmanager
+def locked(folder: str) -> Iterator[None]:
+    """An exclusive ``flock`` on the ``.herdr`` directory itself (no lock file to ignore),
+    held while the state file is read and rewritten. A directory that cannot be locked
+    is written without it, as before 0.9.0."""
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError:
+        yield
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            pass
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
+def _read(path: str) -> Optional[Dict]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("agents", {}), dict) else None
+
+
 def save_state(state: State) -> None:
-    """Write atomically and make sure ``.herdr/.gitignore`` ignores the file."""
+    """Write atomically and make sure ``.herdr/.gitignore`` ignores the file. The
+    ``state_seen`` values on disk win over those in memory: ``record_seen`` owns them."""
     folder = os.path.dirname(state.path)
     os.makedirs(folder, exist_ok=True)
     ensure_gitignore(folder)
+    with locked(folder):
+        disk = _read(state.path) or {}
+        for name, entry in (disk.get("agents") or {}).items():
+            seen = entry.get("state_seen") if isinstance(entry, dict) else None
+            if seen and isinstance(state.agents.get(name), dict):
+                state.agents[name]["state_seen"] = seen
+        _write(state.path, state.data)
+    state.existed = True
+    state.dirty = False
+
+
+def record_seen(repo: str, observed: Mapping[str, str], now: datetime.datetime) -> Dict[str, Dict]:
+    """Design 20.5: for each seat name and the state just observed, keep
+    ``state_seen = {"state", "since"}`` in its entry, with ``since`` set to now when the
+    state differs from the recorded one. Written only when the state file exists (the
+    fleet was brought up) and something changed. Returns the entries' ``state_seen``."""
+    path = state_path(repo)
+    if not observed or not os.path.exists(path):
+        return {}
+    stamp = now.astimezone().isoformat(timespec="seconds")
+    result: Dict[str, Dict] = {}
+    with locked(os.path.dirname(path)):
+        data = _read(path)
+        if data is None:
+            return {}
+        agents = data.setdefault("agents", {})
+        changed = False
+        for name, status in observed.items():
+            entry = agents.setdefault(name, {})
+            if not isinstance(entry, dict):
+                continue
+            seen = entry.get("state_seen")
+            if not (isinstance(seen, dict) and seen.get("state") == status and seen.get("since")):
+                seen = {"state": status, "since": stamp}
+                entry["state_seen"] = seen
+                changed = True
+            result[name] = dict(seen)
+        if changed:
+            _write(path, data)
+    return result
+
+
+def mark_notified(repo: str, name: str, since: str) -> None:
+    """Mark the seat's current ``state_seen`` episode as notified (``notify_blocked_after``,
+    design 20.5), so a restarted watcher does not notify it again; a later state change
+    replaces the record and so starts a new episode."""
+    path = state_path(repo)
+    if not os.path.exists(path):
+        return
+    with locked(os.path.dirname(path)):
+        data = _read(path)
+        entry = ((data or {}).get("agents") or {}).get(name)
+        seen = entry.get("state_seen") if isinstance(entry, dict) else None
+        if isinstance(seen, dict) and seen.get("since") == since and not seen.get("notified"):
+            seen["notified"] = True
+            _write(path, data)
+
+
+def _write(path: str, data: Dict) -> None:
+    folder = os.path.dirname(path)
     fd, tmp = tempfile.mkstemp(prefix=".fleet.state.", suffix=".tmp", dir=folder)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(state.data, handle, indent=2, sort_keys=False)
+            json.dump(data, handle, indent=2, sort_keys=False)
             handle.write("\n")
-        os.replace(tmp, state.path)
+        os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
-    state.existed = True
-    state.dirty = False
 
 
 def pane_moved(name: str, old: str, new: str) -> str:

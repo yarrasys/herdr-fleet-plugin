@@ -25,6 +25,8 @@ The suite takes a few seconds. Nothing in it talks to a real herdr: `HERDR_BIN_P
 - scripted `agent wait` results for the watcher (`wait_results`: per agent, a list of `idle`, `done`, `working`, `blocked`, `timeout` or `not_found`, consumed one per wait). A state that `--until` does not name times out, as live herdr would; `timeout` without `--timeout` answers `fake_wait_forever`, because live herdr would never return. `status_after_wait` changes the agent's state right after a wait answered, as when a seat starts working during the debounce. The log records each wait's `--until` and `--timeout`. In-process calls are serialised by a lock, and the program form takes a file lock, so the watcher's waiter threads can share one world.
 - the watcher strip of 0.8.0 (design 19): `plugin pane open --placement split --target-pane P --direction D` splits P 50/50 (live herdr 0.9.5 has no ratio option) into a pane marked `plugin` and `created`, in P's workspace and tab, with the `--env` values recorded; the `watch` entrypoint's pane runs `python3 …/bin/herdr-fleet watch`; the answer is the live `result.plugin_pane` (`entrypoint`, `pane`, `plugin_id`), and the pane is focused unless `--no-focus`. `pane layout` and `pane resize` answer the 0.9.5 shapes (`result.layout`: `area`, `panes` with `rect`, `splits` with `direction`, `ratio` and `rect`; `result.resize`: `changed`, `pane_id`, `focused_pane_id`, `layout`, `reason`) from `fake_herdr.geometry`, which replays the tab's recorded splits on a 200x50 cell area with herdr's rounding. `pane resize` follows herdr 0.9.5's source (`src/layout.rs`): the nearest split of the matching direction on the pane's named edge, else the opposite edge, gains the amount for `right` and `down` and loses it for `left` and `up`, clamped to 0.1-0.9; the amount is taken as `abs()` and capped at 0.5.
 
+- at every `agent prompt` the log also records the target's name and, read from the fleet's `.herdr/inbox` (passed to the in-process runner by `tests/support.py`, or `FAKE_HERDR_INBOX` for the program), the mailboxes and short ids that held a message queued on refusal (`queued_by: refusal` in `new/`) at that moment (design 20.8). Nothing the fake answers changes: its response shapes stay those of herdr 0.9.5.
+
 Most tests call `herdr_fleet.cli.main` in-process with the fake as the runner and an instant clock, so 250 ms polls and 10 s or 20 s timeouts cost nothing. `tests/test_cli_subprocess.py` runs `bin/herdr-fleet` as a real process with the fake installed as an executable on `HERDR_BIN_PATH`, exactly as herdr would. `tests/test_manifest.py` checks `herdr-plugin.toml` and runs its commands the way herdr does: actions from the plugin root with an action's context JSON, pane entrypoints through `sh -c` from the repo directory that `ui` passes as `--cwd`.
 
 Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry the agent `name`; only `agent get` and `agent list` do (design section 12). Like live herdr 0.9.5, agent records can carry `agent_session` (`{"agent": "claude", "kind": "id", "source": "herdr:claude", "value": "<uuid>"}`); the fake adds it only when a scenario sets one with `put_agent(..., session=fake_herdr.claude_session(uuid))`, and otherwise leaves the key out.
@@ -34,11 +36,11 @@ Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry
 `tests/support.py` checks every test's call log in `tearDown` against design section 7, so every scenario is also a safety test:
 
 - the log never contains bare `herdr`, `agent send-keys`, `pane send-keys`, `pane send-text` or `pane run`;
-- every `agent prompt` went to an agent that was `idle` or `done` at that moment (never `blocked`, `unknown` or `working`);
+- every `agent prompt` went to an agent that was `idle` or `done` at that moment (never `blocked` or `unknown`; `working` only as below);
 - every `agent start` targeted a pane at a bare shell prompt and never the caller's pane;
 - every `pane close` closed a pane herdr-fleet created and that hosted no agent; every `workspace close` closed a workspace herdr-fleet created;
 - an `inbox` command ran nothing but the caller lookup (`pane current`, `agent get`), and nothing at all with `--as` (design 18.5);
-- `deliver`, `watch` and kickoffs carrying queued messages prompted only idle or done agents (invariant 11); only `send` may reach a working one;
+- kickoffs prompted only idle or done agents (invariant 11); a working one may be reached by `send` (design 16.1), by `deliver --now`, and by `watch` or `deliver` only for a mailbox that held a message queued on refusal at that moment, which the fake recorded (the prompt names that seat or carries one of those ids; design 20.8, `support.typed_ahead_allowed`);
 - `watch` ran nothing but `agent wait`, `agent get`, `agent list`, `agent prompt`, `notification show` and the preflight's `herdr --version`, and every `agent wait` carried `--timeout` (invariants 12 and 13);
 - `inbox --hook` ran nothing but `agent get` (invariant 14), and `hooks` ran no herdr command at all;
 - `plugin pane open` came only from `up` (also through the popup menu) or `ui`, `pane resize` only from `up`, and a pane opened as a plugin pane was never prompted, renamed or started into (design 19.3).
@@ -195,6 +197,23 @@ Version 0.8.0 (design 19, the watcher strip), `tests/test_watchpane.py`:
 - the safety hook failing for a `plugin pane open` or `pane resize` from another command and for a prompt or start aimed at a watcher pane.
 
 All 437 tests of 0.7.0 pass unchanged with the strip on by default. `GridCase.rects` leaves plugin panes out, so its cells stay shares of the grid area above the strip.
+
+Version 0.9.0 (design 20), `tests/test_section20.py` (38 tests). Wall time is moved by hand where ages matter: tests patch `herdr_fleet.inbox.now_utc`, which `state_seen`, debt ages, queue ages and `ack --older-than` all read; the watcher test derives it from the fake clock.
+
+- history from mixed sources: `cur/` files in full, log-only sends (pre-0.6, no id) as `[from A to B at HH:MM, first line only]`, queued sends and other pairs left out, the closing `N of M messages have only their first line …` note, `body_available` in JSON, and `no messages between A and B`;
+- debt ages and ids in `log --owed` and `status` (`for 5h12m (#a1b2c3, since …)`, `(no id, since …)`), and the age format (`<1m`, `3m`, `1h05m`, `2d03h`);
+- `ack --older-than` with `--dry-run` (lists, writes nothing, no herdr with `--as`), per-message acks by id, a no-id message acked by name, names restricting, a no-id message skipped when a newer one from that sender is owed, the duration grammar and the usage error without anything to ack;
+- the send lines for the three places (`sent … (idle)`, `sent … (working: typed into its own input, read after its current turn)`, `queued in herdr-fleet for … #id, position 2 of 2`); `--urgent` first in the listing (`[urgent]`), in the batch and with `position 1 of 3`, its `priority: 1` header, and the working-seat report;
+- `inbox_print_max`: the cut after ten lines with `… 359 B in full: <cur/ path>`, the delivery still recorded, the same cut in `--history`, `--full`, `--full` without `--read` or `--history` as a usage error, and validation;
+- `state_seen`: recorded by `status`, `send`, `deliver` and `inbox` (the caller's own seat), `blocked (4m)`, `unknown (12m)`, `state_since` in JSON, other states unlabelled, `save_state` keeping the record already on disk, and nothing written without a state file;
+- the watcher's `notify_blocked_after`: one `request` notification per blocked episode (`fablyn-dev blocked 3m (w2:p2): answer its prompt`), a second after the seat was idle and blocked again, none from a restarted watcher for the same episode (`notified` in `state_seen`), and no prompt, wait or get on the seat; the setting's parsing;
+- `queued_by`: `refusal`, `queue` (also a `--when-ready` leftover) and `fyi` (flag or prefix) in the header; files without it listed `[queued]` or `[fyi]` and never typed ahead; the FYI line;
+- the drain at the first opportunity: `deliver` typing a refusal mailbox ahead to a working seat and leaving a `queue` one; `deliver NAME --now` (its usage error without names, and a blocked seat left alone); the flush before send typing refusal messages ahead while a `--queue` message stays, and not flushing `queue` messages; an FYI riding along to an idle seat; the watcher waiting with `--until working` only for refusal mailboxes, typing ahead at once (no debounce) on `working`, delivering after the debounce on `done`, a mixed mailbox typed ahead whole and in order, and `watch --once`;
+- kickoffs as owed boundaries in both directions, messages carried in `{inbox}` staying owed, and the unit rule;
+- cross-fleet logging with a second temporary fleet: the same entry in both logs, the body in the other fleet's `cur/`, the debt in the other fleet's `log --owed` and `--history`, a `--reply-to` from there settling both sides, a queued message mirrored with its later `delivered` entry, and nothing written for an agent outside any fleet, inside this fleet, or reached as a contact;
+- queue ages in `status` (`queued: fablyn-dev 2 (oldest 25m), owner 1`), the inbox hint with and without `--as`, the roster sentences, and `support.typed_ahead_allowed` (a kickoff to a working seat fails even with a refusal mailbox).
+
+The 479 tests of 0.8.0 pass, with their expected send, status and listing lines updated to the 0.9.0 wording (design 20.9).
 
 ### Running the CLI against the fake by hand
 
@@ -527,3 +546,86 @@ python3 bin/herdr-fleet down --close-panes --fleet "$F"                        #
 | 18 | the seats quit and their panes close, then the strip closes |
 
 Then `herdr plugin unlink yarrasys.fleet` if it was linked only for this test, and remove `$W`.
+
+## Live smoke test for 0.9.0 (to run by hand)
+
+Not run yet. For the designer or the owner, inside herdr, from this repository, with `HERDR_FLEET_BIN` exported and the plugin linked as for 0.8.0. Two Haiku seats in a scratch fleet in a directory Claude Code already trusts, plus a second scratch fleet for the cross-fleet steps. Never answer a seat's prompt on its behalf: where a step needs a seat `blocked`, the owner makes it ask for a permission and answers it at the step that says so.
+
+```bash
+cd /Users/nabsha/work/yarrasys/projects/herdr-fleet-plugin
+export HERDR_FLEET_BIN="$PWD/bin/herdr-fleet"
+W=$(mktemp -d /tmp/fleet-090.XXXXXX); mkdir -p "$W/.herdr"; F="$W/.herdr/fleet.toml"
+cat > "$F" <<FLEET
+workspace = "fleet-090"
+cwd = "$PWD"
+inbox_print_max = 200
+
+[watch]
+notify_blocked_after = "1m"
+
+[[agents]]
+name = "n9-a"
+kind = "claude"
+args = ["--model", "claude-haiku-5-5"]
+env = { HERDR_FLEET_BIN = "$HERDR_FLEET_BIN" }
+kickoff_text = "[from herdr-fleet] 0.9.0 smoke test ({reason}). You are {name}. Reply READY, then wait. Run no tools unless a message asks you to."
+
+[[agents]]
+name = "n9-b"
+kind = "claude"
+args = ["--model", "claude-haiku-5-5"]
+env = { HERDR_FLEET_BIN = "$HERDR_FLEET_BIN" }
+kickoff_text = "[from herdr-fleet] 0.9.0 smoke test ({reason}). You are {name}. Reply READY, then wait. Run no tools unless a message asks you to."
+FLEET
+H="python3 bin/herdr-fleet"
+$H up --fleet "$F"                                                                     # 1
+$H send --as owner n9-a "Run: sleep 40, then reply DONE" --fleet "$F"                 # 2 (n9-a now works for 40 s)
+$H send --as owner n9-a "Second: reply SECOND" --fleet "$F"                           # 3 (while it works)
+$H send --as owner --queue n9-b "one" --fleet "$F"; $H send --as owner --queue n9-b "two" --fleet "$F"
+$H send --as owner --urgent --queue n9-b "zero" --fleet "$F"; $H inbox --as n9-b --fleet "$F"    # 4
+$H deliver n9-b --fleet "$F"                                                           # 5
+$H send --as owner --queue n9-b "$(seq 1 60 | sed 's/^/line /')" --fleet "$F"; $H inbox --as n9-b --read --fleet "$F"   # 6
+$H inbox --as owner --history n9-b --fleet "$F"; $H inbox --as owner --history n9-b --full --fleet "$F"                  # 7
+$H status --fleet "$F"; $H log --owed --fleet "$F"                                    # 8
+$H ack --as n9-a --older-than 1m --dry-run --fleet "$F"                               # 9
+$H kickoff n9-a --fleet "$F"; $H log --owed --fleet "$F"                              # 10 (once n9-a is idle)
+```
+
+Blocked seats and the drain (the owner makes n9-a ask for a permission, for example by asking it by hand to run a command that needs approval, and leaves the prompt open):
+
+```bash
+$H send --as owner n9-a "When you can: reply BLOCKED-OK" --fleet "$F"                # 11 (n9-a blocked)
+$H status --fleet "$F"                                                                 # 12 (wait 1-2 min)
+# the owner answers n9-a's prompt now
+$H log --seat n9-a --last 5 --fleet "$F"                                               # 13
+```
+
+Cross-fleet:
+
+```bash
+X=$(mktemp -d /tmp/fleet-090x.XXXXXX); mkdir -p "$X/.herdr"
+printf '[[agents]]\nname = "n9-x"\nkind = "claude"\nargs = ["--model", "claude-haiku-5-5"]\n' > "$X/.herdr/fleet.toml"
+(cd "$X" && $H up --no-watch)                                                          # 14
+$H send --as n9-a n9-x "Cross-fleet: reply to n9-a with --fyi --reply-to the id you see" --fleet "$F"   # 15
+(cd "$X" && $H log --owed; ls .herdr/inbox/n9-x/cur)                                   # 16
+(cd "$X" && $H down --close-panes); $H down --close-panes --close-workspace --fleet "$F"        # 17
+```
+
+| Step | Expected |
+| --- | --- |
+| 1 | both seats briefed; the kickoff's roster now says to reply with `--fyi` or `ack #id` and to queue to control order |
+| 2, 3 | 3 prints `sent to n9-a (working: typed into its own input, read after its current turn), …`; n9-a answers SECOND after DONE |
+| 4 | three `queued in herdr-fleet for n9-b (idle) #…, position N of M` lines, the urgent one `position 1 of 3`; the listing shows `1. … [urgent]  [queued]  zero`, then `one`, `two` |
+| 5 | one prompt to n9-b with zero, one, two in that order |
+| 6 | `--read` prints the long message's header, ten lines and `… <size> in full: <path>`; the file at that path holds all 60 lines |
+| 7 | `--history` shows the exchange with the long message cut the same way; with `--full`, all 60 lines |
+| 8 | `awaiting: … owes owner for …m (#id, since HH:MM): …` lines with ages; `queued:` with ages if anything waits |
+| 9 | `would ack #… since …, …m ago (…)` lines for anything n9-a owes; nothing written (`log --owed` unchanged) |
+| 10 | n9-a's debts, both ways, gone after its kickoff |
+| 11 | `queued in herdr-fleet for n9-a (blocked) #…, position 1 of 1` |
+| 12 | `blocked (1m)` or more in STATE; after a minute the watcher strip prints `n9-a blocked 1m (P): answer its prompt` and one notification arrives (only one) |
+| 13 | once the owner answered, the strip printed `n9-a working; typing ahead 1 (queued on refusal)` (or, if n9-a went idle first, `n9-a idle; delivering 1`); n9-a replied BLOCKED-OK; the log shows `delivered #… via watch` |
+| 14 | the second fleet's seat starts in its own workspace |
+| 15 | `sent to n9-x (idle), …`; `$X/.herdr/messages.jsonl` holds the same entry |
+| 16 | `awaiting: n9-x owes n9-a …` in the second fleet until n9-x replies, then nothing in either fleet; the body is in `$X/.herdr/inbox/n9-x/cur/` |
+| 17 | everything closes; remove `$W` and `$X` |

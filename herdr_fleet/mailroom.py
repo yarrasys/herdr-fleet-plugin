@@ -2,10 +2,14 @@
 
 - ``deliver`` hands queued messages to seats that can take them now: an idle or
   done seat gets its mailbox as one batch through ``seats.safe_prompt``; a
-  working, blocked, unknown or absent seat is left alone with its messages
-  queued (queued messages never interrupt). ``owner`` gets a notification.
-- ``inbox`` is the pull side: the caller's own mailbox, listed, read (printed
-  and moved to ``cur/``), counted, or replayed from ``cur/`` (``--history``);
+  working seat gets it typed ahead only when the mailbox holds a message queued
+  on refusal (design 20.8) or with ``--now``; otherwise, and for blocked,
+  unknown or absent seats, the messages stay queued. ``owner`` gets a
+  notification.
+- ``inbox`` is the pull side: the caller's own mailbox, listed with positions,
+  read (printed, long bodies cut at ``inbox_print_max`` unless ``--full``, and
+  moved to ``cur/``), counted, or replayed (``--history``: ``cur/`` files and
+  log-only sends merged);
   ``--redeliver`` moves a message from ``cur/`` back to ``new/``. It runs no
   herdr command except the caller lookup, and none with ``--as``.
 - ``inbox --hook stop|prompt`` (design 18.7) is the same pull from inside a
@@ -26,22 +30,25 @@ import os
 from typing import Dict, List, Optional, Sequence, TextIO, Tuple
 
 from herdr_fleet import contacts as contact_mod
-from herdr_fleet import inbox
+from herdr_fleet import crossfleet, inbox, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, Ctx, UsageError, resolve_caller
 from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
-from herdr_fleet.messages import (OWNER, Drop, agent_state, compose_prompt, delivered_entry, expire_due,
-                                  first_line, notify_owner, prompt_mailbox, queued_in, read, record,
-                                  resolve_sender, settle, since_label)
-from herdr_fleet.seats import SETTLED
+from herdr_fleet.messages import (OWNER, Drop, agent_state, caller_record, compose_prompt, delivered_entry,
+                                  expire_due, first_line, has_refusal, notify_owner, place, prompt_mailbox,
+                                  queued_in, read, record, settle, since_label)
+from herdr_fleet.seats import SEND_ALLOWED, SETTLED
 
 # -- deliver ---------------------------------------------------------------------------------
 
 
-def op_deliver(ctx: Ctx, names: Sequence[str], fyi_too: bool = False) -> int:
-    """Design 18.5 item 3. Without names: every seat and contact whose queue holds a
-    message that is not FYI (``--fyi``: any message), then ``owner`` if anything waits
-    for it. Exit 0 unless a prompt failed or may not have arrived (1)."""
+def op_deliver(ctx: Ctx, names: Sequence[str], fyi_too: bool = False, now: bool = False) -> int:
+    """Design 18.5 item 3 and 20.8. Without names: every seat and contact whose queue holds
+    a message that is not FYI (``--fyi``: any message), then ``owner`` if anything waits
+    for it. ``--now`` (names only) types a whole mailbox ahead to a working seat. Exit 0
+    unless a prompt failed or may not have arrived (1)."""
+    if now and not names:
+        raise UsageError("deliver --now needs the seats to type ahead to (deliver NAME... --now)")
     fleet, repo = ctx.fleet, ctx.fleet.repo
     agents = ctx.herdr.agent_list()
     if not ctx.dry_run:  # what is past its ttl goes first, logged, wherever it waits
@@ -59,14 +66,17 @@ def op_deliver(ctx: Ctx, names: Sequence[str], fyi_too: bool = False) -> int:
         if waiting.get(OWNER):
             order.append(OWNER)
         if not order:
+            seen.observe_agents(ctx, agents)
             ctx.say("nothing to deliver" + ("" if fyi_too or not waiting else
                                             " (only FYIs are queued; deliver --fyi takes them)"))
             return EXIT_OK
     codes = [EXIT_OK]
+    observed: Dict[str, str] = {}
     for name in order:
-        line, code, _ = deliver_one(ctx, name, agents, waiting.get(name, []))
+        line, code, _ = deliver_one(ctx, name, agents, waiting.get(name, []), now=now, observed=observed)
         ctx.say(line)
         codes.append(code)
+    seen.observe_agents(ctx, agents, observed)
     return max(codes)
 
 
@@ -98,10 +108,22 @@ def herdr_target(ctx: Ctx, name: str, agents: Sequence[Dict]) -> Tuple[Optional[
     return (name, None) if name in live else (None, "absent")
 
 
+def other_fleet_of(ctx: Ctx, name: str, agents: Sequence[Dict]) -> Optional[str]:
+    """For a mailbox that is a live agent of another fleet (not a seat, contact or owner),
+    that fleet's repository, so its log gets the ``delivered`` entries too (20.8)."""
+    fleet = ctx.fleet
+    if name == OWNER or fleet.seat(name) is not None or fleet.contact(name) is not None:
+        return None
+    return crossfleet.find(agents, name, fleet.repo)
+
+
 def deliver_one(ctx: Ctx, name: str, agents: Sequence[Dict], waiting: List[Message],
-                via: str = "deliver") -> Tuple[str, int, Optional[Drop]]:
+                via: str = "deliver", now: bool = False,
+                observed: Optional[Dict[str, str]] = None) -> Tuple[str, int, Optional[Drop]]:
     """Hand one mailbox over if its owner can take it now: (line, exit code, what the
-    attempt did, or None when nothing was attempted). ``watch --once`` uses it with
+    attempt did, or None when nothing was attempted). An idle or done seat gets it; a
+    working one only when the mailbox holds a message queued on refusal (design 20.8)
+    or with ``now`` (``deliver --now``): typed ahead. ``watch --once`` uses it with
     ``via="watch"``."""
     count = len(waiting)
     if not count:
@@ -117,16 +139,20 @@ def deliver_one(ctx: Ctx, name: str, agents: Sequence[Dict], waiting: List[Messa
         return "owner: %s, %s left queued" % (drop.detail or "not shown", plural), EXIT_OK, drop
     target, problem = herdr_target(ctx, name, agents)
     state = problem or agent_state(ctx, target)
-    if problem or state not in SETTLED:
+    if observed is not None:
+        observed[name] = "absent" if problem else state
+    ahead = state == "working" and (now or has_refusal(waiting))
+    if problem or (state not in SETTLED and not ahead):
         return "%s: %s, %d left queued" % (name, state, count), EXIT_OK, None
     if ctx.dry_run:
         _, size, pointer = compose_prompt(waiting)
         if pointer:
             return "would prompt %s (%s) with a pointer: %s" % (
-                name, state, inbox.pointer_text(waiting, size, prefix=False)), EXIT_OK, None
-        return "would deliver %d to %s (%s), %s" % (count, name, state, size_label(size)), EXIT_OK, None
+                name, place(state), inbox.pointer_text(waiting, size, prefix=False)), EXIT_OK, None
+        return "would deliver %d to %s (%s), %s" % (count, name, place(state), size_label(size)), EXIT_OK, None
     with inbox.locked(ctx.fleet.repo, name):
-        drop = prompt_mailbox(ctx, name, str(target), SETTLED, via)
+        drop = prompt_mailbox(ctx, name, str(target), SEND_ALLOWED if ahead else SETTLED, via,
+                              mirror=other_fleet_of(ctx, name, agents))
     line, code = _line(name, drop, state)
     return line, code, drop
 
@@ -134,13 +160,14 @@ def deliver_one(ctx: Ctx, name: str, agents: Sequence[Dict], waiting: List[Messa
 def _line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
     shown = drop.state or state
     if drop.status == "sent":
-        return "delivered %d to %s (%s), %s" % (len(drop.carried), name, shown, size_label(drop.size)), EXIT_OK
+        return "delivered %d to %s (%s), %s" % (len(drop.carried), name, place(shown),
+                                                size_label(drop.size)), EXIT_OK
     if drop.status == "unconfirmed":
         return ("unconfirmed %s: %s; %d logged as delivered (unconfirmed), not resent"
                 % (name, drop.detail, len(drop.carried)), EXIT_FAIL)
     if drop.status == "pointer":
         return "prompted %s (%s) with a pointer: %s" % (
-            name, shown, inbox.pointer_text(drop.waiting, drop.size, prefix=False)), EXIT_OK
+            name, place(shown), inbox.pointer_text(drop.waiting, drop.size, prefix=False)), EXIT_OK
     if drop.status == "empty":
         return "nothing queued for %s" % name, EXIT_OK
     if drop.status == "refused":
@@ -154,23 +181,42 @@ def _line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
 
 def lookup_caller(ctx: Ctx, as_name: Optional[str]) -> str:
     """``--as`` (no herdr command at all), else the agent in the caller's pane as ``send``
-    finds it (``pane current --current`` and ``agent get``), else ``owner``."""
+    finds it (``pane current --current`` and ``agent get``), else ``owner``. The state
+    that ``agent get`` answered is recorded for a seat (design 20.5)."""
     if not as_name and ctx.inside_herdr() and ctx.invocation.pane_id:
         resolve_caller(ctx)
-    return resolve_sender(ctx, as_name)
+    name, record_ = caller_record(ctx, as_name)
+    if record_.get("agent_status"):
+        seen.observe(ctx, {name: str(record_["agent_status"])})
+    return name
+
+
+REASON_TAGS = {"refusal": "[on refusal]", "queue": "[queued]", "fyi": "[fyi]"}  # design 20.8
+
+
+def tags(message: Message) -> str:
+    """``[urgent]`` and how the message waits, each followed by two spaces."""
+    parts = (["[urgent]"] if message.urgent else []) + [REASON_TAGS[message.mode]]
+    if message.fyi and message.mode != "fyi":
+        parts.append("[fyi]")
+    return "".join(p + "  " for p in parts)
 
 
 def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, count: bool = False,
-             history: Optional[str] = None, redeliver: Optional[str] = None, as_json: bool = False) -> int:
-    """Design 18.5 item 4: the caller's own mailbox."""
+             history: Optional[str] = None, redeliver: Optional[str] = None, as_json: bool = False,
+             full: bool = False) -> int:
+    """Design 18.5 item 4 and 20.1, 20.3, 20.4: the caller's own mailbox."""
     repo = ctx.fleet.repo
     if history is not None and not NAME_RE.match(history):
         raise UsageError("--history %r is not a name" % history)
+    if full and not (read_all or history is not None):
+        raise UsageError("--full goes with --read or --history")
+    limit = None if full else ctx.fleet.inbox_print_max
     if redeliver:
         return _redeliver(ctx, redeliver, as_json)
     caller = lookup_caller(ctx, as_name)
     if history is not None:
-        return _history(ctx, caller, history, as_json)
+        return _history(ctx, caller, history, as_json, limit)
     if not inbox.has_queued(repo, caller):
         messages: List[Message] = []
     else:
@@ -184,22 +230,23 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
     if count:
         ctx.say(json.dumps({"name": caller, "count": len(messages)}) if as_json else str(len(messages)))
     elif as_json:
-        ctx.say(json.dumps([_as_dict(m, body=read_all) for m in messages], indent=2, ensure_ascii=False))
+        ctx.say(json.dumps([dict(_as_dict(m, body=read_all), position=i)
+                            for i, m in enumerate(messages, 1)], indent=2, ensure_ascii=False))
     elif not messages:
         ctx.say("nothing queued for %s" % caller)
     elif read_all:
-        ctx.say(inbox.render_batch(messages))
+        ctx.say(inbox.render_for_print(messages, limit))
     else:
-        for message in messages:
-            ctx.say("#%s  %s  %s  %s%s" % (message.short, since_label(message.time), message.sender,
-                                          "[fyi]  " if message.fyi else "", first_line(message.body)))
+        for index, message in enumerate(messages, 1):
+            ctx.say("%d. #%s  %s  %s  %s%s" % (index, message.short, since_label(message.time), message.sender,
+                                              tags(message), first_line(message.body)))
     return EXIT_OK
 
 
 def _as_dict(message: Message, body: bool = False) -> Dict:
     item = {"id": message.id, "from": message.sender, "to": message.to, "time": message.time, "fyi": message.fyi,
             "reply_to": message.reply_to, "ttl": message.ttl, "file": message.file,
-            "first_line": first_line(message.body)}
+            "queued_by": message.mode, "urgent": message.urgent, "first_line": first_line(message.body)}
     if body:
         item["body"] = message.body
     return item
@@ -219,15 +266,19 @@ def _redeliver(ctx: Ctx, ref: str, as_json: bool) -> int:
     return EXIT_OK
 
 
-def _history(ctx: Ctx, caller: str, other: str, as_json: bool) -> int:
-    """Every delivered message between the caller and ``other``, from both ``cur/``
-    directories, oldest first. The log says which ``cur/`` files were delivered:
-    a message whose last log entry is ``expired``, ``dropped`` or a refused ``send``
-    is left out; a file the log does not mention is shown."""
+def _history(ctx: Ctx, caller: str, other: str, as_json: bool, limit: Optional[int]) -> int:
+    """Design 18.5 and 20.1: every delivered message between the caller and ``other``,
+    oldest first, from two sources: the ``cur/`` files of both mailboxes (full bodies)
+    and the log's ``send`` entries between the two that have no file (sent or
+    unconfirmed; messages from before 0.6.0, or whose file is gone), shown with their
+    first line only. The log says which ``cur/`` files were delivered: a message whose
+    last log entry is ``expired``, ``dropped`` or a refused ``send`` is left out; a file
+    the log does not mention is shown."""
     repo = ctx.fleet.repo
     warnings: List[str] = []
     fate: Dict[str, str] = {}
-    for entry in read(repo, warnings):
+    entries = read(repo, warnings)
+    for entry in entries:
         ident = entry.get("id")
         kind = entry.get("kind")
         if not ident or kind not in ("send", "delivered", "expired", "dropped"):
@@ -236,17 +287,54 @@ def _history(ctx: Ctx, caller: str, other: str, as_json: bool) -> int:
     found: List[Message] = []
     for mailbox, sender in ((caller, other), (other, caller)):
         found.extend(m for m in inbox.read_box(repo, mailbox, CUR, warnings) if m.sender == sender)
+    queued_ids = {m.id for mailbox in (caller, other) for m in inbox.read_box(repo, mailbox, NEW, warnings)}
     for warning in warnings:
         ctx.warn(warning)
-    shown = sorted((m for m in found if fate.get(m.id) not in ("expired", "dropped", "refused")),
-                   key=Message.sort_key)
+    files = [m for m in found if fate.get(m.id) not in ("expired", "dropped", "refused")]
+    filed = {m.id for m in found} | queued_ids
+    pair = {(caller, other), (other, caller)}
+    log_only = [e for e in entries if e.get("kind", "send") == "send" and (str(e["from"]), str(e["to"])) in pair
+                and (e.get("delivery") or "sent") in ("sent", "unconfirmed") and str(e.get("id") or "") not in filed]
+    timeline: List[Tuple[Tuple, object]] = []
+    for index, message in enumerate(sorted(files, key=Message.sort_key)):
+        timeline.append((_when_key(message.time, 0, index), message))
+    for index, entry in enumerate(log_only):
+        timeline.append((_when_key(entry["time"], 1, index), entry))
+    timeline.sort(key=lambda pair_: pair_[0])
+    total, partial = len(timeline), len(log_only)
     if as_json:
-        ctx.say(json.dumps([_as_dict(m, body=True) for m in shown], indent=2, ensure_ascii=False))
-    elif not shown:
-        ctx.say("no delivered messages between %s and %s" % (caller, other))
-    else:
-        ctx.say(inbox.render_batch(shown, direction=True))
+        items = []
+        for _, item in timeline:
+            if isinstance(item, Message):
+                items.append(dict(_as_dict(item, body=True), body_available=True))
+            else:
+                items.append({"id": item.get("id"), "from": item["from"], "to": item["to"], "time": item["time"],
+                              "fyi": bool(item.get("fyi")), "reply_to": item.get("reply_to"), "ttl": None,
+                              "file": item.get("file"), "first_line": item.get("first_line", ""), "body": None,
+                              "body_available": False})
+        ctx.say(json.dumps(items, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    if not timeline:
+        ctx.say("no messages between %s and %s" % (caller, other))
+        return EXIT_OK
+    blocks = []
+    for _, item in timeline:
+        if isinstance(item, Message):
+            blocks.append(inbox.render_for_print([item], limit, direction=True))
+        else:
+            blocks.append("[from %s to %s at %s, first line only]\n%s" % (
+                item["from"], item["to"], since_label(str(item["time"])), item.get("first_line", "")))
+    ctx.say("\n\n".join(blocks))
+    if partial:
+        ctx.say("\n%d of %d messages have only their first line (sent before the inbox kept bodies)"
+                % (partial, total))
     return EXIT_OK
+
+
+def _when_key(text: str, source: int, index: int) -> Tuple:
+    when = inbox.parse_time(text)
+    stamp = when.timestamp() if when is not None else 0.0
+    return (stamp, source, index)
 
 
 # -- inbox --hook (design 18.7) ---------------------------------------------------------------------

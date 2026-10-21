@@ -8,7 +8,12 @@ the hex part (``#3f2a9c``) names a message on the command line and is drawn
 again while any file in the fleet's inbox tree already uses it.
 
 A message file is ``key: value`` header lines, a blank line, then the body
-exactly as the sender wrote it. Files are written atomically (temp file in the
+exactly as the sender wrote it. ``queued_by`` (design 20.8) says how it was sent
+and so how it waits: ``refusal`` (a plain send the seat could not take: delivered
+at the first opportunity, typed ahead to a working seat), ``queue`` (waits for idle
+or done) or ``fyi`` (rides along); a file without it counts as ``queue`` (``fyi``
+when it is an FYI). ``priority: 1`` (``send --urgent``, design 20.3) puts a
+message ahead of the rest of its mailbox. Files are written atomically (temp file in the
 same directory, then rename) and never modified; delivery is a rename from
 ``new/`` to ``cur/``. ``locked`` serialises deliveries to one mailbox, so two
 commands flushing it at once never prompt the same message twice.
@@ -39,6 +44,7 @@ NEW, CUR = "new", "cur"
 ID_RE = re.compile(r"^(\d{8}T\d{6}Z)-([0-9a-f]{6})$")
 SHORT_RE = re.compile(r"^#?([0-9a-f]{6})$")
 TTL_RE = re.compile(r"^([1-9][0-9]*)([mhd])$")
+QUEUED_BY = ("refusal", "queue", "fyi")  # design 20.8; how a message was sent decides how it waits
 TTL_UNITS = {"m": 60, "h": 3600, "d": 86400}
 BATCH_CAP = 16 * 1024  # bytes of rendered messages one prompt may carry (18.4)
 LOCK_NAME = ".lock"
@@ -58,6 +64,8 @@ class Message:
     reply_to: Optional[str] = None
     ttl: Optional[str] = None
     file: Optional[str] = None
+    queued_by: Optional[str] = None   # refusal | queue | fyi (design 20.8); None in files before 0.9.0
+    priority: Optional[int] = None    # 1 for `send --urgent` (design 20.3)
     path: str = ""
     box: str = NEW
     mtime_ns: int = 0
@@ -66,10 +74,27 @@ class Message:
     def short(self) -> str:
         return short_of(self.id)
 
+    @property
+    def urgent(self) -> bool:
+        return self.priority == 1
+
+    @property
+    def mode(self) -> str:
+        """How the message waits (design 20.8): its ``queued_by``; a file written before
+        0.9.0 has none and counts as ``queue`` (``fyi`` when it is an FYI), the
+        conservative reading. Decided by how it was sent, never by its text (invariant 18)."""
+        if self.queued_by in QUEUED_BY:
+            return str(self.queued_by)
+        return "fyi" if self.fyi else "queue"
+
     def sort_key(self) -> Tuple[str, int, str]:
         """Oldest first: the id's second, then the write time (two messages in the same
         second keep the order they were written in), then the id."""
         return (self.id.split("-", 1)[0], self.mtime_ns, self.id)
+
+    def delivery_key(self) -> Tuple[int, str, int, str]:
+        """The order a mailbox is delivered in (design 20.3): urgent first, then oldest first."""
+        return (0 if self.urgent else 1,) + self.sort_key()
 
 
 def short_of(message_id: str) -> str:
@@ -109,12 +134,35 @@ def time_label(text: str, today: Optional[datetime.date] = None) -> str:
     return local.strftime("%H:%M") if local.date() == today else local.strftime("%Y-%m-%d %H:%M")
 
 
-def parse_ttl(text: str) -> datetime.timedelta:
-    """``30m``, ``2h`` or ``1d``: a positive integer and a unit. ValueError otherwise."""
-    match = TTL_RE.match(text.strip())
+def parse_ttl(text: str, what: str = "--ttl") -> datetime.timedelta:
+    """``30m``, ``2h`` or ``1d``: a positive integer and a unit. ValueError otherwise.
+    The same grammar serves ``ack --older-than`` and ``[watch] notify_blocked_after``."""
+    match = TTL_RE.match(str(text).strip())
     if not match:
-        raise ValueError("--ttl takes a positive integer with m, h or d (30m, 2h, 1d), not %r" % text)
+        raise ValueError("%s takes a positive integer with m, h or d (30m, 2h, 1d), not %r" % (what, text))
     return datetime.timedelta(seconds=int(match.group(1)) * TTL_UNITS[match.group(2)])
+
+
+def age_label(seconds: float) -> str:
+    """An age as design 20.2 renders it: ``3m``, ``1h05m``, ``2d03h``; ``<1m`` under a minute."""
+    minutes = int(max(0.0, seconds) // 60)
+    if minutes < 1:
+        return "<1m"
+    if minutes < 60:
+        return "%dm" % minutes
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return "%dh%02dm" % (hours, minutes)
+    days, hours = divmod(hours, 24)
+    return "%dd%02dh" % (days, hours)
+
+
+def age_since(text: object, now: Optional[datetime.datetime] = None) -> Optional[str]:
+    """``age_label`` of the time from an ISO timestamp to now; None when unparseable."""
+    when = parse_time(text)
+    if when is None:
+        return None
+    return age_label(((now or now_utc()) - when).total_seconds())
 
 
 def is_due(message: Message, now: datetime.datetime) -> bool:
@@ -188,6 +236,10 @@ def render_file(message: Message) -> str:
     """Header lines, a blank line, the body verbatim (design 18.1)."""
     lines = ["id: %s" % message.id, "from: %s" % message.sender, "to: %s" % message.to,
              "time: %s" % message.time, "fyi: %s" % ("true" if message.fyi else "false")]
+    if message.queued_by:
+        lines.append("queued_by: %s" % message.queued_by)
+    if message.priority:
+        lines.append("priority: %d" % message.priority)
     for key, value in (("reply_to", message.reply_to), ("ttl", message.ttl), ("file", message.file)):
         if value:
             lines.append("%s: %s" % (key, _one_line(value)))
@@ -207,9 +259,14 @@ def parse_file(text: str, path: str = "", box: str = NEW) -> Message:
     missing = [k for k in ("id", "from", "to", "time") if not fields.get(k)]
     if missing:
         raise ValueError("header lacks %s" % ", ".join(missing))
+    try:
+        priority: Optional[int] = int(fields.get("priority", "")) or None
+    except ValueError:
+        priority = None
     return Message(id=fields["id"], sender=fields["from"], to=fields["to"], time=fields["time"], body=body,
                    fyi=fields.get("fyi", "").lower() == "true", reply_to=fields.get("reply_to") or None,
-                   ttl=fields.get("ttl") or None, file=fields.get("file") or None, path=path, box=box)
+                   ttl=fields.get("ttl") or None, file=fields.get("file") or None,
+                   queued_by=fields.get("queued_by") or None, priority=priority, path=path, box=box)
 
 
 def write(repo: str, message: Message, box: str = NEW) -> Message:
@@ -243,7 +300,8 @@ def load(path: str, box: str) -> Message:
 
 
 def read_box(repo: str, name: str, box: str = NEW, warnings: Optional[List[str]] = None) -> List[Message]:
-    """The messages of one box, oldest first. Unreadable files are skipped with a warning."""
+    """The messages of one box: ``new/`` in delivery order (urgent first, then oldest
+    first), ``cur/`` oldest first. Unreadable files are skipped with a warning."""
     folder = box_dir(repo, name, box)
     found = []
     for filename in _files(folder):
@@ -253,7 +311,7 @@ def read_box(repo: str, name: str, box: str = NEW, warnings: Optional[List[str]]
         except (OSError, ValueError) as exc:
             if warnings is not None:
                 warnings.append("%s: unreadable message skipped (%s)" % (path, exc))
-    return sorted(found, key=Message.sort_key)
+    return sorted(found, key=Message.delivery_key if box == NEW else Message.sort_key)
 
 
 def all_messages(repo: str, warnings: Optional[List[str]] = None) -> List[Message]:
@@ -342,6 +400,29 @@ def render_batch(messages: Sequence[Message], direction: bool = False,
                  today: Optional[datetime.date] = None) -> str:
     """Each message as its header line and its body, joined by blank lines (design 18.4)."""
     return "\n\n".join("%s\n%s" % (item_header(m, direction, today), m.body.rstrip("\n")) for m in messages)
+
+
+def in_delivery_order(messages: Sequence[Message]) -> List[Message]:
+    return sorted(messages, key=Message.delivery_key)
+
+
+PRINT_HEAD_LINES = 10  # lines of a long body `inbox --read` and `--history` print (design 20.4)
+
+
+def render_for_print(messages: Sequence[Message], limit: Optional[int], direction: bool = False,
+                     today: Optional[datetime.date] = None) -> str:
+    """The batch format for ``inbox --read`` and ``--history`` (design 20.4): a body over
+    ``limit`` bytes prints as its first ten lines and ``… <size> in full: <path>``.
+    ``limit`` None prints everything (``--full``)."""
+    items = []
+    for m in messages:
+        body = m.body.rstrip("\n")
+        size = size_of(m.body)
+        if limit is not None and size > limit:
+            head = "\n".join(body.split("\n")[:PRINT_HEAD_LINES])
+            body = "%s\n… %s in full: %s" % (head, size_label(size), m.path)
+        items.append("%s\n%s" % (item_header(m, direction, today), body))
+    return "\n\n".join(items)
 
 
 def pointer_text(messages: Sequence[Message], size: int, prefix: bool = True,

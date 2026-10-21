@@ -362,7 +362,7 @@ class Status(LiveFleet):
         put(self.repo, "fablyn-dev", "b")
         lines = self.run_cli("status")[1].splitlines()
         index = lines.index("watcher: not running")
-        self.assertRegex(lines[index + 1], r"^queued: fablyn-dev 2 \(oldest \d\d:\d\d\)$")
+        self.assertRegex(lines[index + 1], r"^queued: fablyn-dev 2 \(oldest (<1m|\d+m)\)$")  # an age (20.8)
         with open(os.path.join(self.repo, ".herdr", "watch.lock"), "w") as handle:
             json.dump({"pid": os.getpid(), "started": inbox.iso_local(inbox.now_utc()), "fleet": "x"}, handle)
         self.assertRegex(self.run_cli("status")[1], r"\nwatcher: running \(pid %d since \d\d:\d\d\)\nqueued: "

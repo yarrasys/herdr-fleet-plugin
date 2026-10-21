@@ -1,9 +1,11 @@
 """Read-only inspection: drift (design 4.4), status (4.2, 16.3, 16.4, 16.7, 17.2,
-17.4, 18.6's watcher and queued lines, 19.1's watcher strip) and doctor (4.7, 16.6,
-17.3, 18.7's hooks line).
+17.4, 18.6's watcher and queued lines, 19.1's watcher strip, 20.2's debt ages,
+20.5's ``blocked (4m)``, 20.8's queue ages) and doctor (4.7, 16.6, 17.3, 18.7's
+hooks line).
 
 Nothing here changes herdr. ``collect_status`` may rewrite the state file
-when it prunes ids herdr no longer knows, which every command does. Git is
+when it prunes ids herdr no longer knows, which every command does, and records
+each seat's ``state_seen`` (design 20.5). Git is
 only read (``gitinfo``), and ``status --context`` only reads transcripts
 (``context_size``).
 """
@@ -16,7 +18,7 @@ import sys
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from herdr_fleet import MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, hooks, inbox, messages, permissions
-from herdr_fleet import watchpane
+from herdr_fleet import seen, watchpane
 from herdr_fleet.context import Ctx
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import Herdr, HerdrError, describe
@@ -130,12 +132,18 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
             "notes": seat.notes,
             "blocked_at_startup": bool(entry.get("blocked_at_startup")),
             "last_kickoff_at": entry.get("last_kickoff_at"),
+            "state_since": None,
         })
         if context:
             reading = context_size.seat_context(agent, ctx.env) if agent else None
             hint = fleet.restart_hint_tokens
             seats[-1]["context"] = reading
             seats[-1]["restart_hint"] = bool(reading and hint and reading["tokens"] >= hint)
+    recorded = seen.observe(ctx, {s["name"]: s["state"] for s in seats})  # design 20.5
+    for item in seats:
+        record_ = recorded.get(item["name"]) or {}
+        if record_.get("state") == item["state"]:
+            item["state_since"] = record_.get("since")
     data = {
         "fleet_file": fleet.path,
         "repo": fleet.repo,
@@ -163,17 +171,22 @@ def queued_summary(fleet: Fleet) -> Tuple[Dict[str, int], Dict[str, str]]:
     names = [n for n in order if n in found] + sorted(n for n in found if n not in order and n != messages.OWNER)
     if messages.OWNER in found:
         names.append(messages.OWNER)
-    return ({n: len(found[n]) for n in names}, {n: found[n][0].time for n in names})
+    return ({n: len(found[n]) for n in names},
+            {n: min(found[n], key=inbox.Message.sort_key).time for n in names})
 
 
 def queued_line(data: Dict) -> Optional[str]:
-    """``queued: fablyn-dev 3 (oldest 10:09), owner 1``; None when every mailbox is empty."""
+    """``queued: fablyn-dev 2 (oldest 25m), owner 1`` (ages, design 20.8); None when every
+    mailbox is empty."""
     counts, oldest = data.get("queued") or {}, data.get("queued_oldest") or {}
     if not counts:
         return None
-    return "queued: " + ", ".join("%s %d%s" % (name, count, " (oldest %s)" % messages.since_label(oldest[name])
-                                               if count > 1 and name in oldest else "")
-                                  for name, count in counts.items())
+    now = inbox.now_utc()
+    parts = []
+    for name, count in counts.items():
+        age = inbox.age_since(oldest.get(name), now) if count > 1 else None
+        parts.append("%s %d%s" % (name, count, " (oldest %s)" % age if age else ""))
+    return "queued: " + ", ".join(parts)
 
 
 def git_branch(cwd: str) -> str:
@@ -234,7 +247,8 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
         if s.get("restart_hint"):
             notes.append("consider restart")
         cells = {"SEAT": s["name"], "KIND": s["kind"], "LIVE": s["live_kind"] or "-", "PANE": s["pane_id"] or "-",
-                 "STATE": s["state"] + startup_label(s), "CONTEXT": context_size.context_label(s.get("context")),
+                 "STATE": seen.label(s["state"], {"state": s["state"], "since": s.get("state_since")})
+                 + startup_label(s), "CONTEXT": context_size.context_label(s.get("context")),
                  "CWD": shorten(s.get("cwd") or "", home) or "-", "BRANCH": s.get("branch") or "",
                  "DRIFT": "; ".join((["adopted"] if s.get("adopted") else []) + s["drift"]) or "-",
                  "NOTES": "; ".join(notes)}

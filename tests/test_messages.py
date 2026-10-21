@@ -58,7 +58,7 @@ class Send(LiveFleet):
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "fablyn-dev", "when you are free")
         self.assertEqual(code, 0, out)
-        self.assertIn("sent to fablyn-dev (working)", out)
+        self.assertIn("sent to fablyn-dev (working: typed into its own input, read after its current turn)", out)
         self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)  # the safety hook allows it for send only
 
     def test_blocked_unknown_and_absent_are_queued_and_nothing_is_sent(self):  # design 18.3, third row
@@ -68,9 +68,10 @@ class Send(LiveFleet):
         code, out, _ = self.run_cli("send", "fablyn-dev", "fablyn-reviewer", "fablyn-orchestrator", "hello")
         self.assertEqual(code, 0)
         entries = log_entries(self.repo)
-        self.assertEqual(out.splitlines(), ["queued for fablyn-dev (blocked) #%s" % entries[0]["id"][-6:],
-                                            "queued for fablyn-reviewer (unknown) #%s" % entries[1]["id"][-6:],
-                                            "queued for fablyn-orchestrator (absent) #%s" % entries[2]["id"][-6:]])
+        self.assertEqual(out.splitlines(), [  # design 20.3: the line names the place and the position
+            "queued in herdr-fleet for fablyn-dev (blocked) #%s, position 1 of 1" % entries[0]["id"][-6:],
+            "queued in herdr-fleet for fablyn-reviewer (unknown) #%s, position 1 of 1" % entries[1]["id"][-6:],
+            "queued in herdr-fleet for fablyn-orchestrator (absent) #%s, position 1 of 1" % entries[2]["id"][-6:]])
         self.assertEqual(self.argvs("agent", "prompt"), [])
         self.assertEqual([(e["to"], e["delivery"]) for e in entries],
                          [("fablyn-dev", "queued"), ("fablyn-reviewer", "queued"), ("fablyn-orchestrator", "queued")])
@@ -140,7 +141,8 @@ class Send(LiveFleet):
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "--when-ready", "5000", "fablyn-dev", "your turn")
         self.assertEqual(code, 0)
-        self.assertRegex(out, r"queued for fablyn-dev \(working after --when-ready 5000 ms\) #[0-9a-f]{6}")
+        self.assertRegex(out, r"queued in herdr-fleet for fablyn-dev \(working after --when-ready 5000 ms\) "
+                              r"#[0-9a-f]{6}, position 1 of 1")
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
         code, out, _ = self.run_cli("send", "--now", "--when-ready", "5000", "fablyn-dev", "your turn")
         self.assertEqual(code, 1)  # --now keeps the 16.1 refusal
@@ -248,10 +250,10 @@ class LogCommand(LiveFleet):
         self.assertEqual([e["to"] for e in data], ["fablyn-dev", "fablyn-orchestrator", "fablyn-reviewer"])
         owed = self.run_cli("log", "--owed")[1].splitlines()  # same-second sends: log order decides
         self.assertEqual(len(owed), 2)
-        self.assertTrue(owed[0].startswith("awaiting: fablyn-orchestrator owes fablyn-dev since "))
-        self.assertTrue(owed[0].endswith("(done)"))
-        self.assertTrue(owed[1].startswith("awaiting: fablyn-reviewer owes fablyn-orchestrator since "))
-        self.assertTrue(owed[1].endswith("(review please)"))
+        self.assertTrue(owed[0].startswith("awaiting: fablyn-orchestrator owes fablyn-dev for "))
+        self.assertTrue(owed[0].endswith("): done"))
+        self.assertTrue(owed[1].startswith("awaiting: fablyn-reviewer owes fablyn-orchestrator for "))
+        self.assertTrue(owed[1].endswith("): review please"))
 
     def test_log_needs_no_herdr(self):
         before = len(self.calls())
@@ -355,11 +357,13 @@ class Owed(unittest.TestCase):
     def test_latest_message_awaits_unless_replied_later(self):
         log = [entry("orch", "dev", 1, first="task 1"), entry("dev", "orch", 2),
                entry("orch", "dev", 3, first="task 2"), entry("orch", "rev", 4, first="review"),
-               entry("rev", "orch", 4), entry("herdr-fleet", "dev", 5, "kickoff")]
+               entry("rev", "orch", 4)]
         self.assertEqual(messages.owed(log), [  # rev's reply at the same minute comes later in the log
             {"from": "orch", "to": "dev", "since": "2026-10-20T10:03:00+11:00", "first_line": "task 2"},
             {"from": "rev", "to": "orch", "since": "2026-10-20T10:04:00+11:00", "first_line": "m"},
         ])
+        log.append(entry("herdr-fleet", "dev", 5, "kickoff"))  # design 20.8: a kickoff of dev settles dev's debts
+        self.assertEqual([(o["from"], o["to"]) for o in messages.owed(log)], [("rev", "orch")])
 
     def test_equal_times_follow_log_order(self):
         same = [entry("a", "b", 1, first="ask"), entry("b", "a", 1, first="answer")]
@@ -374,9 +378,14 @@ class Owed(unittest.TestCase):
         item = {"from": "fablyn-orchestrator", "to": "fablyn-reviewer", "since": "2026-10-20T10:31:04+11:00",
                 "first_line": "Review round 3"}
         when = datetime.datetime.fromisoformat(item["since"]).astimezone()
-        self.assertEqual(messages.owed_lines([item], today=when.date()),
-                         ["awaiting: fablyn-reviewer owes fablyn-orchestrator since %s (Review round 3)"
-                          % when.strftime("%H:%M")])
+        later = when + datetime.timedelta(hours=5, minutes=12)
+        self.assertEqual(messages.owed_lines([item], today=when.date(), now=later),
+                         ["awaiting: fablyn-reviewer owes fablyn-orchestrator for 5h12m (no id, since %s): "
+                          "Review round 3" % when.strftime("%H:%M")])
+        item["id"] = "20261019T233104Z-a1b2c3"
+        self.assertEqual(messages.owed_lines([item], today=when.date(), now=later),
+                         ["awaiting: fablyn-reviewer owes fablyn-orchestrator for 5h12m (#a1b2c3, since %s): "
+                          "Review round 3" % when.strftime("%H:%M")])
         self.assertIn(when.strftime("%Y-%m-%d"), messages.owed_lines([item], today=datetime.date(2000, 1, 1))[0])
 
     def test_first_line_and_sizes(self):
@@ -421,7 +430,8 @@ class Fyi(LiveFleet):
     def test_flag_logs_fyi_and_keeps_it_queued_for_an_idle_seat(self):  # design 18.3: never wakes an idle seat
         code, out, _ = self.run_cli("send", "--fyi", "--as", "fablyn-dev", "fablyn-orchestrator", "cleanup done")
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.strip(), r"^queued for fablyn-orchestrator \(idle, fyi\) #[0-9a-f]{6}$")
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-orchestrator \(idle, fyi: delivered with the "
+                                      r"next plain send, kickoff or deliver\) #[0-9a-f]{6}, position 1 of 1$")
         self.assertEqual(self.prompts_to("fablyn-orchestrator"), [])
         (item,) = log_entries(self.repo)
         self.assertIs(item["fyi"], True)

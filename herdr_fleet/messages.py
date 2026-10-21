@@ -23,8 +23,18 @@ output, never routes replies and never decides who gets a message.
   ``expired``, ``dropped``, ``ack`` and ``kickoff`` entries.
 - Owed replies are derived from the log alone (``owed``): a message counts from
   its delivery, FYIs never create an obligation, a plain answer settles the
-  pair, and ``--reply-to`` or ``ack #id`` settles one message exactly.
-  ``ack`` writes the log only and sends nothing (invariant 10).
+  pair, ``--reply-to`` or ``ack #id`` settles one message exactly, and a kickoff
+  of a seat settles everything owed by it and to it before (design 20.8).
+  ``ack`` writes the log only and sends nothing (invariant 10); acting on a
+  message is never inferred from anything an agent prints (invariant 16).
+- How a queued message waits is decided by how it was sent (``queued_by``,
+  invariant 18): a plain send a seat could not take is ``refusal`` and is
+  delivered at the first opportunity, typed ahead to a working seat, by every
+  path including the flush before a later send; ``--queue`` and ``--when-ready``
+  leftovers wait for idle or done; FYIs ride along. ``--urgent`` reorders only
+  the mailbox herdr-fleet holds (invariant 17).
+- A send to a live agent of another fleet on this machine is also logged there
+  (``crossfleet``).
 """
 
 from __future__ import annotations
@@ -37,7 +47,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from herdr_fleet import contacts as contact_mod
-from herdr_fleet import inbox
+from herdr_fleet import crossfleet, inbox, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, preflight
 from herdr_fleet.fleetfile import NAME_RE
 from herdr_fleet.herdr import HerdrError
@@ -55,6 +65,15 @@ PREFIX_RE = re.compile(r"^\[from [^\]]*\]\s*")  # [from X], [from X #3f2a9c], [f
 FYI_RE = re.compile(r"^fyi[: ]", re.IGNORECASE)
 ANSWERED = ("sent", "unconfirmed", "queued")  # a send in these states answers (refused never does)
 since_label = inbox.time_label
+WORKING_PLACE = "working: typed into its own input, read after its current turn"  # design 20.3
+FYI_PLACE = "fyi: delivered with the next plain send, kickoff or deliver"         # design 20.8
+URGENT_TYPED = "--urgent cannot reorder the seat's own input"                      # design 20.3
+
+
+def place(state: str) -> str:
+    """The state as a send or deliver line shows it: a working seat says where the text
+    sits (in the seat's own input, which herdr-fleet cannot see or reorder)."""
+    return WORKING_PLACE if state == "working" else state
 
 
 # -- the log -----------------------------------------------------------------------------
@@ -195,12 +214,17 @@ def unsettled(entries: Sequence[Dict]) -> List[Tuple[Key, Dict]]:
     by a later answer from its recipient to its sender (a ``send`` that was not
     refused, FYI or not, or an ``ack``), or by a ``send`` whose ``reply_to`` or an
     ``ack`` whose ``id`` names it. An answer that names one message settles only
-    that one. Kickoffs and plugin entries never count. Times have one-second
-    resolution, so equal times are ordered by position in the append-only log."""
+    that one. A ``kickoff`` entry for seat S settles every request owed by S and to
+    S delivered before it (design 20.8): the fresh context neither remembers what it
+    asked nor what it was asked. Messages the kickoff itself carried in ``{inbox}``
+    count from the kickoff and stay owed. Plugin entries never ask or answer. Times
+    have one-second resolution, so equal times are ordered by position in the log."""
     pending: Dict[str, Dict] = {}
     asks: List[Tuple[Key, Dict]] = []
     answers: Dict[Tuple[str, str], Key] = {}
     named: Set[str] = set()
+    kickoffs: Dict[str, Key] = {}
+    carried: Dict[str, List[Tuple[Dict, str, Key]]] = {}  # seat -> requests its next kickoff entry carries
 
     def ask(source: Dict, key: Key, since: str) -> None:
         if source.get("fyi"):
@@ -232,16 +256,29 @@ def unsettled(entries: Sequence[Dict]) -> List[Tuple[Key, Dict]]:
         elif kind == "delivered":
             source = pending.pop(str(entry.get("id")), None)
             if source is not None:
-                ask(source, key, str(entry["time"]))
+                if entry.get("via") == "kickoff":
+                    carried.setdefault(str(entry["to"]), []).append((source, str(entry["time"]), key))
+                else:
+                    ask(source, key, str(entry["time"]))
         elif kind == "ack":
             if entry.get("id"):
                 named.add(str(entry["id"]))
             elif pair not in answers or key > answers[pair]:
                 answers[pair] = key
+        elif kind == "kickoff":
+            seat = str(entry["to"])
+            kickoffs[seat] = key
+            for source, since, _ in carried.pop(seat, []):  # carried in this kickoff: count from it
+                ask(source, key, since)
+    for items in carried.values():  # a kickoff that was not logged (unconfirmed): from their delivery
+        for source, since, own_key in items:
+            ask(source, own_key, since)
     still = []
     for key, item in asks:
         reply = answers.get((item["to"], item["from"]))
         if item.get("id") in named or (reply is not None and reply > key):
+            continue
+        if any(kickoffs.get(seat) is not None and kickoffs[seat] > key for seat in (item["to"], item["from"])):
             continue
         still.append((key, item))
     return sorted(still, key=lambda pair: pair[0])
@@ -257,9 +294,18 @@ def owed(entries: Sequence[Dict]) -> List[Dict]:
     return [item for _, item in sorted(latest.values(), key=lambda pair: pair[0])]
 
 
-def owed_lines(items: Sequence[Dict], today: Optional[datetime.date] = None) -> List[str]:
-    return ["awaiting: %s owes %s since %s (%s)" % (o["to"], o["from"], since_label(o["since"], today),
-                                                    o["first_line"]) for o in items]
+def owed_lines(items: Sequence[Dict], today: Optional[datetime.date] = None,
+               now: Optional[datetime.datetime] = None) -> List[str]:
+    """``awaiting: B owes A for 5h12m (#a1b2c3, since 08:49): first line`` (design 20.2);
+    ``(no id, since …)`` for a message sent before 0.6.0, acknowledged by name."""
+    now = now or inbox.now_utc()
+    lines = []
+    for o in items:
+        ident = "#%s" % inbox.short_of(o["id"]) if o.get("id") else "no id"
+        age = inbox.age_since(o["since"], now) or "?"
+        lines.append("awaiting: %s owes %s for %s (%s, since %s): %s" % (
+            o["to"], o["from"], age, ident, since_label(o["since"], today), o["first_line"]))
+    return lines
 
 
 def format_entry(entry: Dict) -> str:
@@ -349,8 +395,9 @@ def inbox_block(ctx: Ctx, name: str) -> Tuple[str, List[Message], List[Message]]
 
 def compose_prompt(queued: Sequence[Message], own: Optional[Message] = None) -> Tuple[str, int, bool]:
     """(prompt, size, pointer). A message alone is ``[from X #id] body``; with anything
-    queued, the batch of 18.4 with ``own`` last. Above BATCH_CAP the prompt is the pointer."""
-    items = list(queued) + ([own] if own is not None else [])
+    queued, the batch of 18.4 in delivery order (urgent first, then oldest first, so
+    ``own`` is last unless it is urgent). Above BATCH_CAP the prompt is the pointer."""
+    items = inbox.in_delivery_order(list(queued) + ([own] if own is not None else []))
     text = inbox.direct_text(own) if own is not None and not queued else inbox.render_batch(items)
     size = inbox.size_of(text)
     if size > inbox.BATCH_CAP:
@@ -359,26 +406,32 @@ def compose_prompt(queued: Sequence[Message], own: Optional[Message] = None) -> 
 
 
 def settle(ctx: Ctx, messages: Sequence[Message], via: str, delivery: str,
-           own: Optional[Message] = None) -> None:
+           own: Optional[Message] = None, mirror: Optional[str] = None) -> None:
     """After a sent or unconfirmed prompt: move every carried file to ``cur/`` and log one
-    ``delivered`` entry each (``own``, a message ``send`` just wrote, logs its own entry)."""
+    ``delivered`` entry each (``own``, a message ``send`` just wrote, logs its own entry).
+    ``mirror`` is another fleet's repository that logged these messages' sends (20.8)."""
     for message in messages:
         try:
             inbox.move(ctx.fleet.repo, message, CUR)
         except OSError as exc:
             ctx.warn("delivered, but cannot move %s to cur/: %s" % (message.path, exc))
         if own is None or message.id != own.id:
-            record(ctx, delivered_entry(message, via, delivery))
+            entry = delivered_entry(message, via, delivery)
+            record(ctx, entry)
+            if mirror:
+                mirror_entry(ctx, mirror, entry)
 
 
 def prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: str,
-                   own: Optional[Message] = None) -> Drop:
+                   own: Optional[Message] = None, exclude: Sequence[str] = (),
+                   mirror: Optional[str] = None) -> Drop:
     """Deliver a mailbox in one prompt (design 18.4). The caller holds ``inbox.locked``.
     ``target`` is what ``agent prompt`` gets (a name or a pane id); ``allow`` the states
-    ``safe_prompt`` accepts; ``own`` the message ``send`` just queued, which goes last."""
+    ``safe_prompt`` accepts; ``own`` the message ``send`` just queued; ``exclude`` ids
+    that stay queued (a ``--queue`` message while older refusal messages go)."""
     expire_due(ctx, name)
-    queued = [m for m in queued_in(ctx, name) if own is None or m.id != own.id]
-    items = queued + ([own] if own is not None else [])
+    queued = [m for m in queued_in(ctx, name) if (own is None or m.id != own.id) and m.id not in exclude]
+    items = inbox.in_delivery_order(queued + ([own] if own is not None else []))
     if not items:
         return Drop("empty")
     text, size, pointer = compose_prompt(queued, own)
@@ -388,11 +441,25 @@ def prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: 
         return Drop("pointer", outcome.detail, state, [], items, size)
     if outcome.ok or outcome.status == "unconfirmed":
         delivery = "sent" if outcome.ok else "unconfirmed"
-        settle(ctx, items, via, delivery, own)
+        settle(ctx, items, via, delivery, own, mirror)
         return Drop(delivery, outcome.detail, state, items, [], size)
     if outcome.status == "error":
         return Drop("failed", outcome.detail, state, [], items, size)
     return Drop("refused", outcome.detail, outcome.status, [], items, size)  # herdr sent nothing
+
+
+def has_refusal(messages: Sequence[Message], exclude: Sequence[str] = ()) -> bool:
+    """True when a queued message was queued on refusal (design 20.8): it goes at the
+    first opportunity, typed ahead to a working seat. Decided by ``queued_by`` only."""
+    return any(m.mode == "refusal" and m.id not in exclude for m in messages)
+
+
+def refusal_waiting(ctx: Ctx, name: str, exclude: Sequence[str] = ()) -> bool:
+    """``has_refusal`` for the live (not past ttl) queued messages of a mailbox."""
+    if not inbox.has_queued(ctx.fleet.repo, name):
+        return False
+    now = inbox.now_utc()
+    return has_refusal([m for m in queued_in(ctx, name) if not inbox.is_due(m, now)], exclude)
 
 
 def notify_owner(ctx: Ctx) -> Drop:
@@ -409,7 +476,8 @@ def notify_owner(ctx: Ctx) -> Drop:
         title = "message from %s #%s" % (items[0].sender, items[0].short)
         body = first_line(items[0].body)
     else:
-        title = "%d messages for owner (oldest %s)" % (len(items), since_label(items[0].time))
+        oldest = min(items, key=Message.sort_key)
+        title = "%d messages for owner (oldest %s)" % (len(items), since_label(oldest.time))
         body = "\n".join("#%s %s: %s" % (m.short, m.sender, first_line(m.body)) for m in items)
     senders = sorted({m.sender for m in items})
     body += "\nread: herdr-fleet inbox --as owner --history %s" % (senders[0] if len(senders) == 1 else "<name>")
@@ -420,12 +488,29 @@ def notify_owner(ctx: Ctx) -> Drop:
 
 
 def queued_in(ctx: Ctx, name: str) -> List[Message]:
-    """The ``new/`` messages of a mailbox, oldest first; unreadable files are warned about."""
+    """The ``new/`` messages of a mailbox in delivery order; unreadable files are warned about."""
     warnings: List[str] = []
     found = inbox.read_box(ctx.fleet.repo, name, NEW, warnings)
     for warning in warnings:
         ctx.warn(warning)
     return found
+
+
+def position(ctx: Ctx, name: str, ident: str) -> Tuple[int, int]:
+    """Where a queued message sits in its mailbox's delivery order: (1-based position,
+    count), counting messages not past their ttl; (0, count) when it is not there."""
+    now = inbox.now_utc()
+    waiting = [m for m in inbox.read_box(ctx.fleet.repo, name, NEW) if not inbox.is_due(m, now)]
+    ids = [m.id for m in waiting]
+    return (ids.index(ident) + 1 if ident in ids else 0), len(ids)
+
+
+def mirror_entry(ctx: Ctx, repo: str, entry: Dict) -> None:
+    """Append ``entry`` to another fleet's log too (design 20.8); a failure is a warning."""
+    try:
+        crossfleet.mirror_entry(repo, entry)
+    except OSError as exc:
+        ctx.warn("cannot log in the other fleet at %s: %s" % (repo, exc))
 
 
 # -- send -----------------------------------------------------------------------------------
@@ -437,6 +522,7 @@ class Target:
     herdr: Optional[str]         # what `agent prompt` gets: a name or a pane id
     problem: Optional[str] = None
     kind: str = "seat"           # seat | contact | agent | owner
+    other: Optional[str] = None  # a live agent of another fleet: that fleet's repository (design 20.8)
 
 
 def message_text(words: Sequence[str], text_file: Optional[str], all_seats: bool = False) -> Tuple[List[str], str]:
@@ -459,20 +545,28 @@ def message_text(words: Sequence[str], text_file: Optional[str], all_seats: bool
     return targets, text
 
 
-def resolve_sender(ctx: Ctx, as_name: Optional[str]) -> str:
-    """``--as``, else the named agent in the caller's pane, else ``owner``. Outside herdr
-    nothing is asked: the caller is ``owner``."""
+def caller_record(ctx: Ctx, as_name: Optional[str]) -> Tuple[str, Dict]:
+    """(``--as``, else the named agent in the caller's pane, else ``owner``; the agent
+    record ``agent get`` answered, or {}). Outside herdr nothing is asked."""
     if as_name:
         if not NAME_RE.match(as_name):
             raise UsageError("--as %r must match [a-z][a-z0-9_-]{0,31}" % as_name)
-        return as_name
+        return as_name, {}
     pane = ctx.invocation.pane_id if ctx.inside_herdr() else None
-    name = ctx.herdr.pane_agent(pane).get("name") if pane else None
-    return str(name) if name else OWNER
+    record = ctx.herdr.pane_agent(pane) if pane else {}
+    name = record.get("name")
+    return (str(name) if name else OWNER), record
+
+
+def resolve_sender(ctx: Ctx, as_name: Optional[str]) -> str:
+    """``--as``, else the named agent in the caller's pane, else ``owner``. Outside herdr
+    nothing is asked: the caller is ``owner``."""
+    return caller_record(ctx, as_name)[0]
 
 
 def resolve_targets(ctx: Ctx, names: Sequence[str], agents: Sequence[Dict]) -> List[Target]:
-    """Seats, contacts, ``owner`` and live agent names; unknown names are a usage error."""
+    """Seats, contacts, ``owner`` and live agent names; unknown names are a usage error.
+    A live agent that is neither seat nor contact may belong to another fleet (20.8)."""
     fleet = ctx.fleet
     live = {str(a["name"]): a for a in agents if a.get("name")}
     targets, unknown = [], []
@@ -487,7 +581,7 @@ def resolve_targets(ctx: Ctx, names: Sequence[str], agents: Sequence[Dict]) -> L
         elif name == OWNER:
             targets.append(Target(name, None, None, "owner"))
         elif name in live:
-            targets.append(Target(name, name, None, "agent"))
+            targets.append(Target(name, name, None, "agent", crossfleet.other_fleet(live[name], fleet.repo)))
         else:
             unknown.append(name)
     if unknown:
@@ -495,12 +589,26 @@ def resolve_targets(ctx: Ctx, names: Sequence[str], agents: Sequence[Dict]) -> L
     return targets
 
 
+def queued_by_for(mode: str, fyi: bool, when_ready: bool) -> str:
+    """Design 20.8: how a message waits if it waits, from how it was sent (invariant 18).
+    ``--queue`` and ``--when-ready`` wait for idle or done; an FYI rides along (unless
+    ``--now``); any other send the seat could not take goes at the first opportunity."""
+    if mode == "queue":
+        return "queue"
+    if mode == "now":
+        return "refusal"
+    if fyi:
+        return "fyi"
+    return "queue" if when_ready else "refusal"
+
+
 def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_name: Optional[str] = None,
             when_ready_ms: Optional[int] = None, all_seats: bool = False, fyi: bool = False,
             queue: bool = False, now: bool = False, reply_to: Optional[str] = None,
-            ttl: Optional[str] = None) -> int:
-    """Design 18.3. One line per target. Exit 0 when every message was sent or queued,
-    1 on a failed write, a herdr failure, an unconfirmed prompt or a ``--now`` refusal."""
+            ttl: Optional[str] = None, urgent: bool = False) -> int:
+    """Design 18.3 and 20.3. One line per target, then the inbox hint. Exit 0 when every
+    message was sent or queued, 1 on a failed write, a herdr failure, an unconfirmed
+    prompt or a ``--now`` refusal."""
     if queue and now:
         raise UsageError("--queue and --now cannot be combined")
     names, text = message_text(words, text_file, all_seats)
@@ -527,119 +635,205 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
     answers = inbox.resolve(repo, reply_to).id if reply_to else None
     fyi = fyi or is_fyi(text)
     mode = "queue" if queue else "now" if now else "default"
+    queued_by = queued_by_for(mode, fyi, bool(when_ready_ms))
     taken = inbox.taken_shorts(repo)
+    observed: Dict[str, str] = {}
     codes = []
     for target in targets:
         stamp = inbox.now_utc()
         message = Message(id=inbox.new_id(stamp, taken), sender=sender, to=target.name, time=inbox.iso_local(stamp),
                           body=text, fyi=fyi, reply_to=answers,
-                          ttl=inbox.iso_local(stamp + lifetime) if lifetime else None, file=text_file)
-        line, code = _send_one(ctx, target, message, mode, when_ready_ms,
-                               os.path.abspath(text_file) if text_file else None)
-        ctx.say(line)
+                          ttl=inbox.iso_local(stamp + lifetime) if lifetime else None, file=text_file,
+                          queued_by=queued_by, priority=1 if urgent else None)
+        lines, code = _send_one(ctx, target, message, mode, when_ready_ms,
+                                os.path.abspath(text_file) if text_file else None, observed)
+        for line in lines:
+            ctx.say(line)
         codes.append(code)
+    if agents:
+        seen.observe_agents(ctx, agents, observed)
+    hint = inbox_hint(ctx, sender, bool(as_name))
+    if hint:
+        ctx.say(hint)
     if EXIT_FAIL in codes:
         return EXIT_FAIL
     return EXIT_PARTIAL if EXIT_PARTIAL in codes else EXIT_OK
 
 
+def inbox_hint(ctx: Ctx, name: str, explicit: bool) -> Optional[str]:
+    """Design 20.8: ``you have N waiting; herdr-fleet inbox --read`` when the sender's own
+    mailbox holds messages (``--as NAME`` names the mailbox in the command)."""
+    if not NAME_RE.match(name) or not inbox.has_queued(ctx.fleet.repo, name):
+        return None
+    now = inbox.now_utc()
+    count = len([m for m in inbox.read_box(ctx.fleet.repo, name, NEW) if not inbox.is_due(m, now)])
+    if not count:
+        return None
+    return "you have %d waiting; herdr-fleet inbox%s --read" % (count, " --as %s" % name if explicit else "")
+
+
+Lines = Tuple[List[str], int]
+
+
 def _send_one(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_ms: Optional[int],
-              log_file: Optional[str]) -> Tuple[str, int]:
+              log_file: Optional[str], observed: Dict[str, str]) -> Lines:
     """Write the file, then apply the row of design 18.3 for the target's state."""
     if not ctx.dry_run:
         try:
             inbox.write(ctx.fleet.repo, message)
         except OSError as exc:
-            return "failed %s: cannot write the message file (%s); nothing sent" % (target.name, exc), EXIT_FAIL
+            return ["failed %s: cannot write the message file (%s); nothing sent" % (target.name, exc)], EXIT_FAIL
     try:
         if target.kind == "owner":
             return _send_owner(ctx, message, mode, log_file)
-        return _route(ctx, target, message, mode, when_ready_ms, log_file)
+        return _route(ctx, target, message, mode, when_ready_ms, log_file, observed)
     except (HerdrError, OSError) as exc:  # before any prompt: the message stays queued
         if ctx.dry_run:
             raise
-        record(ctx, send_entry(message, "queued", log_file))
-        return "failed %s: %s; #%s left queued" % (target.name, exc, message.short), EXIT_FAIL
+        _log_send(ctx, target, message, "queued", log_file)
+        return ["failed %s: %s; #%s left queued" % (target.name, exc, message.short)], EXIT_FAIL
+
+
+def _log_send(ctx: Ctx, target: Target, message: Message, delivery: str, log_file: Optional[str]) -> None:
+    """Log the ``send`` entry here and, for a live agent of another fleet, there too with
+    the body in that fleet's ``inbox/<target>/cur/`` (design 20.8)."""
+    entry = send_entry(message, delivery, log_file)
+    record(ctx, entry)
+    if target.other:
+        mirror_entry(ctx, target.other, entry)
+        try:
+            crossfleet.mirror_body(target.other, message)
+        except (OSError, UsageError) as exc:
+            ctx.warn("cannot store the message in the other fleet at %s: %s" % (target.other, exc))
 
 
 def _route(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_ms: Optional[int],
-           log_file: Optional[str]) -> Tuple[str, int]:
+           log_file: Optional[str], observed: Dict[str, str]) -> Lines:
     state = target.problem or agent_state(ctx, target.herdr)
     reachable = not target.problem and state != "absent"
+    observed[target.name] = state if reachable else "absent"
     if mode == "queue":
-        return _queued(ctx, target, message, state, log_file)
+        return _queued(ctx, target, message, state, log_file, flush=reachable and state in SEND_ALLOWED)
     if when_ready_ms and reachable and state not in SETTLED:
         if ctx.dry_run:
-            return ("would wait up to %d ms for %s (%s), then deliver or queue" % (when_ready_ms, target.name, state),
-                    EXIT_OK)
+            return ["would wait up to %d ms for %s (%s), then deliver or queue" % (when_ready_ms, target.name, state)
+                    ], EXIT_OK
         try:
             ctx.herdr.agent_wait(str(target.herdr), ("idle", "done"), when_ready_ms)
         except HerdrError:
             pass
         state = agent_state(ctx, str(target.herdr))
+        observed[target.name] = state
         if state not in SETTLED:  # not ready: --now refuses, anything else queues
             label = "%s after --when-ready %d ms" % (state, when_ready_ms)
             if mode == "now":
                 return _refused(ctx, target, message, label, log_file)
-            return _queued(ctx, target, message, label, log_file)
+            return _queued(ctx, target, message, label, log_file, flush=state == "working")
+    # Older messages queued on refusal go now whenever the seat can take text (20.8), so an
+    # FYI to an idle seat then rides along instead of waiting.
+    refusals = reachable and state in SEND_ALLOWED and refusal_waiting(ctx, target.name, exclude=(message.id,))
     if state in SETTLED:
-        deliver = mode == "now" or not message.fyi  # an FYI never wakes an idle seat
+        deliver = mode == "now" or not message.fyi or refusals
     else:
         deliver = state == "working"
     if not deliver:
         if mode == "now":
             return _refused(ctx, target, message, state, log_file)
         return _queued(ctx, target, message, state, log_file)
-    allow = ("working",) if message.fyi and mode != "now" else SEND_ALLOWED
+    allow = ("working",) if message.fyi and mode != "now" and not refusals else SEND_ALLOWED
     if ctx.dry_run:
-        return _would_send(ctx, target, message, state), EXIT_OK
+        return [_would_send(ctx, target, message, state)], EXIT_OK
     with inbox.locked(ctx.fleet.repo, target.name):
-        drop = prompt_mailbox(ctx, target.name, str(target.herdr), allow, "send", own=message)
+        drop = prompt_mailbox(ctx, target.name, str(target.herdr), allow, "send", own=message, mirror=target.other)
     extra = len(drop.carried or drop.waiting) - 1
     queued_note = " with %d queued" % extra if extra > 0 else ""
     shown = drop.state or state
     if drop.status == "sent":
-        record(ctx, send_entry(message, "sent", log_file))
-        return "sent to %s (%s)%s, %s" % (target.name, shown, queued_note, size_label(drop.size)), EXIT_OK
+        _log_send(ctx, target, message, "sent", log_file)
+        urgent = "; " + URGENT_TYPED if message.urgent and shown == "working" else ""
+        return ["sent to %s (%s)%s, %s%s" % (target.name, place(shown), queued_note, size_label(drop.size), urgent)
+                ], EXIT_OK
     if drop.status == "unconfirmed":  # stalled or timed out: may have arrived; logged, never resent
-        record(ctx, send_entry(message, "unconfirmed", log_file))
-        return ("unconfirmed %s%s, %s: %s; logged as unconfirmed" % (target.name, queued_note,
-                                                                    size_label(drop.size), drop.detail), EXIT_FAIL)
+        _log_send(ctx, target, message, "unconfirmed", log_file)
+        return ["unconfirmed %s%s, %s: %s; logged as unconfirmed" % (target.name, queued_note,
+                                                                    size_label(drop.size), drop.detail)], EXIT_FAIL
     if drop.status == "pointer":
-        record(ctx, send_entry(message, "queued", log_file))
-        return ("queued for %s (%s) #%s; prompted a pointer instead: %s" % (
-            target.name, shown, message.short, inbox.pointer_text(drop.waiting, drop.size, prefix=False)), EXIT_OK)
+        line, code = _queued_line(ctx, target, message, shown, log_file)
+        return [line + "; prompted a pointer instead: %s"
+                % inbox.pointer_text(drop.waiting, drop.size, prefix=False)], code
     if drop.status == "refused":
         if mode == "now":
             return _refused(ctx, target, message, drop.state, log_file)
         return _queued(ctx, target, message, drop.state, log_file)
-    record(ctx, send_entry(message, "queued", log_file))
-    return "failed %s: %s; #%s left queued" % (target.name, drop.detail, message.short), EXIT_FAIL
+    _log_send(ctx, target, message, "queued", log_file)
+    return ["failed %s: %s; #%s left queued" % (target.name, drop.detail, message.short)], EXIT_FAIL
 
 
 def _label(state: Optional[str], message: Message) -> str:
-    parts = ([state] if state else []) + (["fyi"] if message.fyi else [])
+    parts = ([state] if state else []) + ([FYI_PLACE] if message.fyi else [])
     return " (%s)" % ", ".join(parts) if parts else ""
 
 
+def _queued_line(ctx: Ctx, target: Target, message: Message, state: Optional[str],
+                 log_file: Optional[str]) -> Tuple[str, int]:
+    """Log the message as queued: ``queued in herdr-fleet for X (absent) #id, position 2 of 2``."""
+    _log_send(ctx, target, message, "queued", log_file)
+    where, count = position(ctx, target.name, message.id)
+    spot = ", position %d of %d" % (where, count) if where else ""
+    return "queued in herdr-fleet for %s%s #%s%s" % (target.name, _label(state, message), message.short, spot), EXIT_OK
+
+
 def _queued(ctx: Ctx, target: Target, message: Message, state: Optional[str],
-            log_file: Optional[str]) -> Tuple[str, int]:
+            log_file: Optional[str], flush: bool = False) -> Lines:
+    """The message waits in its mailbox. With ``flush`` (the seat is idle, done or working)
+    older messages queued on refusal go now (design 20.8), the new one staying queued."""
     if ctx.dry_run:
-        return "would queue for %s%s" % (target.name, _label(state, message)), EXIT_OK
-    record(ctx, send_entry(message, "queued", log_file))
-    return "queued for %s%s #%s" % (target.name, _label(state, message), message.short), EXIT_OK
+        line = "would queue in herdr-fleet for %s%s" % (target.name, _label(state, message))
+        if flush and refusal_waiting(ctx, target.name, exclude=(message.id,)):
+            line += "; would deliver what was queued on refusal"
+        return [line], EXIT_OK
+    lines: List[str] = []
+    code = EXIT_OK
+    if flush and refusal_waiting(ctx, target.name, exclude=(message.id,)):
+        with inbox.locked(ctx.fleet.repo, target.name):
+            drop = prompt_mailbox(ctx, target.name, str(target.herdr), SEND_ALLOWED, "send",
+                                  exclude=(message.id,), mirror=target.other)
+        flushed, code = refusal_line(target.name, drop, state or "")
+        lines.append(flushed)
+    line, _ = _queued_line(ctx, target, message, state, log_file)
+    return [line] + lines, code
 
 
-def _refused(ctx: Ctx, target: Target, message: Message, state: str, log_file: Optional[str]) -> Tuple[str, int]:
+def refusal_line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
+    """What delivering a mailbox for its refusal messages did, as ``deliver`` says it."""
+    shown = drop.state or state
+    count = len(drop.carried)
+    if drop.status == "sent":
+        return "delivered %d queued on refusal to %s (%s), %s" % (count, name, place(shown),
+                                                                 size_label(drop.size)), EXIT_OK
+    if drop.status == "unconfirmed":
+        return ("unconfirmed %s: %s; %d logged as delivered (unconfirmed), not resent"
+                % (name, drop.detail, count), EXIT_FAIL)
+    if drop.status == "pointer":
+        return "prompted %s (%s) with a pointer: %s" % (
+            name, place(shown), inbox.pointer_text(drop.waiting, drop.size, prefix=False)), EXIT_OK
+    if drop.status == "refused":
+        return "%s: %s, %d left queued" % (name, drop.state, len(drop.waiting)), EXIT_OK
+    if drop.status == "empty":
+        return "nothing queued for %s" % name, EXIT_OK
+    return "failed %s: %s; %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_FAIL
+
+
+def _refused(ctx: Ctx, target: Target, message: Message, state: str, log_file: Optional[str]) -> Lines:
     """``--now`` to a seat that cannot take it: nothing sent, the file goes to ``cur/``."""
     if ctx.dry_run:
-        return "would refuse %s (%s): nothing sent" % (target.name, state), EXIT_OK
+        return ["would refuse %s (%s): nothing sent" % (target.name, state)], EXIT_OK
     try:
         inbox.move(ctx.fleet.repo, message, CUR)
     except OSError as exc:
         ctx.warn("cannot move %s to cur/: %s" % (message.path, exc))
-    record(ctx, send_entry(message, "refused", log_file))
-    return "refused %s (%s): nothing sent" % (target.name, state), EXIT_FAIL
+    _log_send(ctx, target, message, "refused", log_file)
+    return ["refused %s (%s): nothing sent" % (target.name, state)], EXIT_FAIL
 
 
 def _would_send(ctx: Ctx, target: Target, message: Message, state: str) -> str:
@@ -647,13 +841,13 @@ def _would_send(ctx: Ctx, target: Target, message: Message, state: str) -> str:
     queued = [m for m in inbox.read_box(ctx.fleet.repo, target.name, NEW) if not inbox.is_due(m, now)]
     _, size, pointer = compose_prompt(queued, message)
     if pointer:
-        return "would queue for %s (%s) and prompt a pointer: %s" % (
+        return "would queue in herdr-fleet for %s (%s) and prompt a pointer: %s" % (
             target.name, state, inbox.pointer_text(queued + [message], size, prefix=False))
-    return "would send to %s (%s)%s, %s" % (target.name, state, " with %d queued" % len(queued) if queued else "",
-                                           size_label(size))
+    return "would send to %s (%s)%s, %s" % (target.name, place(state),
+                                           " with %d queued" % len(queued) if queued else "", size_label(size))
 
 
-def _send_owner(ctx: Ctx, message: Message, mode: str, log_file: Optional[str]) -> Tuple[str, int]:
+def _send_owner(ctx: Ctx, message: Message, mode: str, log_file: Optional[str]) -> Lines:
     """``owner``: queued, then the mailbox is shown as a notification (unless --queue, or
     outside herdr, where it stays queued for ``inbox --as owner``)."""
     target = Target(OWNER, None, None, "owner")
@@ -662,15 +856,17 @@ def _send_owner(ctx: Ctx, message: Message, mode: str, log_file: Optional[str]) 
     if not ctx.inside_herdr():
         return _queued(ctx, target, message, "not in herdr", log_file)
     if ctx.dry_run:
-        return "would notify owner, %s" % size_label(inbox.size_of(inbox.direct_text(message))), EXIT_OK
+        return ["would notify owner, %s" % size_label(inbox.size_of(inbox.direct_text(message)))], EXIT_OK
     record(ctx, send_entry(message, "queued", log_file))
     with inbox.locked(ctx.fleet.repo, OWNER):
         drop = notify_owner(ctx)
     if drop.status == "sent":
         extra = len(drop.carried) - 1
-        return "sent to owner (notification)%s, %s" % (" with %d queued" % extra if extra > 0 else "",
-                                                       size_label(drop.size)), EXIT_OK
-    return "queued for owner (%s) #%s" % (drop.detail or "not shown", message.short), EXIT_OK
+        return ["sent to owner (notification)%s, %s" % (" with %d queued" % extra if extra > 0 else "",
+                                                        size_label(drop.size))], EXIT_OK
+    where, count = position(ctx, OWNER, message.id)
+    spot = ", position %d of %d" % (where, count) if where else ""
+    return ["queued in herdr-fleet for owner (%s) #%s%s" % (drop.detail or "not shown", message.short, spot)], EXIT_OK
 
 
 def agent_state(ctx: Ctx, target: Optional[str]) -> str:
@@ -688,13 +884,20 @@ def agent_state(ctx: Ctx, target: Optional[str]) -> str:
 # -- ack ------------------------------------------------------------------------------------------
 
 
-def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Optional[str] = None) -> int:
-    """Design 17.1 and 18.8: settle what the caller owes by hand. A name settles the
-    caller's debt to that sender; an id (``#3f2a9c``) settles that one message. Appends
-    one ``ack`` entry per debt; sends nothing to anyone. The caller is found as for
-    ``send``; herdr is asked only when ``--as`` does not say."""
-    if not names and not all_owed:
-        raise UsageError("ack needs a name, a message id or --all")
+def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Optional[str] = None,
+           older_than: Optional[str] = None) -> int:
+    """Design 17.1, 18.8 and 20.2: settle what the caller owes by hand. A name settles the
+    caller's debt to that sender; an id (``#3f2a9c``) settles that one message;
+    ``--older-than`` settles every message owed that was delivered longer ago, one by one
+    (names and ids restrict it). Appends one ``ack`` entry per debt and sends nothing to
+    anyone; ``--dry-run`` writes nothing. The caller is found as for ``send``; herdr is
+    asked only when ``--as`` does not say."""
+    try:
+        limit = inbox.parse_ttl(older_than, "--older-than") if older_than else None
+    except ValueError as exc:
+        raise UsageError(str(exc))
+    if not names and not all_owed and limit is None:
+        raise UsageError("ack needs a name, a message id, --all or --older-than")
     if not as_name:
         preflight(ctx)
     caller = resolve_sender(ctx, as_name)
@@ -716,6 +919,8 @@ def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Opti
             unknown.append(name)
     if unknown:
         raise UsageError("not a seat, contact, message id or name in the message log: %s" % ", ".join(unknown))
+    if limit is not None:
+        return _ack_older(ctx, entries, caller, items, limit, str(older_than))
     debts = [o for o in owed(entries) if o["to"] == caller]
     by_sender = {o["from"]: o for o in debts}
     open_ids = {item["id"]: item for _, item in unsettled(entries) if item["to"] == caller and item.get("id")}
@@ -726,22 +931,70 @@ def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Opti
     if not todo:
         ctx.say("nothing owed by %s" % caller)
         return EXIT_OK
+    verb = "would ack" if ctx.dry_run else "acked"
     for kind, value in todo:
         if kind == "id":
             debt = open_ids.get(value)
             if debt is None:
                 ctx.say("nothing owed for #%s" % inbox.short_of(value))
                 continue
-            append(repo, ack_entry(caller, debt["from"], ident=value))
-            ctx.say("acked #%s from %s since %s (%s)" % (inbox.short_of(value), debt["from"],
-                                                         since_label(debt["since"]), debt["first_line"]))
+            if not ctx.dry_run:
+                append(repo, ack_entry(caller, debt["from"], ident=value))
+            ctx.say("%s #%s from %s since %s (%s)" % (verb, inbox.short_of(value), debt["from"],
+                                                      since_label(debt["since"]), debt["first_line"]))
             continue
         debt = by_sender.get(value)
         if debt is None:
             ctx.say("nothing owed to %s" % value)
             continue
-        append(repo, ack_entry(caller, value))
-        ctx.say("acked %s since %s (%s)" % (value, since_label(debt["since"]), debt["first_line"]))
+        if not ctx.dry_run:
+            append(repo, ack_entry(caller, value))
+        ctx.say("%s %s since %s (%s)" % (verb, value, since_label(debt["since"]), debt["first_line"]))
+    return EXIT_OK
+
+
+def _ack_older(ctx: Ctx, entries: Sequence[Dict], caller: str, items: Sequence[Tuple[str, str]],
+               limit: datetime.timedelta, spelled: str) -> int:
+    """``ack --older-than``: every unsettled request to the caller delivered more than
+    ``limit`` ago, restricted to the named senders and ids when any are given. Each is
+    acknowledged by id; a message without one (sent before 0.6.0) by its sender's name,
+    and only when no newer message from that sender is still owed, since a plain ``ack``
+    settles everything before it."""
+    now = inbox.now_utc()
+    senders = {value for kind, value in items if kind == "name"}
+    ids = {value for kind, value in items if kind == "id"}
+    mine = [item for _, item in unsettled(entries) if item["to"] == caller]
+    if items:
+        mine = [i for i in mine if i["from"] in senders or i.get("id") in ids]
+
+    def age(item: Dict) -> float:
+        when = inbox.parse_time(item["since"])
+        return (now - when).total_seconds() if when is not None else -1.0
+
+    old = [i for i in mine if age(i) > limit.total_seconds()]
+    if not old:
+        ctx.say("nothing owed by %s older than %s" % (caller, spelled))
+        return EXIT_OK
+    verb = "would ack" if ctx.dry_run else "acked"
+    named_done: Set[str] = set()
+    for item in old:
+        label = "since %s, %s ago (%s)" % (since_label(item["since"]), inbox.age_label(age(item)), item["first_line"])
+        if item.get("id"):
+            if not ctx.dry_run:
+                append(ctx.fleet.repo, ack_entry(caller, item["from"], ident=item["id"]))
+            ctx.say("%s #%s from %s %s" % (verb, inbox.short_of(item["id"]), item["from"], label))
+            continue
+        sender = item["from"]
+        if sender in named_done:
+            continue
+        if any(i["from"] == sender and age(i) <= limit.total_seconds() for i in mine):
+            ctx.say("skipped a message from %s %s: it has no id, and ack %s would also settle newer ones"
+                    % (sender, label, sender))
+            continue
+        named_done.add(sender)
+        if not ctx.dry_run:
+            append(ctx.fleet.repo, ack_entry(caller, sender))
+        ctx.say("%s %s %s" % (verb, sender, label))
     return EXIT_OK
 
 

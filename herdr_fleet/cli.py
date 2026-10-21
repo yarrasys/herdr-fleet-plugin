@@ -107,9 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
                        description="Write TEXT (or --file PATH) to each TARGET's inbox (.herdr/inbox), then: an "
                                    "idle or done seat gets it now, with anything queued for it in front, as one "
                                    "`herdr agent prompt` prefixed [from <sender> #id]; a working seat gets it typed "
-                                   "ahead; a blocked, unknown or absent seat keeps it queued for its next kickoff, "
-                                   "`deliver` or `inbox --read`. An FYI never wakes an idle seat. owner gets a "
-                                   "herdr notification. Here --file is the text; pick a fleet file with --fleet PATH.")
+                                   "ahead into its own input; a blocked, unknown or absent seat keeps it queued in "
+                                   "herdr-fleet, and it goes at the first opportunity (typed ahead once the seat "
+                                   "works, delivered once it is idle: the watcher, `deliver`, a later send or the "
+                                   "next kickoff). An FYI never wakes an idle seat. owner gets a herdr "
+                                   "notification. Here --file is the text; pick a fleet file with --fleet PATH.")
     p.add_argument("words", nargs="*", metavar="TARGET... [TEXT]",
                    help="seat, contact, owner or live agent names, then the text; with --file every item is a "
                         "target, and with --all a single item is the text. Options may go anywhere.")
@@ -122,22 +124,30 @@ def build_parser() -> argparse.ArgumentParser:
                    help='a report that awaits no reply and never wakes an idle seat (text starting with "FYI:" '
                         'or "FYI " counts too)')
     mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--queue", action="store_true", help="only queue it; deliver nothing now")
+    mode.add_argument("--queue", action="store_true",
+                      help="only queue it; it waits for the seat to be idle or done (use it to control order)")
     mode.add_argument("--now", action="store_true",
                       help="deliver now or refuse (blocked, unknown, absent: exit 1), never queue")
     p.add_argument("--reply-to", dest="reply_to", metavar="ID",
                    help="the message this answers (#3f2a9c or a full id); settles exactly that one")
     p.add_argument("--ttl", metavar="DURATION",
                    help="drop it undelivered if still queued after DURATION (30m, 2h, 1d)")
+    p.add_argument("--urgent", action="store_true",
+                   help="put it ahead of everything already queued for the seat in herdr-fleet (it cannot "
+                        "reorder what a working seat already has in its own input)")
     p.add_argument("--dry-run", action="store_true", help="say what would happen and write or send nothing")
 
-    p = sub.add_parser("deliver", parents=[fleet], help="hand queued messages to seats that are idle or done",
+    p = sub.add_parser("deliver", parents=[fleet], help="hand queued messages to seats that can take them",
                        description="For each NAME (default: every seat and contact with a queued message that "
                                    "is not FYI, and owner): an idle or done seat gets its queue as one prompt; a "
-                                   "working, blocked, unknown or absent one keeps it. owner gets a notification.")
+                                   "working one gets it typed ahead when it holds a message queued on refusal "
+                                   "(or with --now); otherwise, and for blocked, unknown or absent seats, it stays "
+                                   "queued. owner gets a notification.")
     p.add_argument("names", nargs="*", metavar="NAME", help="mailboxes to deliver (default: see above)")
     p.add_argument("--fyi", dest="fyi_too", action="store_true",
                    help="without names, also deliver queues that hold only FYIs")
+    p.add_argument("--now", action="store_true",
+                   help="with names: type the whole queue ahead to a seat that is working")
     p.add_argument("--dry-run", action="store_true", help="say what would be delivered and send nothing")
 
     p = sub.add_parser("inbox", parents=[fleet], help="your own queued messages: list, read, count, history",
@@ -153,6 +163,9 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--hook", choices=("stop", "prompt"),
                         help="run as a Claude Code hook (installed by `hooks install`): reads the hook JSON on "
                              "stdin, prints hookSpecificOutput or nothing, always exits 0")
+    p.add_argument("--full", action="store_true",
+                   help="with --read or --history: print long messages in full (default: up to inbox_print_max "
+                        "bytes, then the first lines and the file's path)")
     p.add_argument("--json", action="store_true", help="print JSON")
 
     p = sub.add_parser("watch", parents=[fleet], help="deliver queued messages as seats become idle (foreground)",
@@ -183,7 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
                                    "stops awaiting. Writes .herdr/messages.jsonl only; nothing is sent.")
     p.add_argument("names", nargs="*", metavar="NAME", help="who you owe a reply (seat, contact, owner, ...)")
     p.add_argument("--all", dest="all_owed", action="store_true", help="every message you currently owe")
+    p.add_argument("--older-than", dest="older_than", metavar="DURATION",
+                   help="every message you owe that was delivered more than DURATION ago (30m, 2h, 1d); "
+                        "names and ids restrict it")
     p.add_argument("--as", dest="as_name", metavar="NAME", help="who you are (default: your pane's agent, or owner)")
+    p.add_argument("--dry-run", action="store_true", help="list what would be acknowledged and write nothing")
 
     p = sub.add_parser("log", parents=[common], help="show the message log (.herdr/messages.jsonl)")
     p.add_argument("--seat", metavar="NAME", help="only messages from or to NAME")
@@ -314,13 +331,14 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     if command == "worktrees":  # git only; no herdr command
         return op_worktrees(ctx, args.seat, args.json)
     if command == "ack":  # appends to the message log; herdr only to learn who you are (without --as)
-        return op_ack(ctx, args.names, args.all_owed, args.as_name)
+        return op_ack(ctx, args.names, args.all_owed, args.as_name, args.older_than)
     if command == "inbox":  # your mailbox; herdr only to learn who you are (without --as)
         if args.hook:  # a Claude Code hook: silent on every error (design 18.7)
-            if args.as_name or args.json:
-                raise UsageError("--hook takes neither --as nor --json: the seat is the hook's own pane")
+            if args.as_name or args.json or args.full:
+                raise UsageError("--hook takes neither --as, --json nor --full: the seat is the hook's own pane")
             return op_inbox_hook(ctx, args.hook, stdin)
-        return op_inbox(ctx, args.as_name, args.read, args.count, args.history, args.redeliver, args.json)
+        return op_inbox(ctx, args.as_name, args.read, args.count, args.history, args.redeliver, args.json,
+                        args.full)
     if command == "hooks":  # edits .claude/settings.local.json only; no herdr command
         return op_hooks(ctx, args.remove)
     if command == "watch":  # the caller's pane plays no part: no caller lookup
@@ -330,7 +348,7 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         return op_watch(ctx, args.debounce, args.once)
     if command == "send":  # preflight inside, since a message to owner may queue outside herdr
         return op_send(ctx, args.words, args.message_file, args.as_name, args.when_ready, args.all_seats, args.fyi,
-                       args.queue, args.now, args.reply_to, args.ttl)
+                       args.queue, args.now, args.reply_to, args.ttl, args.urgent)
     if command == "doctor":
         return _doctor(ctx)
     preflight(ctx)
@@ -357,7 +375,7 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     if command == "tile":
         return _finish(ctx, op_tile(ctx))
     if command == "deliver":
-        return op_deliver(ctx, args.names, args.fyi_too)
+        return op_deliver(ctx, args.names, args.fyi_too, args.now)
     raise UsageError("unknown command %s" % command)
 
 

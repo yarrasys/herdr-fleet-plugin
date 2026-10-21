@@ -106,12 +106,14 @@ def strip_comments(template: str) -> str:
 
 
 ROSTER_SENTENCE = ("Message a seat with `herdr-fleet send <name> \"...\"`: status reports go with `--fyi`; "
-                   "a message that asks for something does not.")
+                   "a message that asks for something does not. When you have acted on a request, reply with "
+                   "`--fyi` or `ack #id`, since the plugin cannot see what you did. To control order, queue "
+                   "(`--queue`) and let the watcher or the next kickoff deliver in one batch.")
 
 
 def roster_table(rows: Sequence[Sequence[str]]) -> str:
     """``{roster}``: a Markdown table of seats, rows of (name, kind, pane id, cwd), then
-    the roster sentence on how to message them (design 17.1)."""
+    the roster sentence on how to message them (design 17.1, 20.2, 20.3)."""
     lines = ["| name | kind | pane | cwd |", "| --- | --- | --- | --- |"]
     for row in rows:
         lines.append("| " + " | ".join(str(cell) for cell in row) + " |")

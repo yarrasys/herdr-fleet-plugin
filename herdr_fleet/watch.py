@@ -17,6 +17,15 @@ server, one thread per mailbox with something to deliver.
   with ``agent get``, and if still idle or done deliver the batch through
   ``messages.prompt_mailbox`` exactly as ``deliver`` does (logged via
   ``watch``), then ``herdr notification show``. Otherwise go back to waiting.
+- A mailbox holding a message queued on refusal (design 20.8) is waited on with
+  ``--until working`` too: when the seat works (also straight out of
+  ``blocked``) the whole mailbox is typed ahead at once through ``safe_prompt``
+  with ``working`` allowed, no debounce; idle or done delivers as above. The
+  choice reads ``queued_by`` only, never the agent kind or the text.
+- Every state it sees is recorded for ``status`` (``seen``, design 20.5). With
+  ``[watch] notify_blocked_after`` it also reads ``agent list`` every 30 s and
+  sends one notification per blocked episode once a seat has been blocked that
+  long; it never touches the seat.
 - ``owner`` is notified at once (``messages.notify_owner``).
 - ``--once`` delivers what can be delivered now, like ``deliver``, and exits:
   no waiters, no lock.
@@ -38,14 +47,15 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Set
 
-from herdr_fleet import inbox
+from herdr_fleet import inbox, seen
 from herdr_fleet.context import EXIT_OK, Ctx, OpError, UsageError
 from herdr_fleet.herdr import HerdrError, describe
 from herdr_fleet.inbox import NEW, Message
 from herdr_fleet.mailroom import candidates, deliver_one, expire_all, herdr_target
-from herdr_fleet.messages import OWNER, Drop, agent_state, notify_owner, prompt_mailbox, since_label
-from herdr_fleet.seats import SETTLED
-from herdr_fleet.state import ensure_gitignore, now_iso
+from herdr_fleet.messages import (OWNER, Drop, agent_state, has_refusal, notify_owner, prompt_mailbox,
+                                  since_label)
+from herdr_fleet.seats import SEND_ALLOWED, SETTLED
+from herdr_fleet.state import ensure_gitignore, mark_notified, now_iso
 
 LOCK_NAME = "watch.lock"
 WAIT_TIMEOUT_MS = 30000     # one `agent wait`; a timeout only lets the loop look again
@@ -55,6 +65,8 @@ RETRY_AFTER_S = 60.0        # after a failed delivery or wait, leave that mailbo
 ABSENT_RECHECK_S = WAIT_TIMEOUT_MS / 1000.0  # an absent agent is looked for as often as a wait times out
 DELIVERY_GRACE_S = 60.0     # on exit, how long a delivery in flight may take to finish
 EXIT_GRACE_S = 1.0          # on exit, how long waiters blocked in `agent wait` are given
+BLOCKED_SCAN_S = 30.0       # with notify_blocked_after: how often `agent list` is read for blocked seats
+AHEAD = ("working",) + SETTLED  # what a mailbox holding a refusal message is waited for (design 20.8)
 
 
 # -- the lock -----------------------------------------------------------------------------------
@@ -270,6 +282,10 @@ class Watcher:
         self.retry_at: Dict[str, float] = {}
         self.owner_failed: Set[str] = set()
         self.trouble = ""                    # the last error of the loop itself, said once
+        self.blocked_after = ctx.fleet.notify_blocked_after  # seconds, or None (design 20.5)
+        self.next_scan = 0.0
+        self.blocked_since: Dict[str, str] = {}  # seat -> since, when no state file records it
+        self.notified: Set[str] = set()          # "seat since" of blocked episodes already notified
 
     # -- output ------------------------------------------------------------------------------
 
@@ -333,6 +349,9 @@ class Watcher:
         waiting = inbox.queued(self.repo)
         if waiting.get(OWNER):
             self.owner(waiting[OWNER])
+        if self.blocked_after and self.ctx.clock.monotonic() >= self.next_scan and not self.stopping:
+            self.next_scan = self.ctx.clock.monotonic() + BLOCKED_SCAN_S
+            self.observe_list(self.ctx.herdr.agent_list())
         wanted = candidates(self.ctx, waiting)
         for table in (self.announced, self.noted, self.pointed):
             for name in [n for n in table if n not in wanted]:
@@ -343,6 +362,7 @@ class Watcher:
         if not due or self.stopping:
             return
         agents = self.ctx.herdr.agent_list()
+        self.observe_list(agents)
         for name in due:
             count = len(waiting[name])
             target, problem = herdr_target(self.ctx, name, agents)
@@ -384,8 +404,9 @@ class Watcher:
 
     def _wait_and_deliver(self, name: str, target: str) -> None:
         while not self.stopping:
+            ahead = self.refusal(name)  # design 20.8: such a mailbox goes at the first opportunity
             try:
-                agent = self.ctx.herdr.agent_wait(target, SETTLED, WAIT_TIMEOUT_MS)
+                agent = self.ctx.herdr.agent_wait(target, AHEAD if ahead else SETTLED, WAIT_TIMEOUT_MS)
             except HerdrError as exc:
                 if exc.code == "timeout" or "not_found" in exc.code:
                     return  # the next pass looks again (and notes an absent agent)
@@ -394,16 +415,27 @@ class Watcher:
                 return
             if self.stopping:
                 return
-            count = len(self.queued(name))
-            if not count:
+            status = str(agent.get("agent_status") or "idle")
+            self.observe(name, status, agent)
+            waiting = self.queued(name)
+            if not waiting:
                 return  # read or delivered by someone else meanwhile
-            self.say("%s %s; delivering %d" % (name, agent.get("agent_status") or "idle", count))
+            if status == "working":  # awaited only for a refusal message: typed ahead now, no debounce
+                if has_refusal(waiting):
+                    self.type_ahead(name, target, waiting)
+                    return
+                continue  # delivered or read meanwhile: what is left waits for idle or done
+            self.say("%s %s; delivering %d" % (name, status, len(waiting)))
             self.ctx.clock.sleep(self.debounce_s)
             if self.stopping:
                 return
             state = agent_state(self.ctx, target)
+            self.observe(name, state)
             if state in SETTLED:
                 self.deliver(name, target)
+                return
+            if state == "working" and self.refusal(name):
+                self.type_ahead(name, target, self.queued(name))
                 return
             self.say("%s %s; still waiting" % (name, state))
             if state == "absent":
@@ -413,19 +445,81 @@ class Watcher:
         now = inbox.now_utc()
         return [m for m in inbox.read_box(self.repo, name, NEW) if not inbox.is_due(m, now)]
 
-    def deliver(self, name: str, target: str) -> None:
+    def refusal(self, name: str) -> bool:
+        return has_refusal(self.queued(name))
+
+    def type_ahead(self, name: str, target: str, waiting: List[Message]) -> None:
+        """Design 20.8: the seat is working and its mailbox holds a message queued on
+        refusal: type the whole mailbox ahead (``safe_prompt`` with working allowed)."""
+        count = len([m for m in waiting if m.mode == "refusal"])
+        what = "queued on refusal" if count == len(waiting) else "%d queued on refusal" % count
+        self.say("%s working; typing ahead %d (%s)" % (name, len(waiting), what))
+        self.deliver(name, target, SEND_ALLOWED)
+
+    def deliver(self, name: str, target: str, allow=SETTLED) -> None:
         with self.cond:
             if self.stopping:
                 return
             self.delivering += 1
         try:
             with inbox.locked(self.repo, name):
-                drop = prompt_mailbox(self.ctx, name, target, SETTLED, "watch")
+                drop = prompt_mailbox(self.ctx, name, target, allow, "watch")
             self.report(name, drop)
         finally:
             with self.cond:
                 self.delivering -= 1
                 self.cond.notify_all()
+
+    # -- states seen (design 20.5) ------------------------------------------------------------
+
+    def observe_list(self, agents: List[Dict]) -> None:
+        """Every seat's state from an ``agent list`` answer (a seat not listed is absent)."""
+        live = {str(a["name"]): a for a in agents if a.get("name")}
+        for seat in self.ctx.fleet.seats:
+            agent = live.get(seat.name)
+            self.observe(seat.name, str(agent.get("agent_status") or "unknown") if agent else "absent", agent)
+
+    def observe(self, name: str, status: str, agent: Optional[Dict] = None) -> None:
+        """Record a seat's state, and with ``notify_blocked_after`` tell the owner once per
+        blocked episode that has lasted that long. Read-only towards the seat."""
+        if self.ctx.fleet.seat(name) is None:
+            return
+        try:
+            record = seen.observe(self.ctx, {name: status}).get(name)
+        except Exception as exc:  # noqa: BLE001 - a state file problem never stops a delivery
+            self.say("cannot record %s's state: %s" % (name, exc))
+            record = None
+        if not self.blocked_after:
+            return
+        with self.cond:
+            if status != "blocked":
+                self.blocked_since.pop(name, None)
+                return
+            recorded = record if (record or {}).get("state") == "blocked" else None
+            since = (recorded or {}).get("since") or self.blocked_since.setdefault(
+                name, inbox.iso_local(inbox.now_utc()))
+            age = seen.age_of({"state": "blocked", "since": since}, "blocked")
+            episode = "%s %s" % (name, since)
+            if (age is None or age < self.blocked_after or episode in self.notified
+                    or (recorded or {}).get("notified")):
+                return
+            self.notified.add(episode)
+        if recorded:
+            try:
+                mark_notified(self.repo, name, since)
+            except OSError:
+                pass
+        pane = str((agent or {}).get("pane_id") or "") or self.pane_of(name)
+        title = "%s blocked %s (%s): answer its prompt" % (name, inbox.age_label(age), pane or "pane unknown")
+        self.say(title)
+        self.ctx.notify(title, "blocked since %s; herdr-fleet sends it nothing while it is blocked"
+                        % since_label(since), "request")
+
+    def pane_of(self, name: str) -> str:
+        try:
+            return str(self.ctx.herdr.agent_get(name).get("pane_id") or "")
+        except HerdrError:
+            return ""
 
     def report(self, name: str, drop: Drop) -> None:
         count = len(drop.carried)
