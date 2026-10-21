@@ -17,7 +17,8 @@ import shlex
 import sys
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from herdr_fleet import MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, hooks, inbox, messages, permissions
+from herdr_fleet import (MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, hooks, inbox, messages,
+                         permissions, presence)
 from herdr_fleet import seen, watchpane
 from herdr_fleet.context import Ctx
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
@@ -313,6 +314,7 @@ def run_doctor(ctx: Ctx) -> List[Check]:
         level = "warn" if row["flag"] else "ok"
         add((level, "integration %s" % row["kind"], row["line"] or row["status"]))
     _check_quit(ctx, fleet, add)
+    _check_presence(ctx, fleet, add)
     _check_permissions(ctx, fleet, add)
     if any(seat.kind == "claude" for seat in fleet.seats):  # design 18.7: the hooks are Claude Code's
         add(hooks.doctor_check(fleet.repo))
@@ -444,6 +446,18 @@ def _check_permissions(ctx: Ctx, fleet: Fleet, add) -> None:
             add(("warn", label, permissions.suggestion(missing)))
         else:
             add(("ok", label, "herdr agent prompt/get/wait/read and herdr-fleet are allowed"))
+
+
+def _check_presence(ctx: Ctx, fleet: Fleet, add) -> None:
+    """Design 21.2 item 3: the presence guard cannot check a kind with no prompt glyph, so
+    its seats are not held while the owner types. The kind is the live agent's, else the
+    fleet file's. Informational only."""
+    try:
+        live = {str(a["name"]): str(a.get("agent") or "") for a in ctx.herdr.agent_list() if a.get("name")}
+    except HerdrError:
+        live = {}
+    for kind in presence.unchecked_kinds([live.get(seat.name) or seat.kind for seat in fleet.seats]):
+        add(("info", "presence", "no prompt glyph for kind %s; its seats are not held while the owner types" % kind))
 
 
 def _check_quit(ctx: Ctx, fleet: Fleet, add) -> None:

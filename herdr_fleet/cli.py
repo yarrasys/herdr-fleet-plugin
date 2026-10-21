@@ -106,12 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("send", parents=[fleet], help="message seats, contacts, owner or live agents",
                        description="Write TEXT (or --file PATH) to each TARGET's inbox (.herdr/inbox), then: an "
                                    "idle or done seat gets it now, with anything queued for it in front, as one "
-                                   "`herdr agent prompt` prefixed [from <sender> #id]; a working seat gets it typed "
-                                   "ahead into its own input; a blocked, unknown or absent seat keeps it queued in "
-                                   "herdr-fleet, and it goes at the first opportunity (typed ahead once the seat "
-                                   "works, delivered once it is idle: the watcher, `deliver`, a later send or the "
-                                   "next kickoff). An FYI never wakes an idle seat. owner gets a herdr "
-                                   "notification. Here --file is the text; pick a fleet file with --fleet PATH.")
+                                   "`herdr agent prompt` prefixed [from <sender> #id]; a working, blocked, unknown "
+                                   "or absent seat keeps it queued in herdr-fleet until it is next idle or done "
+                                   "(the watcher, `deliver`, a later send or the next kickoff). Only --now types "
+                                   "into a working seat's own input. Nothing is sent while the owner is typing in "
+                                   "the seat's pane: it stays queued (--now: refused). An FYI never wakes an idle "
+                                   "seat. owner gets a herdr notification. Here --file is the text; pick a fleet "
+                                   "file with --fleet PATH.")
     p.add_argument("words", nargs="*", metavar="TARGET... [TEXT]",
                    help="seat, contact, owner or live agent names, then the text; with --file every item is a "
                         "target, and with --all a single item is the text. Options may go anywhere.")
@@ -127,7 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--queue", action="store_true",
                       help="only queue it; it waits for the seat to be idle or done (use it to control order)")
     mode.add_argument("--now", action="store_true",
-                      help="deliver now or refuse (blocked, unknown, absent: exit 1), never queue")
+                      help="deliver now, typed ahead into a working seat's own input, or refuse (blocked, "
+                           "unknown, absent, owner typing there: exit 1); never queue")
     p.add_argument("--reply-to", dest="reply_to", metavar="ID",
                    help="the message this answers (#3f2a9c or a full id); settles exactly that one")
     p.add_argument("--ttl", metavar="DURATION",
@@ -140,8 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("deliver", parents=[fleet], help="hand queued messages to seats that can take them",
                        description="For each NAME (default: every seat and contact with a queued message that "
                                    "is not FYI, and owner): an idle or done seat gets its queue as one prompt; a "
-                                   "working one gets it typed ahead when it holds a message queued on refusal "
-                                   "(or with --now); otherwise, and for blocked, unknown or absent seats, it stays "
+                                   "working one only with NAME --now (typed ahead); otherwise, for blocked, unknown "
+                                   "or absent seats and while the owner is typing in the seat's pane, it stays "
                                    "queued. owner gets a notification.")
     p.add_argument("names", nargs="*", metavar="NAME", help="mailboxes to deliver (default: see above)")
     p.add_argument("--fyi", dest="fyi_too", action="store_true",

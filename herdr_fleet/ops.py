@@ -17,7 +17,7 @@ import os
 import shlex
 from typing import Callable, Dict, List, Optional, Sequence, TextIO
 
-from herdr_fleet import PLUGIN_ID, inbox, watchpane
+from herdr_fleet import PLUGIN_ID, inbox, presence, watchpane
 from herdr_fleet.bringup import (claim_seat, ensure_seat, follow_pane, label_for, label_of, require_caller_context,
                                 resolve_target, send_kickoffs, start_claimed, start_seat)
 from herdr_fleet.checks import drift_reasons, is_adopted
@@ -287,6 +287,10 @@ def _quit_live(ctx: Ctx, seat: Seat, agent: Dict, report: Report, then: str = ""
         report.add(seat.name, "refused", "no quit command for kind %s; %s" % (live_kind, QUIT_CONFIG_HINT), "partial")
         return None
     if ctx.dry_run:
+        hold = presence.would_hold(ctx.herdr, agent=agent)  # design 21.2: the guard only reads
+        if hold:
+            report.add(seat.name, "plan", "would hold: %s (the quit is refused while the owner types there)" % hold)
+            return None
         report.add(seat.name, "plan", "quit %s (%s, %s in %s) with herdr agent prompt %s %s%s"
                    % (seat.name, live_kind, agent.get("agent_status"), pane, seat.name,
                       shlex.quote(command), then))

@@ -182,8 +182,8 @@ class WhereItSits(LiveFleet):
     def test_the_three_places(self):
         code, out, _ = self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "now")
         self.assertRegex(out.strip(), r"^sent to fablyn-dev \(idle\), \d+ B$")
-        self.status_of("w2:p3", "working")
-        code, out, _ = self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-reviewer", "typed")
+        self.status_of("w2:p3", "working")  # design 21.1: typed into a working seat only with --now
+        code, out, _ = self.run_cli("send", "--now", "--as", "fablyn-orchestrator", "fablyn-reviewer", "typed")
         self.assertRegex(out.strip(), r"^sent to fablyn-reviewer \(%s\), \d+ B$" % WORKING)
         self.world["panes"]["w2:p2"]["agent"] = None
         self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "first")
@@ -210,9 +210,14 @@ class WhereItSits(LiveFleet):
 
     def test_urgent_to_a_working_seat_says_it_cannot_reorder(self):
         self.status_of("w2:p2", "working")
-        code, out, _ = self.run_cli("send", "--urgent", "fablyn-dev", "stop the deploy")
+        code, out, _ = self.run_cli("send", "--urgent", "fablyn-dev", "stop the deploy")  # design 21.1: queued
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^sent to fablyn-dev \(%s\), \d+ B; %s$" % (WORKING, re.escape(URGENT_TYPED)))
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 1 of 1$" % SHORT)
+        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        code, out, _ = self.run_cli("send", "--now", "--urgent", "fablyn-dev", "stop it now")
+        self.assertEqual(code, 0)
+        self.assertRegex(out.strip(), r"^sent to fablyn-dev \(%s\) with 1 queued, \d+ B; %s$"
+                         % (WORKING, re.escape(URGENT_TYPED)))
 
 
 # -- 20.4 inbox_print_max and --full --------------------------------------------------------------
@@ -398,7 +403,7 @@ class QueuedBy(LiveFleet):
 
 
 class DeliverDrains(LiveFleet):
-    def test_refusal_mailboxes_are_typed_ahead_to_working_seats_queue_ones_are_not(self):
+    def test_refusal_and_queue_mailboxes_wait_alike_for_a_working_seat(self):  # design 21.1 withdrew the drain
         self.status_of("w2:p2", "blocked")
         self.status_of("w2:p3", "blocked")
         self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "needs you")
@@ -407,11 +412,14 @@ class DeliverDrains(LiveFleet):
         self.status_of("w2:p3", "working")
         code, out, _ = self.run_cli("deliver")
         self.assertEqual(code, 0, out)
-        lines = out.splitlines()
-        self.assertRegex(lines[0], r"^delivered 1 to fablyn-dev \(%s\), \d+ B$" % WORKING)
-        self.assertEqual(lines[1], "fablyn-reviewer: working, 1 left queued")
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
-        self.assertEqual(self.prompts_to("fablyn-reviewer"), [])
+        self.assertEqual(out.splitlines(), ["fablyn-dev: working, 1 left queued",
+                                            "fablyn-reviewer: working, 1 left queued"])
+        self.assertEqual(self.argvs("agent", "prompt"), [])
+        self.status_of("w2:p2", "idle")
+        self.status_of("w2:p3", "done")
+        code, out, _ = self.run_cli("deliver")
+        self.assertRegex(out.splitlines()[0], r"^delivered 1 to fablyn-dev \(idle\), \d+ B$")
+        self.assertRegex(out.splitlines()[1], r"^delivered 1 to fablyn-reviewer \(done\), \d+ B$")
 
     def test_now_types_a_whole_mailbox_ahead_by_hand(self):
         self.status_of("w2:p3", "working")
@@ -429,19 +437,24 @@ class DeliverDrains(LiveFleet):
 
 
 class FlushDrains(LiveFleet):
-    def test_a_later_send_types_refusal_messages_ahead_even_when_it_queues_its_own(self):
+    def test_a_later_queue_send_takes_refusal_messages_along_only_to_an_idle_seat(self):  # 20.9 as 21.1 amends it
         self.status_of("w2:p2", "blocked")
         self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "first")
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "--as", "fablyn-orchestrator", "--queue", "fablyn-dev", "second")
         self.assertEqual(code, 0, out)
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 2 of 2$" % SHORT)
+        self.assertEqual(self.prompts_to("fablyn-dev"), [])  # a working seat: nothing flushed
+        self.status_of("w2:p2", "idle")
+        code, out, _ = self.run_cli("send", "--as", "fablyn-orchestrator", "--queue", "fablyn-dev", "third")
+        self.assertEqual(code, 0, out)
         lines = out.splitlines()
-        self.assertRegex(lines[0], r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 1 of 1$" % SHORT)
-        self.assertRegex(lines[1], r"^delivered 1 queued on refusal to fablyn-dev \(%s\), \d+ B$" % WORKING)
-        (prompt,) = self.prompts_to("fablyn-dev")
-        self.assertIn("first", prompt)
-        self.assertNotIn("second", prompt)
-        self.assertEqual([m.body for m in inbox.read_box(self.repo, "fablyn-dev", NEW)], ["second"])
+        self.assertRegex(lines[0], r"^queued in herdr-fleet for fablyn-dev \(idle\) %s, position 1 of 1$" % SHORT)
+        self.assertRegex(lines[1], r"^delivered 2 queued on refusal to fablyn-dev \(idle\), \d+ B$")
+        (prompt,) = self.prompts_to("fablyn-dev")  # the refusal message takes its mailbox along (20.9)
+        self.assertLess(prompt.index("first"), prompt.index("second"))
+        self.assertNotIn("third", prompt)
+        self.assertEqual([m.body for m in inbox.read_box(self.repo, "fablyn-dev", NEW)], ["third"])
 
     def test_queue_messages_are_not_flushed(self):
         self.status_of("w2:p2", "blocked")
@@ -465,21 +478,17 @@ class WatcherDrains(WatchCase):
         self.status_of(pane, "blocked")
         self.run_cli("send", "--as", "fablyn-orchestrator", name, text)
 
-    def test_blocked_to_working_is_typed_ahead_at_once(self):
+    def test_blocked_to_working_is_not_typed_ahead(self):  # design 21.1: the --until working wait went
         self.queue_on_refusal("fablyn-dev", "w2:p2", "unblock then read")
-        self.behave(wait_results={"fablyn-dev": ["working"]})
-        before = self.clock.slept
-        code, out, err = self.watch(cycles=2)
+        self.behave(wait_results={"fablyn-dev": ["working", "idle"]})
+        code, out, err = self.watch(cycles=3)
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(events(out)[1:], ["waiting on fablyn-dev (1 queued)",
-                                           "fablyn-dev working; typing ahead 1 (queued on refusal)",
+        self.assertEqual(events(out)[1:], ["waiting on fablyn-dev (1 queued)", "fablyn-dev idle; delivering 1",
                                            "delivered 1 to fablyn-dev", "stopped"])
-        self.assertEqual(self.argvs("agent", "wait", "fablyn-dev"), [["agent", "wait", "fablyn-dev"] + AHEAD_WAIT])
-        (prompt,) = self.prompts_to("fablyn-dev")
-        self.assertIn("unblock then read", prompt)
+        self.assertEqual(self.argvs("agent", "wait", "fablyn-dev"), [["agent", "wait", "fablyn-dev"] + WAIT] * 2)
         (call,) = [c for c in self.calls() if c["argv"][:2] == ["agent", "prompt"]]
-        self.assertEqual(call["info"]["target_status"], "working")
-        self.assertEqual(self.clock.slept - before, 2 * 2.0)  # no debounce for a typed-ahead delivery
+        self.assertEqual(call["info"]["target_status"], "idle")
+        self.assertIn("unblock then read", call["argv"][3])
         self.assertEqual([e["via"] for e in log_entries(self.repo) if e["kind"] == "delivered"], ["watch"])
 
     def test_idle_or_done_still_delivers_after_the_debounce(self):
@@ -490,7 +499,7 @@ class WatcherDrains(WatchCase):
         self.assertIn("fablyn-dev done; delivering 1", events(out))
         self.assertEqual(self.clock.slept - before, 5.0 + 2.0)
 
-    def test_a_queue_mailbox_waits_for_idle_only_and_mixed_ones_go_whole(self):
+    def test_every_mailbox_waits_for_idle_or_done_only_and_mixed_ones_go_whole(self):
         self.status_of("w2:p3", "blocked")
         self.run_cli("send", "--queue", "fablyn-reviewer", "wait for idle")
         self.status_of("w2:p3", "working")
@@ -499,17 +508,19 @@ class WatcherDrains(WatchCase):
         self.assertEqual(self.argvs("agent", "wait", "fablyn-reviewer"), [["agent", "wait", "fablyn-reviewer"] + WAIT])
         self.assertEqual(self.prompts_to("fablyn-reviewer"), [])
         self.queue_on_refusal("fablyn-reviewer", "w2:p3", "go now")
-        self.behave(wait_results={"fablyn-reviewer": ["working"]})
-        code, out, _ = self.watch(cycles=1)
-        self.assertIn("fablyn-reviewer working; typing ahead 2 (1 queued on refusal)", events(out))
+        self.behave(wait_results={"fablyn-reviewer": ["working", "idle"]})
+        code, out, _ = self.watch(cycles=2)
+        self.assertIn("fablyn-reviewer idle; delivering 2", events(out))
+        self.assertNotIn(AHEAD_WAIT, [a[3:] for a in self.argvs("agent", "wait")])
         (prompt,) = self.prompts_to("fablyn-reviewer")
         self.assertLess(prompt.index("wait for idle"), prompt.index("go now"))  # order is never inverted
 
-    def test_once_types_refusal_mailboxes_ahead(self):
+    def test_once_leaves_a_working_seat_alone(self):  # design 21.1: watch --once follows deliver
         self.queue_on_refusal("fablyn-dev", "w2:p2", "x")
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("watch", "--once")
-        self.assertRegex(out.splitlines()[0], r"^delivered 1 to fablyn-dev \(%s\)" % WORKING)
+        self.assertEqual((code, out.splitlines()[0]), (0, "fablyn-dev: working, 1 left queued"))
+        self.assertEqual(self.prompts_to("fablyn-dev"), [])
 
 
 # -- 20.8: kickoffs settle debts ---------------------------------------------------------------------
@@ -656,14 +667,15 @@ class Harness(LiveFleet):
     def check(self, command, argv, info):
         return typed_ahead_allowed(command, argv, info)
 
-    def test_who_may_prompt_a_working_seat(self):
+    def test_who_may_prompt_a_working_seat(self):  # design 21.1: send --now and deliver NAME --now only
         prompt = ["agent", "prompt", "fablyn-dev", "[from x at 10:09 #abcdef]\nhi"]
-        self.assertTrue(self.check(["send", "fablyn-dev", "hi"], prompt, {}))
+        self.assertTrue(self.check(["send", "--now", "fablyn-dev", "hi"], prompt, {}))
+        self.assertFalse(self.check(["send", "fablyn-dev", "hi"], prompt, {}))
+        self.assertFalse(self.check(["send", "--queue", "fablyn-dev", "hi"], prompt, {}))
         self.assertTrue(self.check(["deliver", "fablyn-dev", "--now"], prompt, {}))
         self.assertFalse(self.check(["deliver"], prompt, {"target_name": "fablyn-dev"}))
-        self.assertTrue(self.check(["deliver"], prompt, {"target_name": "fablyn-dev", "refusal_boxes": ["fablyn-dev"]}))
-        self.assertTrue(self.check(["watch"], prompt, {"target_name": "w2:p9", "refusal_ids": ["abcdef"]}))
-        self.assertFalse(self.check(["watch"], prompt, {"refusal_boxes": ["fablyn-reviewer"]}))
+        self.assertFalse(self.check(["deliver"], prompt, {"target_name": "fablyn-dev", "refusal_boxes": ["fablyn-dev"]}))
+        self.assertFalse(self.check(["watch"], prompt, {"target_name": "w2:p9", "refusal_ids": ["abcdef"]}))
         self.assertFalse(self.check(["kickoff", "fablyn-dev"], prompt, {"refusal_boxes": ["fablyn-dev"]}))
         with open(self.log_path, "a") as handle:
             handle.write(json.dumps({"command": ["kickoff", "fablyn-dev"]}) + "\n")

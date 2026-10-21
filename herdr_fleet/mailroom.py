@@ -2,10 +2,10 @@
 
 - ``deliver`` hands queued messages to seats that can take them now: an idle or
   done seat gets its mailbox as one batch through ``seats.safe_prompt``; a
-  working seat gets it typed ahead only when the mailbox holds a message queued
-  on refusal (design 20.8) or with ``--now``; otherwise, and for blocked,
-  unknown or absent seats, the messages stay queued. ``owner`` gets a
-  notification.
+  working seat gets it typed ahead only with ``deliver NAME --now`` (design
+  21.1); otherwise, and for blocked, unknown or absent seats, the messages stay
+  queued, as they do while the owner is typing in the seat's pane (the presence
+  guard, 21.2). ``owner`` gets a notification.
 - ``inbox`` is the pull side: the caller's own mailbox, listed with positions,
   read (printed, long bodies cut at ``inbox_print_max`` unless ``--full``, and
   moved to ``cur/``), counted, or replayed (``--history``: ``cur/`` files and
@@ -34,19 +34,20 @@ from herdr_fleet import crossfleet, inbox, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, Ctx, UsageError, resolve_caller
 from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
-from herdr_fleet.messages import (OWNER, Drop, agent_state, caller_record, compose_prompt, delivered_entry,
-                                  expire_due, first_line, has_refusal, notify_owner, place, prompt_mailbox,
-                                  queued_in, read, record, settle, since_label)
+from herdr_fleet.messages import (HOLD, OWNER, Drop, agent_state, caller_record, compose_prompt, delivered_entry,
+                                  dry_hold, expire_due, first_line, notify_owner, place, prompt_mailbox, queued_in,
+                                  read, record, settle, since_label)
 from herdr_fleet.seats import SEND_ALLOWED, SETTLED
 
 # -- deliver ---------------------------------------------------------------------------------
 
 
 def op_deliver(ctx: Ctx, names: Sequence[str], fyi_too: bool = False, now: bool = False) -> int:
-    """Design 18.5 item 3 and 20.8. Without names: every seat and contact whose queue holds
-    a message that is not FYI (``--fyi``: any message), then ``owner`` if anything waits
-    for it. ``--now`` (names only) types a whole mailbox ahead to a working seat. Exit 0
-    unless a prompt failed or may not have arrived (1)."""
+    """Design 18.5 item 3, 20.8 and 21.1. Without names: every seat and contact whose queue
+    holds a message that is not FYI (``--fyi``: any message), then ``owner`` if anything
+    waits for it. ``--now`` (names only) types a whole mailbox ahead to a working seat,
+    the only way besides ``send --now`` that text reaches one. Exit 0 unless a prompt
+    failed or may not have arrived (1)."""
     if now and not names:
         raise UsageError("deliver --now needs the seats to type ahead to (deliver NAME... --now)")
     fleet, repo = ctx.fleet, ctx.fleet.repo
@@ -122,9 +123,9 @@ def deliver_one(ctx: Ctx, name: str, agents: Sequence[Dict], waiting: List[Messa
                 observed: Optional[Dict[str, str]] = None) -> Tuple[str, int, Optional[Drop]]:
     """Hand one mailbox over if its owner can take it now: (line, exit code, what the
     attempt did, or None when nothing was attempted). An idle or done seat gets it; a
-    working one only when the mailbox holds a message queued on refusal (design 20.8)
-    or with ``now`` (``deliver --now``): typed ahead. ``watch --once`` uses it with
-    ``via="watch"``."""
+    working one only with ``now`` (``deliver NAME --now``): typed ahead (design 21.1).
+    While the owner is typing in the seat's pane nothing moves (21.2). ``watch --once``
+    uses it with ``via="watch"``."""
     count = len(waiting)
     if not count:
         return "nothing queued for %s" % name, EXIT_OK, None
@@ -141,10 +142,13 @@ def deliver_one(ctx: Ctx, name: str, agents: Sequence[Dict], waiting: List[Messa
     state = problem or agent_state(ctx, target)
     if observed is not None:
         observed[name] = "absent" if problem else state
-    ahead = state == "working" and (now or has_refusal(waiting))
+    ahead = state == "working" and now
     if problem or (state not in SETTLED and not ahead):
         return "%s: %s, %d left queued" % (name, state, count), EXIT_OK, None
     if ctx.dry_run:
+        hold = dry_hold(ctx, target)  # design 21.2: the guard only reads
+        if hold:
+            return "%s: %s, %d left queued" % (name, HOLD % hold, count), EXIT_OK, None
         _, size, pointer = compose_prompt(waiting)
         if pointer:
             return "would prompt %s (%s) with a pointer: %s" % (
@@ -172,6 +176,8 @@ def _line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
         return "nothing queued for %s" % name, EXIT_OK
     if drop.status == "refused":
         return "%s: %s, %d left queued" % (name, drop.state, len(drop.waiting)), EXIT_OK
+    if drop.status == "typing":  # design 21.2: `X: owner typing in w1:p2, 3 left queued`
+        return "%s: %s, %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_OK
     return "failed %s: %s; %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_FAIL
 
 

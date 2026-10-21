@@ -9,9 +9,11 @@ again while any file in the fleet's inbox tree already uses it.
 
 A message file is ``key: value`` header lines, a blank line, then the body
 exactly as the sender wrote it. ``queued_by`` (design 20.8) says how it was sent
-and so how it waits: ``refusal`` (a plain send the seat could not take: delivered
-at the first opportunity, typed ahead to a working seat), ``queue`` (waits for idle
-or done) or ``fyi`` (rides along); a file without it counts as ``queue`` (``fyi``
+and so how it waits: ``refusal`` (a plain send the seat could not take),
+``queue`` (``--queue`` or a ``--when-ready`` leftover) or ``fyi`` (rides along);
+since design 21.1 ``refusal`` and ``queue`` messages both wait for the seat's
+next idle or done, and a ``refusal`` one also goes with a ``--queue`` or FYI
+send to an idle or done seat; a file without it counts as ``queue`` (``fyi``
 when it is an FYI). ``priority: 1`` (``send --urgent``, design 20.3) puts a
 message ahead of the rest of its mailbox. Files are written atomically (temp file in the
 same directory, then rename) and never modified; delivery is a rename from

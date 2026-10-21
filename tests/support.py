@@ -35,9 +35,10 @@ CALLER_PANE = "w1:p1"
 INBOX_CALLS = (["pane", "current"], ["agent", "get"])
 HOOK_CALLS = (["agent", "get"],)
 # Design 18.6: the watcher runs agent wait/get/list/prompt and notification show, plus the
-# local `herdr --version` of the common preconditions.
+# local `herdr --version` of the common preconditions; design 21.2: the presence guard's
+# pane get, workspace list and pane read.
 WATCH_CALLS = (["agent", "wait"], ["agent", "get"], ["agent", "list"], ["agent", "prompt"],
-               ["notification", "show"], ["--version"])
+               ["notification", "show"], ["--version"], ["pane", "get"], ["workspace", "list"], ["pane", "read"])
 # Design 19.3: only `up` (also from the popup menu) and `ui` open plugin panes; only `up` resizes.
 PLUGIN_PANE_COMMANDS = ("up", "ui", "menu")
 RESIZE_COMMANDS = ("up", "menu")
@@ -206,10 +207,10 @@ class FleetCase(unittest.TestCase):
 
     def assert_safety(self) -> None:
         """Design section 7 invariants, checked against the full call log. The exception
-        (design 16.1, 18.3, 20.8): a prompt issued by `send` may reach a working agent, and
-        so may one from `watch` or `deliver` that carries a message queued on refusal (the
-        fake records, at every prompt, which mailboxes and ids held one) or comes from
-        `deliver --now`; kickoffs reach idle or done seats only (invariant 11),
+        (design 21.1): a prompt from `send --now` or `deliver --now` may reach a working
+        agent, and nothing else may; no prompt ever reaches a pane that was then the
+        owner's with text on its prompt line or no prompt line on screen (invariant 19,
+        recorded by the fake as `owner_typing`); kickoffs reach idle or done seats only (invariant 11),
         `inbox` runs nothing but the caller lookup (`inbox --hook` only
         `agent get`), `watch` only its five commands and never an endless wait
         (invariants 12, 13), and `hooks` runs no herdr command at all. Design 19.3:
@@ -253,6 +254,8 @@ class FleetCase(unittest.TestCase):
             self.assertFalse(any(a in ("send-keys", "send-text") for a in argv[:2]), argv)
             self.assertNotEqual(argv[:2], ["pane", "run"], argv)
             if argv[:2] == ["agent", "prompt"]:
+                self.assertFalse(info.get("owner_typing"), "%s prompted the pane the owner is typing in: %s"
+                                 % (command[:1], argv))
                 allowed = ("idle", "done", None) + (("working",) if typed_ahead_allowed(command, argv, info) else ())
                 self.assertIn(info.get("target_status"), allowed,
                               "%s prompted an agent in state %s: %s" % (command[:1], info.get("target_status"), argv))
@@ -268,20 +271,11 @@ class FleetCase(unittest.TestCase):
                 self.assertTrue(info.get("created"), "closed a workspace herdr-fleet did not create")
 
 
-def typed_ahead_allowed(command: List[str], argv: List[str], info: Dict) -> bool:
-    """May this prompt reach a working agent? `send` always (design 16.1); `watch` and
-    `deliver` only for a mailbox holding a message queued on refusal at that moment
-    (the prompt names the seat, or carries one of those ids), and `deliver --now`
-    (design 20.8). Nothing else, kickoffs included."""
-    if command[:1] == ["send"]:
-        return True
-    if command[:1] == ["deliver"] and "--now" in command:
-        return True
-    if command[:1] in (["watch"], ["deliver"]):
-        boxes, ids = info.get("refusal_boxes") or [], info.get("refusal_ids") or []
-        text = argv[3] if len(argv) > 3 else ""
-        return info.get("target_name") in boxes or any("#" + ident in text for ident in ids)
-    return False
+def typed_ahead_allowed(command: List[str], argv: List[str], info: Dict) -> bool:  # noqa: ARG001
+    """May this prompt reach a working agent? Only from `send --now` and `deliver NAME
+    --now` (design 21.1). Not a plain `send`, the flush before it, `deliver`, `watch`
+    or a kickoff, whatever the mailbox holds."""
+    return command[:1] in (["send"], ["deliver"]) and "--now" in command
 
 
 ARGS = ["--model", "claude-opus-5-5"]

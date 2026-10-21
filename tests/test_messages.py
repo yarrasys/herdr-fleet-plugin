@@ -54,12 +54,18 @@ class Send(LiveFleet):
         with open(os.path.join(self.repo, ".herdr", ".gitignore")) as handle:
             self.assertEqual(handle.read().split(), ["fleet.state.json", "messages.jsonl", "inbox/", "watch.lock"])
 
-    def test_working_target_gets_it_queued(self):
+    def test_working_target_gets_it_queued(self):  # design 21.1: typed ahead only with --now
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "fablyn-dev", "when you are free")
         self.assertEqual(code, 0, out)
-        self.assertIn("sent to fablyn-dev (working: typed into its own input, read after its current turn)", out)
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)  # the safety hook allows it for send only
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) #[0-9a-f]{6}, "
+                                      r"position 1 of 1$")
+        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        code, out, _ = self.run_cli("send", "--now", "fablyn-dev", "now please")
+        self.assertEqual(code, 0, out)
+        self.assertIn("sent to fablyn-dev (working: typed into its own input, read after its current turn) "
+                      "with 1 queued", out)
+        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)  # the safety hook allows it for --now only
 
     def test_blocked_unknown_and_absent_are_queued_and_nothing_is_sent(self):  # design 18.3, third row
         self.status_of("w2:p2", "blocked")
@@ -115,6 +121,7 @@ class Send(LiveFleet):
         self.assertEqual([a[2] for a in self.argvs("agent", "prompt")], ["fablyn-orchestrator", "fablyn-reviewer"])
 
     def test_live_agent_names_and_unknown_names(self):
+        self.world["panes"]["w1:p1"]["agent"]["agent_status"] = "idle"
         code, _, _ = self.run_cli("send", "--as", "fablyn-dev", "caller", "you are a live agent, not a seat")
         self.assertEqual(code, 0)
         self.assertEqual(len(self.prompts_to("caller")), 1)
@@ -438,11 +445,16 @@ class Fyi(LiveFleet):
         self.assertEqual((item["kind"], item["delivery"]), ("send", "queued"))
         self.assertEqual(json.loads(self.run_cli("log", "--owed", "--json")[1]), [])
 
-    def test_fyi_to_a_working_seat_is_typed_ahead_as_written(self):
+    def test_fyi_to_a_working_seat_stays_queued_and_now_types_it_as_written(self):  # design 21.1
         self.status_of("w2:p1", "working")
         code, out, _ = self.run_cli("send", "--fyi", "--as", "fablyn-dev", "fablyn-orchestrator", "cleanup done")
         self.assertEqual(code, 0, out)
-        self.assertEqual(strip_ids(self.prompts_to("fablyn-orchestrator")), ["[from fablyn-dev] cleanup done"])
+        self.assertIn("queued in herdr-fleet for fablyn-orchestrator (working, fyi: ", out)
+        self.assertEqual(self.prompts_to("fablyn-orchestrator"), [])
+        self.run_cli("inbox", "--as", "fablyn-orchestrator", "--read")
+        code, out, _ = self.run_cli("send", "--fyi", "--now", "--as", "fablyn-dev", "fablyn-orchestrator", "pushed")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(strip_ids(self.prompts_to("fablyn-orchestrator")), ["[from fablyn-dev] pushed"])
 
     def test_prefix_marks_fyi_and_other_messages_carry_no_key(self):
         self.run_cli("send", "--as", "fablyn-dev", "fablyn-orchestrator", "FYI: holding until review")
@@ -473,8 +485,10 @@ class Ack(LiveFleet):
         super().setUp()
         self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Task 4: export button")
         self.run_cli("send", "--as", "owner", "fablyn-dev", "please check the deploy")
+        self.world["panes"]["w1:p1"]["agent"]["agent_status"] = "idle"  # a working caller would only queue (21.1)
         self.run_cli("send", "--as", "fablyn-orchestrator", "caller", "are you there?")
         self.run_cli("send", "--as", "fablyn-reviewer", "caller", "round 3 ready")
+        self.world["panes"]["w1:p1"]["agent"]["agent_status"] = "working"
         self.sent = len(self.argvs("agent", "prompt"))
 
     def owed_pairs(self):

@@ -17,11 +17,12 @@ server, one thread per mailbox with something to deliver.
   with ``agent get``, and if still idle or done deliver the batch through
   ``messages.prompt_mailbox`` exactly as ``deliver`` does (logged via
   ``watch``), then ``herdr notification show``. Otherwise go back to waiting.
-- A mailbox holding a message queued on refusal (design 20.8) is waited on with
-  ``--until working`` too: when the seat works (also straight out of
-  ``blocked``) the whole mailbox is typed ahead at once through ``safe_prompt``
-  with ``working`` allowed, no debounce; idle or done delivers as above. The
-  choice reads ``queued_by`` only, never the agent kind or the text.
+  Every mailbox is waited on for idle or done only, whatever its ``queued_by``:
+  nothing is typed into a working seat (design 21.1).
+- When the owner is typing in the seat's pane (the presence guard, design 21.2)
+  the delivery is held: one line, then the guard again every 3 s for as long as
+  it holds; once it passes, the state is read again and the batch delivered if
+  the seat is still idle or done, else the waiter goes back to waiting.
 - Every state it sees is recorded for ``status`` (``seen``, design 20.5). With
   ``[watch] notify_blocked_after`` it also reads ``agent list`` every 30 s and
   sends one notification per blocked episode once a seat has been blocked that
@@ -31,9 +32,11 @@ server, one thread per mailbox with something to deliver.
   no waiters, no lock.
 
 It runs only ``agent list``, ``agent wait``, ``agent get``, ``agent prompt``
-(through ``seats.safe_prompt``) and ``notification show`` (invariant 12): it
-never prompts a blocked or unknown seat, never answers a dialog, never
-redelivers an unconfirmed message, and never starts, restarts or quits anything.
+(through ``seats.safe_prompt``), ``notification show`` and the presence guard's
+read-only ``pane get``, ``workspace list`` and ``pane read`` (invariants 12 and
+19): it never prompts a blocked, unknown or working seat, never answers a
+dialog, never redelivers an unconfirmed message, and never starts, restarts or
+quits anything.
 """
 
 from __future__ import annotations
@@ -47,14 +50,13 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Set
 
-from herdr_fleet import inbox, seen
+from herdr_fleet import inbox, presence, seen
 from herdr_fleet.context import EXIT_OK, Ctx, OpError, UsageError
 from herdr_fleet.herdr import HerdrError, describe
 from herdr_fleet.inbox import NEW, Message
 from herdr_fleet.mailroom import candidates, deliver_one, expire_all, herdr_target
-from herdr_fleet.messages import (OWNER, Drop, agent_state, has_refusal, notify_owner, prompt_mailbox,
-                                  since_label)
-from herdr_fleet.seats import SEND_ALLOWED, SETTLED
+from herdr_fleet.messages import OWNER, Drop, agent_state, notify_owner, prompt_mailbox, since_label
+from herdr_fleet.seats import SETTLED
 from herdr_fleet.state import ensure_gitignore, mark_notified, now_iso
 
 LOCK_NAME = "watch.lock"
@@ -66,7 +68,7 @@ ABSENT_RECHECK_S = WAIT_TIMEOUT_MS / 1000.0  # an absent agent is looked for as 
 DELIVERY_GRACE_S = 60.0     # on exit, how long a delivery in flight may take to finish
 EXIT_GRACE_S = 1.0          # on exit, how long waiters blocked in `agent wait` are given
 BLOCKED_SCAN_S = 30.0       # with notify_blocked_after: how often `agent list` is read for blocked seats
-AHEAD = ("working",) + SETTLED  # what a mailbox holding a refusal message is waited for (design 20.8)
+HOLD_RECHECK_S = 3.0        # design 21.2: while the owner types in a seat's pane, look again this often
 
 
 # -- the lock -----------------------------------------------------------------------------------
@@ -404,9 +406,8 @@ class Watcher:
 
     def _wait_and_deliver(self, name: str, target: str) -> None:
         while not self.stopping:
-            ahead = self.refusal(name)  # design 20.8: such a mailbox goes at the first opportunity
-            try:
-                agent = self.ctx.herdr.agent_wait(target, AHEAD if ahead else SETTLED, WAIT_TIMEOUT_MS)
+            try:  # idle or done only: nothing is typed into a working seat (design 21.1)
+                agent = self.ctx.herdr.agent_wait(target, SETTLED, WAIT_TIMEOUT_MS)
             except HerdrError as exc:
                 if exc.code == "timeout" or "not_found" in exc.code:
                     return  # the next pass looks again (and notes an absent agent)
@@ -420,51 +421,62 @@ class Watcher:
             waiting = self.queued(name)
             if not waiting:
                 return  # read or delivered by someone else meanwhile
-            if status == "working":  # awaited only for a refusal message: typed ahead now, no debounce
-                if has_refusal(waiting):
-                    self.type_ahead(name, target, waiting)
-                    return
-                continue  # delivered or read meanwhile: what is left waits for idle or done
             self.say("%s %s; delivering %d" % (name, status, len(waiting)))
             self.ctx.clock.sleep(self.debounce_s)
             if self.stopping:
                 return
             state = agent_state(self.ctx, target)
             self.observe(name, state)
-            if state in SETTLED:
-                self.deliver(name, target)
+            if state not in SETTLED:  # working, blocked or unknown: wait again
+                self.say("%s %s; still waiting" % (name, state))
+                if state == "absent":
+                    return
+                continue
+            drop = self.deliver(name, target)
+            if drop is None or drop.status != "typing" or not self.hold(name, target, drop):
                 return
-            if state == "working" and self.refusal(name):
-                self.type_ahead(name, target, self.queued(name))
-                return
-            self.say("%s %s; still waiting" % (name, state))
-            if state == "absent":
-                return
+
+    def hold(self, name: str, target: str, drop: Drop) -> bool:
+        """Design 21.2: the owner is typing in the seat's pane, so nothing was sent. Say so
+        once, then run the guard every HOLD_RECHECK_S (``pane get`` first) for as long as it
+        holds, with no cap. When it passes, read the state again: still idle or done
+        delivers; anything else goes back to waiting. True when the waiter should wait
+        for idle or done again."""
+        self.say("%s %s; %s, holding %d" % (name, drop.state or "idle", drop.detail, len(drop.waiting)))
+        while not self.stopping:
+            self.ctx.clock.sleep(HOLD_RECHECK_S)
+            if self.stopping or not self.queued(name):  # stopped, or read or delivered meanwhile
+                return False
+            if presence.typing_at(self.ctx.herdr, drop.agent):
+                continue
+            state = agent_state(self.ctx, target)
+            self.observe(name, state)
+            if state == "absent":  # gone: the next pass notes it, its kickoff carries the queue
+                return False
+            if state not in SETTLED:
+                self.say("%s %s; waiting" % (name, state))
+                return True
+            again = self.deliver(name, target)
+            if again is None or again.status != "typing":
+                return False
+            drop = again  # typing again since the look: keep holding, without a second line
+        return False
 
     def queued(self, name: str) -> List[Message]:
         now = inbox.now_utc()
         return [m for m in inbox.read_box(self.repo, name, NEW) if not inbox.is_due(m, now)]
 
-    def refusal(self, name: str) -> bool:
-        return has_refusal(self.queued(name))
-
-    def type_ahead(self, name: str, target: str, waiting: List[Message]) -> None:
-        """Design 20.8: the seat is working and its mailbox holds a message queued on
-        refusal: type the whole mailbox ahead (``safe_prompt`` with working allowed)."""
-        count = len([m for m in waiting if m.mode == "refusal"])
-        what = "queued on refusal" if count == len(waiting) else "%d queued on refusal" % count
-        self.say("%s working; typing ahead %d (%s)" % (name, len(waiting), what))
-        self.deliver(name, target, SEND_ALLOWED)
-
-    def deliver(self, name: str, target: str, allow=SETTLED) -> None:
+    def deliver(self, name: str, target: str) -> Optional[Drop]:
+        """The batch to an idle or done seat, as ``deliver`` does; None once stopping."""
         with self.cond:
             if self.stopping:
-                return
+                return None
             self.delivering += 1
         try:
             with inbox.locked(self.repo, name):
-                drop = prompt_mailbox(self.ctx, name, target, allow, "watch")
+                drop = prompt_mailbox(self.ctx, name, target, SETTLED, "watch")
             self.report(name, drop)
+            return drop
         finally:
             with self.cond:
                 self.delivering -= 1
@@ -536,6 +548,8 @@ class Watcher:
                 name, inbox.pointer_text(drop.waiting, drop.size, prefix=False)))
         elif drop.status == "refused":
             self.say("%s %s; still waiting" % (name, drop.state))
+        elif drop.status == "typing":  # the hold says it (design 21.2)
+            return
         elif drop.status == "failed":
             self.retry_at[name] = self.ctx.clock.monotonic() + RETRY_AFTER_S
             self.say("failed %s: %s; %d left queued, trying again in %d s"

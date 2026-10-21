@@ -6,14 +6,18 @@
   agent and what argv it runs, for drift detection.
 - ``safe_prompt``: the only path by which text reaches an agent. It re-reads
   the agent immediately before sending and refuses anything not ``idle`` or
-  ``done`` (``send`` alone also allows ``working``; ``blocked`` and ``unknown``
-  never); ``agent_prompt_stalled`` and ``timeout`` are reported, never resent.
+  ``done`` (``send --now`` and ``deliver NAME --now`` alone also allow
+  ``working``, design 21.1; ``blocked`` and ``unknown`` never); then it runs the
+  presence guard (``presence.typing``, design 21.2) and sends nothing while the
+  owner is typing in the target pane; ``agent_prompt_stalled`` and ``timeout``
+  are reported, never resent.
 - ``start_in_pane``: shell check, ``agent start``, retry on ``agent_pane_busy``
   every 250 ms for up to 10 s; after ``agent_not_ready``, read ``agent get``
   for the rest of the 10 s (``idle``, ``done`` or ``working`` count as started,
   design 16.12) and only then report blocked. Nothing is sent meanwhile.
-- ``quit_agent``: the per-kind quit command through ``safe_prompt``, then poll
-  until the agent is gone and the shell is back, or give up without retrying.
+- ``quit_agent``: the per-kind quit command through ``safe_prompt`` (so the
+  presence guard runs first), then poll until the agent is gone and the shell is
+  back, or give up without retrying.
 """
 
 from __future__ import annotations
@@ -22,8 +26,9 @@ import os
 import shlex
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from herdr_fleet import presence
 from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import Herdr, HerdrError, describe
 
@@ -43,6 +48,19 @@ DEFAULT_QUIT: Dict[str, str] = {
     "copilot": "/exit",
     "pi": "/exit",
     "agy": "/exit",
+}
+
+# Design 21.2: the first non-blank character of each kind's prompt line, as `pane read`
+# prints it (Claude Code `❯`, older builds `>`; Codex `›`; Antigravity `>`), and the
+# placeholder text an empty prompt line shows. A kind with no entry is not held while
+# the owner types (doctor says so).
+PROMPT_GLYPHS: Dict[str, Tuple[str, ...]] = {
+    "claude": ("\u276f", ">"),
+    "codex": ("\u203a",),
+    "agy": (">",),
+}
+PROMPT_PLACEHOLDERS: Dict[str, Tuple[str, ...]] = {
+    "codex": ("Ask Codex to do anything",),
 }
 
 QUIT_CONFIG_HINT = ('set `quit = "..."` on the seat in .herdr/fleet.toml, or add the kind under '
@@ -147,13 +165,18 @@ class Outcome:
     agent: Dict = field(default_factory=dict)
 
 
-SEND_ALLOWED = SETTLED + ("working",)  # design 16.1: `send` may queue text for a working agent
+# Design 21.1: the `--now` allowance. Only `send --now` and `deliver NAME --now` pass it,
+# so text reaches a working seat from nothing else (invariant 2).
+SEND_ALLOWED = SETTLED + ("working",)
 
 
 def safe_prompt(herdr: Herdr, target: str, text: str, allow: Sequence[str] = SETTLED) -> Outcome:
     """Send text to an agent only if its state right now is in ``allow``
-    (invariants 1-3): idle or done for every command; ``send`` alone also
-    allows working (SEND_ALLOWED). Blocked and unknown are never allowed."""
+    (invariants 1-3): idle or done for every command; ``send --now`` and
+    ``deliver NAME --now`` alone also allow working (SEND_ALLOWED). Blocked and
+    unknown are never allowed. Then the presence guard (invariant 19): while the
+    owner is typing in the target pane, or its prompt line is not on screen,
+    nothing is sent (status ``typing``, detail ``owner typing in <pane>``)."""
     allow = tuple(s for s in allow if s not in ("blocked", "unknown"))
     try:
         agent = herdr.agent_get(target)
@@ -162,6 +185,12 @@ def safe_prompt(herdr: Herdr, target: str, text: str, allow: Sequence[str] = SET
     status = str(agent.get("agent_status") or "unknown")
     if status not in allow:
         return Outcome(False, status, "agent %s is %s; nothing sent" % (target, status), agent)
+    try:
+        held = presence.typing_at(herdr, agent)
+    except HerdrError as exc:  # cannot tell whether the owner is typing: send nothing
+        return Outcome(False, "error", "presence check: %s; nothing sent" % describe(exc), agent)
+    if held:
+        return Outcome(False, "typing", held, agent)
     try:
         herdr.agent_prompt(target, text)
     except HerdrError as exc:
@@ -225,10 +254,11 @@ def _await_ready(herdr: Herdr, clock: Clock, seat: Seat, pane: str, deadline: fl
 
 def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str,
                timeout_ms: int) -> Outcome:
-    """Quit one agent (design section 6). status: quit | refused | failed."""
+    """Quit one agent (design section 6). status: quit | refused | failed. A seat whose
+    pane the owner is typing in is refused like a blocked one (design 21.2)."""
     sent = safe_prompt(herdr, target, quit_cmd)
     if not sent.ok:
-        status = "refused" if sent.status in ("blocked", "unknown", "working") else "failed"
+        status = "refused" if sent.status in ("blocked", "unknown", "working", "typing") else "failed"
         return Outcome(False, status, sent.detail, sent.agent)
     deadline = clock.monotonic() + timeout_ms / 1000.0
     while True:

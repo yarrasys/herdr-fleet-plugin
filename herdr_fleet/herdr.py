@@ -227,6 +227,12 @@ class Herdr:
     def pane_list(self, workspace_id: str) -> List[Dict]:
         return list(self.run("pane", "list", "--workspace", workspace_id).get("panes") or [])
 
+    def pane_read(self, pane_id: str, lines: int) -> str:
+        """The last ``lines`` lines of a pane's screen (``pane read PANE --lines N``), which
+        herdr prints as plain text even in JSON mode. Only the presence guard reads them
+        (design 21.2, invariant 19): for the prompt line alone, never kept."""
+        return self.text("pane", "read", pane_id, "--lines", str(int(lines)))
+
     def process_info(self, pane_id: str) -> Dict:
         return dict(self.run("pane", "process-info", "--pane", pane_id).get("process_info") or {})
 

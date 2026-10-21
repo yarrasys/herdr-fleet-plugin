@@ -25,6 +25,8 @@ The suite takes a few seconds. Nothing in it talks to a real herdr: `HERDR_BIN_P
 - scripted `agent wait` results for the watcher (`wait_results`: per agent, a list of `idle`, `done`, `working`, `blocked`, `timeout` or `not_found`, consumed one per wait). A state that `--until` does not name times out, as live herdr would; `timeout` without `--timeout` answers `fake_wait_forever`, because live herdr would never return. `status_after_wait` changes the agent's state right after a wait answered, as when a seat starts working during the debounce. The log records each wait's `--until` and `--timeout`. In-process calls are serialised by a lock, and the program form takes a file lock, so the watcher's waiter threads can share one world.
 - the watcher strip of 0.8.0 (design 19): `plugin pane open --placement split --target-pane P --direction D` splits P 50/50 (live herdr 0.9.5 has no ratio option) into a pane marked `plugin` and `created`, in P's workspace and tab, with the `--env` values recorded; the `watch` entrypoint's pane runs `python3 …/bin/herdr-fleet watch`; the answer is the live `result.plugin_pane` (`entrypoint`, `pane`, `plugin_id`), and the pane is focused unless `--no-focus`. `pane layout` and `pane resize` answer the 0.9.5 shapes (`result.layout`: `area`, `panes` with `rect`, `splits` with `direction`, `ratio` and `rect`; `result.resize`: `changed`, `pane_id`, `focused_pane_id`, `layout`, `reason`) from `fake_herdr.geometry`, which replays the tab's recorded splits on a 200x50 cell area with herdr's rounding. `pane resize` follows herdr 0.9.5's source (`src/layout.rs`): the nearest split of the matching direction on the pane's named edge, else the opposite edge, gains the amount for `right` and `down` and loses it for `left` and `up`, clamped to 0.1-0.9; the amount is taken as `abs()` and capped at 0.5.
 
+- focus and screens (design 21.2): panes and workspaces answer `focused` (false unless a test calls `fake_herdr.focus(world, pane)`, which makes that pane the owner's: focused in its tab, its tab the workspace's `active_tab_id`, its workspace the only focused one; `fake_herdr.unfocus(world)` unfocuses every workspace). `pane read PANE --lines N` prints the last N lines of a scripted screen as plain text, as live herdr does even in JSON mode: by default a rule, the empty prompt line of the pane's agent kind (`❯`, `› Ask Codex to do anything`, `>`) and a status line; `fake_herdr.type_in(world, pane, text)` puts the owner's text on the prompt line, `fake_herdr.show_dialog(world, pane)` shows a permission dialog with no prompt line, and `fake_herdr.set_screen` scripts any text. At every `agent prompt` the log records `owner_typing`: whether the target pane was then the owner's with text on its prompt line or no prompt line on screen, judged with the fake's own glyph table, independently of `presence.py`;
+
 - at every `agent prompt` the log also records the target's name and, read from the fleet's `.herdr/inbox` (passed to the in-process runner by `tests/support.py`, or `FAKE_HERDR_INBOX` for the program), the mailboxes and short ids that held a message queued on refusal (`queued_by: refusal` in `new/`) at that moment (design 20.8). Nothing the fake answers changes: its response shapes stay those of herdr 0.9.5.
 
 Most tests call `herdr_fleet.cli.main` in-process with the fake as the runner and an instant clock, so 250 ms polls and 10 s or 20 s timeouts cost nothing. `tests/test_cli_subprocess.py` runs `bin/herdr-fleet` as a real process with the fake installed as an executable on `HERDR_BIN_PATH`, exactly as herdr would. `tests/test_manifest.py` checks `herdr-plugin.toml` and runs its commands the way herdr does: actions from the plugin root with an action's context JSON, pane entrypoints through `sh -c` from the repo directory that `ui` passes as `--cwd`.
@@ -40,8 +42,9 @@ Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry
 - every `agent start` targeted a pane at a bare shell prompt and never the caller's pane;
 - every `pane close` closed a pane herdr-fleet created and that hosted no agent; every `workspace close` closed a workspace herdr-fleet created;
 - an `inbox` command ran nothing but the caller lookup (`pane current`, `agent get`), and nothing at all with `--as` (design 18.5);
-- kickoffs prompted only idle or done agents (invariant 11); a working one may be reached by `send` (design 16.1), by `deliver --now`, and by `watch` or `deliver` only for a mailbox that held a message queued on refusal at that moment, which the fake recorded (the prompt names that seat or carries one of those ids; design 20.8, `support.typed_ahead_allowed`);
-- `watch` ran nothing but `agent wait`, `agent get`, `agent list`, `agent prompt`, `notification show` and the preflight's `herdr --version`, and every `agent wait` carried `--timeout` (invariants 12 and 13);
+- kickoffs prompted only idle or done agents (invariant 11); a working one may be reached only by `send --now` and `deliver NAME --now` (design 21.1, `support.typed_ahead_allowed`): not by a plain `send`, the flush before it, `deliver` or `watch`, whatever the mailbox holds;
+- no `agent prompt` reached a pane that was, at that call, the owner's pane with text on its prompt line or no prompt line on screen (`owner_typing` in the fake's log; invariant 19);
+- `watch` ran nothing but `agent wait`, `agent get`, `agent list`, `agent prompt`, `notification show`, the presence guard's `pane get`, `workspace list` and `pane read`, and the preflight's `herdr --version`, and every `agent wait` carried `--timeout` (invariants 12 and 13);
 - `inbox --hook` ran nothing but `agent get` (invariant 14), and `hooks` ran no herdr command at all;
 - `plugin pane open` came only from `up` (also through the popup menu) or `ui`, `pane resize` only from `up`, and a pane opened as a plugin pane was never prompted, renamed or started into (design 19.3).
 
@@ -101,7 +104,7 @@ Adopted seats, `--join` and `tile` (design section 15). The fake herdr supports 
   - no test sees a prompt, start, split, close or rename from `tile`.
 - `tests/test_manifest.py` checks the `tile` action entry verbatim.
 
-Messages (design section 16). The safety hook in `tests/support.py` stays strict for every command except one. `run_cli` writes a `{"command": argv}` marker into the call log, and a prompt to a `working` agent is accepted only when the marker says `send`. `blocked` and `unknown` are refused for every command, `send` included. A test proves the hook still fails for a prompt to a working agent from any other command.
+Messages (design section 16). The safety hook in `tests/support.py` stays strict for every command except one. `run_cli` writes a `{"command": argv}` marker into the call log, and a prompt to a `working` agent is accepted only when the marker says `send` (since 0.10.0 only `send --now` or `deliver NAME --now`; see Safety invariants). `blocked` and `unknown` are refused for every command, `send` included. A test proves the hook still fails for a prompt to a working agent from any other command.
 
 - `tests/test_messages.py`:
   - `send` to one seat: the exact prompt text with the `[from <sender>]` prefix, the sender found through `pane current` and `agent get`, the one-line output and the log entry;
@@ -214,6 +217,17 @@ Version 0.9.0 (design 20), `tests/test_section20.py` (38 tests). Wall time is mo
 - queue ages in `status` (`queued: fablyn-dev 2 (oldest 25m), owner 1`), the inbox hint with and without `--as`, the roster sentences, and `support.typed_ahead_allowed` (a kickoff to a working seat fails even with a refusal mailbox).
 
 The 479 tests of 0.8.0 pass, with their expected send, status and listing lines updated to the 0.9.0 wording (design 20.9).
+
+Version 0.10.0 (design 21), `tests/test_section21.py` (46 tests):
+
+- `presence.prompt_line` on the three real screen tails (Claude Code `❯` alone and with text, Codex's `› Ask Codex to do anything` placeholder, Antigravity `>`), the last glyph line winning, a dialog with no prompt line, and a kind with no glyph entry;
+- the guard table against the fake: a pane not focused (one `pane get`, nothing read), focused in an unfocused workspace or a background tab, focused and empty (delivered), focused and typing, focused with a dialog on screen, the Codex placeholder, Antigravity, an unknown kind passing and `doctor`'s `info presence` line;
+- every caller's `typing` line: `send` (queued, `idle, owner typing in …`, exit 0, `queued_by: refusal`), `send --now` (refused, file in `cur/`, `delivery: refused`, exit 1), `deliver`, `watch --once` and the flush before send (`X: owner typing in …, N left queued`), `restart`, `swap`, `down` and `kickoff` of a live seat (refused, exit 3), kickoffs after `agent start` passing, and the `--dry-run` lines (`would hold: owner typing in …`);
+- the watcher's hold with the fake clock: one `holding` line, the guard again every 3 s with `pane get` first, delivery once the owner clears the line or leaves the pane, and the seat going working during a hold (`X working; waiting`, back to waiting);
+- 21.1: the 18.3 `working` row for all four modes, no `--until working` wait anywhere, the flush before send only to an idle or done seat, `deliver` and `watch --once` leaving a working seat's refusal mailbox queued, `deliver NAME --now` and `send --now --urgent` typing ahead;
+- the safety hook failing for a prompt the fake recorded as `owner_typing`, and `typed_ahead_allowed` true only for `send --now` and `deliver --now`.
+
+The 517 tests of 0.9.0 pass, with the expectations of the withdrawn typed-ahead paths (a plain `send`, `deliver`, the flush and the watcher to a working seat) turned into their 0.10.0 lines.
 
 ### Running the CLI against the fake by hand
 
@@ -629,3 +643,51 @@ $H send --as n9-a n9-x "Cross-fleet: reply to n9-a with --fyi --reply-to the id 
 | 15 | `sent to n9-x (idle), …`; `$X/.herdr/messages.jsonl` holds the same entry |
 | 16 | `awaiting: n9-x owes n9-a …` in the second fleet until n9-x replies, then nothing in either fleet; the body is in `$X/.herdr/inbox/n9-x/cur/` |
 | 17 | everything closes; remove `$W` and `$X` |
+
+## Live smoke test for 0.10.0 (to run by hand)
+
+Not run yet. For the designer or the owner, inside herdr, with `HERDR_FLEET_BIN` exported and a one-seat Haiku scratch fleet as for 0.9.0 (seat `n10-a`, watcher strip on). `herdr pane send-text` stands in for the owner's own typing; never use it on a pane in state `blocked`, and check `herdr agent get n10-a` says `idle` first.
+
+```bash
+cd /Users/nabsha/work/yarrasys/projects/herdr-fleet-plugin
+export HERDR_FLEET_BIN="$PWD/bin/herdr-fleet"
+W=$(mktemp -d /tmp/fleet-0100.XXXXXX); mkdir -p "$W/.herdr"; F="$W/.herdr/fleet.toml"
+cat > "$F" <<FLEET
+workspace = "fleet-0100"
+cwd = "$PWD"
+
+[[agents]]
+name = "n10-a"
+kind = "claude"
+args = ["--model", "claude-haiku-5-5"]
+env = { HERDR_FLEET_BIN = "$HERDR_FLEET_BIN" }
+kickoff_text = "[from herdr-fleet] 0.10.0 smoke test ({reason}). You are {name}. Reply READY, then wait. Run no tools unless a message asks you to."
+FLEET
+H="python3 bin/herdr-fleet"
+$H up --fleet "$F"; P=$(herdr agent get n10-a | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["agent"]["pane_id"])')
+$H doctor --fleet "$F" | grep presence                                                # 1 (no line: claude has a glyph)
+herdr agent get n10-a                                                                  # 2 must say idle
+herdr pane send-text "$P" "half typed"                                                 # 3 the owner's stand-in, no Enter
+# 4: run this, then within 15 s click into n10-a's pane and stay there (do not type) for 30 s
+(sleep 15; $H send --as owner n10-a "ping from test: reply PONG" --fleet "$F" > "$W/send.out"; \
+ herdr pane read "$P" --lines 12 > "$W/read.out") &
+# 5: still in n10-a's pane after those 30 s, delete "half typed" by hand; then come back here
+cat "$W/send.out" "$W/read.out"                                                        # 6
+$H send --as owner n10-a "Run: sleep 30, then reply DONE" --fleet "$F"               # 7
+$H send --as owner n10-a "while working: reply SECOND" --fleet "$F"                  # 8 (n10-a is working)
+$H deliver --fleet "$F"; $H deliver n10-a --now --dry-run --fleet "$F"                # 9
+$H down --close-panes --close-workspace --fleet "$F"                                   # 10
+```
+
+| Step | Expected |
+| --- | --- |
+| 1 | no `presence` line |
+| 3 | the seat's prompt line reads `❯ half typed` |
+| 4 | the watcher strip prints `n10-a idle; delivering 1`, then once `n10-a idle; owner typing in P, holding 1`, and nothing more while the text stays |
+| 5 | within about 3 s of the line being cleared the strip prints `delivered 1 to n10-a` and the seat replies PONG; the prompt it got is the message alone, not `half typedping from test …` |
+| 6 | `send.out`: `queued in herdr-fleet for n10-a (idle, owner typing in P) #…, position 1 of 1`; `read.out` still shows `❯ half typed` |
+| 7, 8 | 8 prints `queued in herdr-fleet for n10-a (working) #…, position 1 of 1`; nothing reaches the seat until it is idle again, when the strip delivers SECOND |
+| 9 | while n10-a works and something is queued: `n10-a: working, 1 left queued`, and the dry run of `--now` says `would deliver … (working: typed into its own input, read after its current turn)` |
+| 10 | everything closes; remove `$W` |
+
+The hold lasts as long as the owner's focus and text do (design 21.2): leaving the pane with text still in its box ends it, and the next delivery would merge with that text. Step 5 therefore clears the line before leaving.

@@ -197,10 +197,10 @@ class KickoffTemplate(unittest.TestCase):
 
 # -- send: the table of design 18.3 -----------------------------------------------------------------
 
-TABLE = {  # state -> {flag: outcome}
+TABLE = {  # state -> {flag: outcome}; the working row as design 21.1 amends it
     "idle": {"": "sent", "--queue": "queued", "--now": "sent", "--fyi": "queued"},
     "done": {"": "sent", "--queue": "queued", "--now": "sent", "--fyi": "queued"},
-    "working": {"": "sent", "--queue": "queued", "--now": "sent", "--fyi": "sent"},
+    "working": {"": "queued", "--queue": "queued", "--now": "sent", "--fyi": "queued"},
     "blocked": {"": "queued", "--queue": "queued", "--now": "refused", "--fyi": "queued"},
     "unknown": {"": "queued", "--queue": "queued", "--now": "refused", "--fyi": "queued"},
     "absent": {"": "queued", "--queue": "queued", "--now": "refused", "--fyi": "queued"},
@@ -271,10 +271,10 @@ class SendTable(LiveFleet):
             "agent": "claude", "agent_status": "working", "name": "fablyn-dev", "pane_id": "w2:p2"}}}
         self.world["canned"] = [{"prefix": ["agent", "get", "fablyn-dev"], "stdout": working, "times": 1}]
         code, out, _ = self.run_cli("send", "--fyi", "fablyn-dev", "report")  # working when looked at, idle at prompt
-        self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(idle%s\) %s, position 1 of 1$"
+        self.assertEqual(code, 0)  # design 21.1: a working seat is not even tried
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working%s\) %s, position 1 of 1$"
                          % (FYI_LABEL, SHORT))
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        self.assertEqual(self.argvs("agent", "prompt"), [])
 
     def test_dry_run_writes_nothing(self):
         self.status_of("w2:p2", "blocked")
@@ -315,13 +315,17 @@ class FlushBeforeSend(LiveFleet):
         self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
         self.assertEqual(len(box(self.repo, "fablyn-dev", CUR)), 3)
 
-    def test_a_working_seat_gets_the_batch_typed_ahead(self):
+    def test_a_working_seat_gets_the_batch_typed_ahead_only_with_now(self):
         self.status_of("w2:p2", "blocked")
         self.run_cli("send", "fablyn-dev", "first")
         self.status_of("w2:p2", "working")
-        code, out, _ = self.run_cli("send", "fablyn-dev", "second")
+        code, out, _ = self.run_cli("send", "fablyn-dev", "second")  # design 21.1: queued, nothing flushed
         self.assertEqual(code, 0)
-        self.assertIn("sent to fablyn-dev (%s) with 1 queued" % place("working"), out)
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 2 of 2$" % SHORT)
+        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        code, out, _ = self.run_cli("send", "--now", "fablyn-dev", "third")
+        self.assertEqual(code, 0)
+        self.assertIn("sent to fablyn-dev (%s) with 2 queued" % place("working"), out)
         self.assertIn("\nfirst\n\n[from caller at", self.prompts_to("fablyn-dev")[0])
 
     def test_a_refused_prompt_leaves_everything_queued(self):

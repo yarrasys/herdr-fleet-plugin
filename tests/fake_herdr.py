@@ -47,8 +47,17 @@ acts, writes it back and appends one JSON line to the call log (env
   200x50 cell area, rounded as herdr rounds. ``pane resize`` follows herdr's rule: the
   nearest split on the pane's named edge (else the opposite edge) gains the amount
   for right and down and loses it for left and up, clamped to 0.1-0.9.
+- Focus and screens (design 21.2): panes and workspaces carry ``focused`` (false unless
+  a test calls ``focus(world, pane)``, which makes that pane the owner's: focused in its
+  tab, its tab the workspace's active tab, its workspace the only focused one).
+  ``pane read PANE --lines N`` prints the last N lines of the pane's screen as plain
+  text, as live herdr does even in JSON mode: ``world["screens"][pane]`` when a test set
+  one (``type_in``, ``show_dialog``), else a rule, the empty prompt line of the pane's
+  agent kind and a status line.
 - The log records facts the safety tests assert on: the target's state (and name) at
-  every ``agent prompt``, with the mailboxes and short ids that held a message queued
+  every ``agent prompt``, whether the target pane was then the owner's with text on its
+  prompt line or no prompt line on screen (``owner_typing``, judged here with the fake's
+  own glyph table, independently of the plugin), with the mailboxes and short ids that held a message queued
   on refusal (``queued_by: refusal`` in ``<inbox>/<name>/new/``) at that moment when
   the runner knows the fleet's inbox (``Fake(..., inbox=...)`` or ``FAKE_HERDR_INBOX``;
   design 20.8), the state every ``agent get`` answered, whether a
@@ -143,6 +152,106 @@ def put_agent(world: Dict, pane: str, kind: str, name: Optional[str] = None, sta
         record["agent"]["agent_session"] = session
     record["procs"] = [agent_proc(kind, list(args or []), record["cwd"],
                                   world["behaviors"].get("argv_absent", False))]
+
+
+# The prompt glyphs and placeholders as live screens show them (herdr 0.9.5, 21 Oct 2026):
+# Claude Code `❯` (older builds `>`), Codex `› Ask Codex to do anything`, Antigravity `>`.
+GLYPHS = {"claude": ("\u276f", ">"), "codex": ("\u203a",), "agy": (">",)}
+PLACEHOLDERS = {"codex": "Ask Codex to do anything"}
+RULE = "\u2500" * 60
+STATUS = {"claude": "  ? for shortcuts", "codex": "  100% context left \u00b7 ? for shortcuts",
+          "agy": "  gemini-3-pro \u00b7 /help"}
+DIALOG = ["\u256d" + "\u2500" * 40 + "\u256e",
+          "\u2502 Bash command                           \u2502",
+          "\u2502   rm -rf build                         \u2502",
+          "\u2502 Do you want to proceed?                \u2502",
+          "\u2502   1. Yes                               \u2502",
+          "\u2502   2. No, and tell Claude what to do    \u2502",
+          "\u2570" + "\u2500" * 40 + "\u256f"]
+
+
+def prompt_screen(kind: str, typed: str = "") -> str:
+    """A screen tail with the kind's prompt line holding ``typed`` (empty: the empty line,
+    with Codex's placeholder)."""
+    glyph = GLYPHS.get(kind, (">",))[0]
+    body = typed or PLACEHOLDERS.get(kind, "")
+    line = (glyph + " " + body) if body else glyph
+    return "\n".join(["\u23fa Done.", "", RULE, line, RULE, STATUS.get(kind, "  ready")]) + "\n"
+
+
+def default_screen(world: Dict, pane: str) -> str:
+    agent = world["panes"][pane].get("agent")
+    if not agent:
+        return "user@host repo % \n"
+    return prompt_screen(agent["agent"])
+
+
+def focus(world: Dict, pane: str) -> None:
+    """Make ``pane`` the owner's: focused in its tab, its tab the active one, its workspace
+    the only focused workspace (what the herdr UI shows when the owner clicks into it)."""
+    target = world["panes"][pane]
+    for pid, record in world["panes"].items():
+        if record["tab_id"] == target["tab_id"]:
+            record["focused"] = pid == pane
+    for ws, record in world["workspaces"].items():
+        record["focused"] = ws == target["workspace_id"]
+    world["workspaces"][target["workspace_id"]]["active_tab_id"] = target["tab_id"]
+
+
+def unfocus(world: Dict) -> None:
+    """The owner left herdr's UI: no workspace is focused (pane focus stays per tab)."""
+    for record in world["workspaces"].values():
+        record["focused"] = False
+
+
+def type_in(world: Dict, pane: str, text: str) -> None:
+    """The owner has ``text`` half typed on the pane's prompt line ("" clears it)."""
+    agent = world["panes"][pane].get("agent") or {}
+    world.setdefault("screens", {})[pane] = prompt_screen(agent.get("agent", "claude"), text)
+
+
+def show_dialog(world: Dict, pane: str) -> None:
+    """A dialog is on screen (a permission question): no prompt line among the last lines."""
+    world.setdefault("screens", {})[pane] = "\n".join(["\u23fa Bash(rm -rf build)", ""] + DIALOG) + "\n"
+
+
+def set_screen(world: Dict, pane: str, text: Optional[str]) -> None:
+    """Script a screen verbatim (None: back to the default for the pane's agent)."""
+    screens = world.setdefault("screens", {})
+    if text is None:
+        screens.pop(pane, None)
+    else:
+        screens[pane] = text
+
+
+def screen_of(world: Dict, pane: str) -> str:
+    screens = world.get("screens") or {}
+    return screens[pane] if pane in screens else default_screen(world, pane)
+
+
+def owner_typing(world: Dict, pane: str) -> bool:
+    """Was ``pane`` the owner's pane (the focused chain) with text on its prompt line, or
+    no prompt line on screen? Judged with this module's own table; a kind it does not
+    know cannot be judged (False), as the plugin's guard passes such a kind."""
+    record = world["panes"].get(pane)
+    if not record or not record.get("focused") or not record.get("agent"):
+        return False
+    ws = world["workspaces"].get(record["workspace_id"]) or {}
+    if not ws.get("focused") or ws.get("active_tab_id") != record["tab_id"]:
+        return False
+    glyphs = GLYPHS.get(record["agent"]["agent"])
+    if not glyphs:
+        return False
+    found = None
+    for line in screen_of(world, pane).splitlines()[-12:]:
+        stripped = line.strip()
+        for glyph in glyphs:
+            if stripped.startswith(glyph):
+                found = stripped[len(glyph):].strip()
+                break
+    if found is None:
+        return True
+    return bool(found) and found != PLACEHOLDERS.get(record["agent"]["agent"])
 
 
 LOCK = threading.Lock()  # one call at a time reads, changes and writes the world
@@ -248,7 +357,7 @@ class Sim:
 
     def _pane_record(self, pid: str) -> Dict:
         p = self.w["panes"][pid]
-        rec = {"cwd": p["cwd"], "foreground_cwd": p["cwd"], "focused": False, "pane_id": pid,
+        rec = {"cwd": p["cwd"], "foreground_cwd": p["cwd"], "focused": bool(p.get("focused")), "pane_id": pid,
                "revision": 1, "scroll": {"max_offset_from_bottom": 0, "offset_from_bottom": 0,
                                          "viewport_rows": 40},
                "tab_id": p["tab_id"], "terminal_id": "term_" + pid, "terminal_title": "",
@@ -394,6 +503,7 @@ class Sim:
         status = p["agent"]["agent_status"]
         self.info["target_status"] = status
         self.info["target_name"] = p["agent"].get("name")
+        self.info["owner_typing"] = owner_typing(self.w, pid)
         if self.inbox:
             self.info["refusal_boxes"], self.info["refusal_ids"] = refusal_queued(self.inbox)
         if status == "blocked":
@@ -459,6 +569,18 @@ class Sim:
         if pid not in self.w["panes"]:
             return _err("pane_not_found", "pane %s not found" % pid)
         return _ok({"pane": self._pane_record(pid), "type": "pane_info"}, "cli:pane:get")
+
+    def _pane_read(self, args: List[str]) -> Result:
+        """``pane read PANE --lines N``: plain text on stdout, never JSON (live 0.9.5)."""
+        pos, opts, _ = _opts(args, ("--lines", "--source", "--format"))
+        pid = pos[0] if pos else ""
+        if pid not in self.w["panes"]:
+            return _err("pane_not_found", "pane %s not found" % pid)
+        lines = screen_of(self.w, pid).splitlines()
+        count = int((opts.get("--lines") or ["0"])[0] or 0)
+        self.info["lines"] = count
+        shown = lines[-count:] if count > 0 else lines
+        return 0, "\n".join(shown) + "\n", ""
 
     def _pane_current(self, args: List[str]) -> Result:
         """``pane current --current``: the caller's pane, following moves (a moved
@@ -568,7 +690,7 @@ class Sim:
     def _ws_record(self, ws: str) -> Dict:
         record = self.w["workspaces"][ws]
         panes = [p for p in self.w["panes"].values() if p["workspace_id"] == ws]
-        return {"active_tab_id": record["active_tab_id"], "agent_status": "idle", "focused": False,
+        return {"active_tab_id": record["active_tab_id"], "agent_status": "idle", "focused": bool(record.get("focused")),
                 "label": record["label"], "number": record["number"], "pane_count": len(panes),
                 "tab_count": 1, "workspace_id": ws}
 

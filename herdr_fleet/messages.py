@@ -6,12 +6,15 @@ herdr-fleet is a messenger only: it never reads or interprets an agent's
 output, never routes replies and never decides who gets a message.
 
 - ``send`` writes every message to the target's mailbox first (``inbox``), then
-  follows the table of design 18.3: an idle or done seat gets it now, a working
-  one gets it typed ahead (herdr queues it for the next turn; the only prompt
-  that may reach a ``working`` agent), and anything else leaves it queued.
-  ``--queue`` always queues, ``--now`` restores the 16.1 refusals, and an FYI
-  never wakes an idle seat. Any delivery carries the queued messages in front
-  (the batch of 18.4), so order is never inverted.
+  follows the table of design 18.3 as 21.1 amends it: an idle or done seat gets
+  it now, and anything else, a working seat included, leaves it queued for the
+  seat's next idle or done. ``--queue`` always queues; ``--now`` types it ahead
+  to a working seat (the only prompt besides ``deliver NAME --now`` that may
+  reach a ``working`` agent) and restores the 16.1 refusals; an FYI never wakes
+  an idle seat. Any delivery carries the queued messages in front (the batch of
+  18.4), so order is never inverted. When the owner is typing in the target
+  pane (the presence guard, design 21.2) nothing is sent: a plain send queues,
+  ``--now`` refuses.
 - ``prompt_mailbox`` is the engine: under the mailbox lock it expires messages
   past their ttl, renders the batch (or a pointer above 16 KiB), prompts it
   through ``seats.safe_prompt``, and on a sent or unconfirmed prompt moves the
@@ -28,11 +31,12 @@ output, never routes replies and never decides who gets a message.
   ``ack`` writes the log only and sends nothing (invariant 10); acting on a
   message is never inferred from anything an agent prints (invariant 16).
 - How a queued message waits is decided by how it was sent (``queued_by``,
-  invariant 18): a plain send a seat could not take is ``refusal`` and is
-  delivered at the first opportunity, typed ahead to a working seat, by every
-  path including the flush before a later send; ``--queue`` and ``--when-ready``
-  leftovers wait for idle or done; FYIs ride along. ``--urgent`` reorders only
-  the mailbox herdr-fleet holds (invariant 17).
+  invariant 18): a plain send a seat could not take is ``refusal``, ``--queue``
+  and ``--when-ready`` leftovers are ``queue``, FYIs ride along. Since 0.10.0
+  ``refusal`` and ``queue`` messages are delivered alike, at the seat's next idle
+  or done, by every path (design 21.1); a ``refusal`` message still goes along
+  with a ``--queue`` or FYI send to an idle or done seat (the flush before send,
+  20.9). ``--urgent`` reorders only the mailbox herdr-fleet holds (invariant 17).
 - A send to a live agent of another fleet on this machine is also logged there
   (``crossfleet``).
 """
@@ -47,7 +51,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from herdr_fleet import contacts as contact_mod
-from herdr_fleet import crossfleet, inbox, seen
+from herdr_fleet import crossfleet, inbox, presence, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, preflight
 from herdr_fleet.fleetfile import NAME_RE
 from herdr_fleet.herdr import HerdrError
@@ -68,6 +72,7 @@ since_label = inbox.time_label
 WORKING_PLACE = "working: typed into its own input, read after its current turn"  # design 20.3
 FYI_PLACE = "fyi: delivered with the next plain send, kickoff or deliver"         # design 20.8
 URGENT_TYPED = "--urgent cannot reorder the seat's own input"                      # design 20.3
+HOLD = "would hold: %s"                     # design 21.2: a dry run when the presence guard would hold
 
 
 def place(state: str) -> str:
@@ -340,12 +345,13 @@ def format_entry(entry: Dict) -> str:
 class Drop:
     """What one delivery attempt to a mailbox did."""
 
-    status: str                  # sent | unconfirmed | pointer | refused | failed | empty
-    detail: str = ""
+    status: str                  # sent | unconfirmed | pointer | refused | typing | failed | empty
+    detail: str = ""             # for typing: ``owner typing in <pane>`` (design 21.2)
     state: str = ""              # the state safe_prompt saw
     carried: List[Message] = field(default_factory=list)  # in the prompt, now in cur/
     waiting: List[Message] = field(default_factory=list)  # still in new/
     size: int = 0                # bytes of the prompt (of the batch, for a pointer)
+    agent: Dict = field(default_factory=dict)  # the agent record safe_prompt read (pane_id, kind)
 
 
 def expire_due(ctx: Ctx, name: str, now: Optional[datetime.datetime] = None) -> List[Message]:
@@ -437,6 +443,8 @@ def prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: 
     text, size, pointer = compose_prompt(queued, own)
     outcome = safe_prompt(ctx.herdr, target, text, allow)
     state = str(outcome.agent.get("agent_status") or "")
+    if outcome.status == "typing":  # design 21.2: the owner is typing there; nothing sent
+        return Drop("typing", outcome.detail, state, [], items, size, outcome.agent)
     if pointer and (outcome.ok or outcome.status == "unconfirmed"):
         return Drop("pointer", outcome.detail, state, [], items, size)
     if outcome.ok or outcome.status == "unconfirmed":
@@ -449,8 +457,9 @@ def prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: 
 
 
 def has_refusal(messages: Sequence[Message], exclude: Sequence[str] = ()) -> bool:
-    """True when a queued message was queued on refusal (design 20.8): it goes at the
-    first opportunity, typed ahead to a working seat. Decided by ``queued_by`` only."""
+    """True when a queued message was queued on refusal (design 20.8): a ``--queue`` or
+    FYI send to an idle or done seat takes it along (20.9; never to a working seat since
+    21.1). Decided by ``queued_by`` only."""
     return any(m.mode == "refusal" and m.id not in exclude for m in messages)
 
 
@@ -503,6 +512,18 @@ def position(ctx: Ctx, name: str, ident: str) -> Tuple[int, int]:
     waiting = [m for m in inbox.read_box(ctx.fleet.repo, name, NEW) if not inbox.is_due(m, now)]
     ids = [m.id for m in waiting]
     return (ids.index(ident) + 1 if ident in ids else 0), len(ids)
+
+
+def held_label(drop: Drop, state: str) -> str:
+    """``idle, owner typing in w1:p2``: the state a send line shows when the presence guard
+    held the message (design 21.2)."""
+    return "%s, %s" % (drop.state or state, drop.detail)
+
+
+def dry_hold(ctx: Ctx, target: Optional[str]) -> Optional[str]:
+    """For a dry run (design 21.2): would the presence guard hold text for ``target`` now?
+    The guard only reads; None when it would pass or herdr cannot say."""
+    return presence.would_hold(ctx.herdr, target)
 
 
 def mirror_entry(ctx: Ctx, repo: str, entry: Dict) -> None:
@@ -591,8 +612,9 @@ def resolve_targets(ctx: Ctx, names: Sequence[str], agents: Sequence[Dict]) -> L
 
 def queued_by_for(mode: str, fyi: bool, when_ready: bool) -> str:
     """Design 20.8: how a message waits if it waits, from how it was sent (invariant 18).
-    ``--queue`` and ``--when-ready`` wait for idle or done; an FYI rides along (unless
-    ``--now``); any other send the seat could not take goes at the first opportunity."""
+    ``--queue`` and ``--when-ready`` are ``queue``; an FYI rides along (unless ``--now``);
+    any other send the seat could not take is ``refusal``. Since 21.1 both wait for the
+    seat's next idle or done; listings still say which."""
     if mode == "queue":
         return "queue"
     if mode == "now":
@@ -712,8 +734,8 @@ def _route(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_ms:
     state = target.problem or agent_state(ctx, target.herdr)
     reachable = not target.problem and state != "absent"
     observed[target.name] = state if reachable else "absent"
-    if mode == "queue":
-        return _queued(ctx, target, message, state, log_file, flush=reachable and state in SEND_ALLOWED)
+    if mode == "queue":  # the flush before send goes only to an idle or done seat (21.1)
+        return _queued(ctx, target, message, state, log_file, flush=reachable and state in SETTLED)
     if when_ready_ms and reachable and state not in SETTLED:
         if ctx.dry_run:
             return ["would wait up to %d ms for %s (%s), then deliver or queue" % (when_ready_ms, target.name, state)
@@ -728,21 +750,22 @@ def _route(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_ms:
             label = "%s after --when-ready %d ms" % (state, when_ready_ms)
             if mode == "now":
                 return _refused(ctx, target, message, label, log_file)
-            return _queued(ctx, target, message, label, log_file, flush=state == "working")
-    # Older messages queued on refusal go now whenever the seat can take text (20.8), so an
-    # FYI to an idle seat then rides along instead of waiting.
-    refusals = reachable and state in SEND_ALLOWED and refusal_waiting(ctx, target.name, exclude=(message.id,))
+            return _queued(ctx, target, message, label, log_file)
+    # Older messages queued on refusal go along to an idle or done seat (20.8), so an FYI
+    # to an idle seat then rides along instead of waiting. A working seat takes text only
+    # from --now (21.1): everything else waits for its next idle or done.
+    refusals = reachable and state in SETTLED and refusal_waiting(ctx, target.name, exclude=(message.id,))
     if state in SETTLED:
         deliver = mode == "now" or not message.fyi or refusals
     else:
-        deliver = state == "working"
+        deliver = mode == "now" and state == "working"
     if not deliver:
         if mode == "now":
             return _refused(ctx, target, message, state, log_file)
         return _queued(ctx, target, message, state, log_file)
-    allow = ("working",) if message.fyi and mode != "now" and not refusals else SEND_ALLOWED
+    allow = SEND_ALLOWED if mode == "now" else SETTLED
     if ctx.dry_run:
-        return [_would_send(ctx, target, message, state)], EXIT_OK
+        return [_would_send(ctx, target, message, state, mode)], EXIT_OK
     with inbox.locked(ctx.fleet.repo, target.name):
         drop = prompt_mailbox(ctx, target.name, str(target.herdr), allow, "send", own=message, mirror=target.other)
     extra = len(drop.carried or drop.waiting) - 1
@@ -761,10 +784,11 @@ def _route(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_ms:
         line, code = _queued_line(ctx, target, message, shown, log_file)
         return [line + "; prompted a pointer instead: %s"
                 % inbox.pointer_text(drop.waiting, drop.size, prefix=False)], code
-    if drop.status == "refused":
+    if drop.status in ("refused", "typing"):  # turned busy since the check, or the owner is typing
+        label = drop.state if drop.status == "refused" else held_label(drop, state)
         if mode == "now":
-            return _refused(ctx, target, message, drop.state, log_file)
-        return _queued(ctx, target, message, drop.state, log_file)
+            return _refused(ctx, target, message, label, log_file)
+        return _queued(ctx, target, message, label, log_file)
     _log_send(ctx, target, message, "queued", log_file)
     return ["failed %s: %s; #%s left queued" % (target.name, drop.detail, message.short)], EXIT_FAIL
 
@@ -785,18 +809,20 @@ def _queued_line(ctx: Ctx, target: Target, message: Message, state: Optional[str
 
 def _queued(ctx: Ctx, target: Target, message: Message, state: Optional[str],
             log_file: Optional[str], flush: bool = False) -> Lines:
-    """The message waits in its mailbox. With ``flush`` (the seat is idle, done or working)
-    older messages queued on refusal go now (design 20.8), the new one staying queued."""
+    """The message waits in its mailbox. With ``flush`` (the seat is idle or done; never
+    working since design 21.1) older messages queued on refusal go now (20.8, 20.9), the
+    new one staying queued."""
     if ctx.dry_run:
         line = "would queue in herdr-fleet for %s%s" % (target.name, _label(state, message))
         if flush and refusal_waiting(ctx, target.name, exclude=(message.id,)):
-            line += "; would deliver what was queued on refusal"
+            hold = dry_hold(ctx, target.herdr)
+            line += "; " + (HOLD % hold if hold else "would deliver what was queued on refusal")
         return [line], EXIT_OK
     lines: List[str] = []
     code = EXIT_OK
     if flush and refusal_waiting(ctx, target.name, exclude=(message.id,)):
         with inbox.locked(ctx.fleet.repo, target.name):
-            drop = prompt_mailbox(ctx, target.name, str(target.herdr), SEND_ALLOWED, "send",
+            drop = prompt_mailbox(ctx, target.name, str(target.herdr), SETTLED, "send",
                                   exclude=(message.id,), mirror=target.other)
         flushed, code = refusal_line(target.name, drop, state or "")
         lines.append(flushed)
@@ -819,6 +845,8 @@ def refusal_line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
             name, place(shown), inbox.pointer_text(drop.waiting, drop.size, prefix=False)), EXIT_OK
     if drop.status == "refused":
         return "%s: %s, %d left queued" % (name, drop.state, len(drop.waiting)), EXIT_OK
+    if drop.status == "typing":  # design 21.2: nothing moves while the owner types there
+        return "%s: %s, %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_OK
     if drop.status == "empty":
         return "nothing queued for %s" % name, EXIT_OK
     return "failed %s: %s; %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_FAIL
@@ -836,7 +864,12 @@ def _refused(ctx: Ctx, target: Target, message: Message, state: str, log_file: O
     return ["refused %s (%s): nothing sent" % (target.name, state)], EXIT_FAIL
 
 
-def _would_send(ctx: Ctx, target: Target, message: Message, state: str) -> str:
+def _would_send(ctx: Ctx, target: Target, message: Message, state: str, mode: str) -> str:
+    hold = dry_hold(ctx, target.herdr)  # design 21.2: the guard only reads, so a dry run runs it
+    if hold:
+        if mode == "now":
+            return "would refuse %s (%s): nothing sent; %s" % (target.name, state, HOLD % hold)
+        return "would queue in herdr-fleet for %s%s; %s" % (target.name, _label(state, message), HOLD % hold)
     now = inbox.now_utc()
     queued = [m for m in inbox.read_box(ctx.fleet.repo, target.name, NEW) if not inbox.is_due(m, now)]
     _, size, pointer = compose_prompt(queued, message)
