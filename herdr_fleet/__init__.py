@@ -19,6 +19,8 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
   moves between ``new/`` and ``cur/``, ttl); ``messages``: ``send``, ``ack``, the
   message log, owed replies and the delivery engine; ``mailroom``: ``deliver``
   and ``inbox``;
+  ``watch``: the foreground watcher that delivers as seats turn idle;
+  ``hooks``: the opt-in Claude Code hooks (``hooks install``);
   ``contacts``: peers the team messages but never manages; ``statenote``:
   ``state`` sections; ``permissions``: the advisory Claude Code permission
   check in ``doctor``.
@@ -30,7 +32,7 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 
 import os
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

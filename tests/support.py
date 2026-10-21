@@ -30,8 +30,14 @@ from herdr_fleet.cli import main  # noqa: E402
 
 CALLER_WS = "w1"
 CALLER_PANE = "w1:p1"
-# Design 18.5: `inbox` asks herdr only who the caller is (and nothing at all with --as).
+# Design 18.5: `inbox` asks herdr only who the caller is (and nothing at all with --as);
+# 18.7: `inbox --hook` only `agent get` on its own pane.
 INBOX_CALLS = (["pane", "current"], ["agent", "get"])
+HOOK_CALLS = (["agent", "get"],)
+# Design 18.6: the watcher runs agent wait/get/list/prompt and notification show, plus the
+# local `herdr --version` of the common preconditions.
+WATCH_CALLS = (["agent", "wait"], ["agent", "get"], ["agent", "list"], ["agent", "prompt"],
+               ["notification", "show"], ["--version"])
 
 THREE_SEATS = """
 workspace = "fablyn"
@@ -159,7 +165,8 @@ class FleetCase(unittest.TestCase):
 
     # -- running ------------------------------------------------------------------
 
-    def run_cli(self, *argv: str, stdin: str = "", env: Optional[Dict[str, str]] = None) -> Tuple[int, str, str]:
+    def run_cli(self, *argv: str, stdin: str = "", env: Optional[Dict[str, str]] = None,
+                cwd: Optional[str] = None) -> Tuple[int, str, str]:
         with open(self.world_path, "w", encoding="utf-8") as handle:
             json.dump(self.world, handle)
         out, err = io.StringIO(), io.StringIO()
@@ -168,7 +175,7 @@ class FleetCase(unittest.TestCase):
             handle.write(json.dumps({"command": list(argv)}) + "\n")
         runner = fake_herdr.Fake(self.world_path, self.log_path, env.get("HERDR_PANE_ID"))
         code = main(list(argv), env=env, runner=runner, clock=self.clock,
-                    stdout=out, stderr=err, stdin=io.StringIO(stdin), cwd=self.repo)
+                    stdout=out, stderr=err, stdin=io.StringIO(stdin), cwd=cwd or self.repo)
         with open(self.world_path, "r", encoding="utf-8") as handle:
             self.world = json.load(handle)
         return code, out.getvalue(), err.getvalue()
@@ -196,8 +203,10 @@ class FleetCase(unittest.TestCase):
     def assert_safety(self) -> None:
         """Design section 7 invariants, checked against the full call log. The one
         exception (design 16.1, 18.3): a prompt issued by `send` may reach a working agent;
-        `deliver` and kickoffs carry queued messages to idle or done seats only
-        (invariant 11), and `inbox` runs nothing but the caller lookup."""
+        `deliver`, `watch` and kickoffs carry queued messages to idle or done seats only
+        (invariant 11), `inbox` runs nothing but the caller lookup (`inbox --hook` only
+        `agent get`), `watch` only its five commands and never an endless wait
+        (invariants 12, 13), and `hooks` runs no herdr command at all."""
         caller = self.env.get("HERDR_PANE_ID")
         command: List[str] = []
         entries = []
@@ -213,6 +222,14 @@ class FleetCase(unittest.TestCase):
             if command[:1] == ["inbox"]:
                 self.assertIn(argv[:2], INBOX_CALLS, "inbox ran more than the caller lookup: %s" % argv)
                 self.assertNotIn("--as", command, "inbox --as ran a herdr command: %s" % argv)
+                if "--hook" in command:
+                    self.assertIn(argv[:2], HOOK_CALLS, "inbox --hook ran more than agent get: %s" % argv)
+            if command[:1] == ["watch"]:
+                self.assertIn(argv[:2] if argv[:1] != ["--version"] else argv[:1], WATCH_CALLS,
+                              "watch ran %s" % argv)
+                if argv[:2] == ["agent", "wait"]:
+                    self.assertIn("--timeout", argv, "watch waited without a timeout: %s" % argv)
+            self.assertNotEqual(command[:1], ["hooks"], "hooks ran a herdr command: %s" % argv)
             self.assertNotIn(tuple(argv[:2]), fake_herdr.FORBIDDEN, "forbidden command: %s" % argv)
             self.assertFalse(any(a in ("send-keys", "send-text") for a in argv[:2]), argv)
             self.assertNotEqual(argv[:2], ["pane", "run"], argv)

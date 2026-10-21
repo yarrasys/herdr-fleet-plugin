@@ -288,9 +288,11 @@ class Herdr:
     def notification_show(self, title: str, body: str, sound: str) -> Dict:
         return self.run("notification", "show", title, "--body", body, "--sound", sound)
 
-    def plugin_pane_open(self, plugin_id: str, entrypoint: str, cwd: str) -> Dict:
-        return self.run("plugin", "pane", "open", "--plugin", plugin_id,
-                        "--entrypoint", entrypoint, "--cwd", cwd)
+    def plugin_pane_open(self, plugin_id: str, entrypoint: str, cwd: str, placement: Optional[str] = None) -> Dict:
+        argv = ["plugin", "pane", "open", "--plugin", plugin_id, "--entrypoint", entrypoint, "--cwd", cwd]
+        if placement:
+            argv += ["--placement", placement]
+        return self.run(*argv)
 
 
 def render_cmd(argv: Sequence[str]) -> str:

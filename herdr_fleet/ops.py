@@ -464,11 +464,14 @@ def _close_workspace(ctx: Ctx, report: Report) -> None:
 # -- ui and install-cli ------------------------------------------------------------------
 
 
+UI_PLACEMENT = {"watch": "split"}  # design 18.6: the watcher opens as a split; the others as the manifest says
+
+
 def op_ui(ctx: Ctx, entrypoint: str) -> None:
     """Open a plugin pane with its cwd at the repo root so it can find the fleet file."""
     repo = ctx.fleet.repo
     plugin = ctx.env.get("HERDR_PLUGIN_ID") or PLUGIN_ID
-    ctx.herdr.plugin_pane_open(plugin, entrypoint, repo)
+    ctx.herdr.plugin_pane_open(plugin, entrypoint, repo, UI_PLACEMENT.get(entrypoint))
 
 
 LAUNCHER_MARKER = "herdr-fleet launcher"
@@ -492,6 +495,9 @@ for plugin in data.get("result", {}).get("plugins", []):
             print(os.path.dirname(manifest))
             break
 ' 2>/dev/null)
+# A hook call (`inbox --hook ...`) must never disturb the agent: when the installed copy predates
+# hooks (no herdr_fleet/hooks.py), exit silently instead of failing on the unknown option.
+case " $* " in *" --hook "*) if [ -n "$ROOT" ] && [ ! -f "$ROOT/herdr_fleet/hooks.py" ]; then exit 0; fi;; esac
 if [ -n "$ROOT" ] && [ -f "$ROOT/bin/herdr-fleet" ]; then exec python3 "$ROOT/bin/herdr-fleet" "$@"; fi
 exec python3 "$FALLBACK" "$@"
 """

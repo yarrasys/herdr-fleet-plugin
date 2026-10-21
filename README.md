@@ -37,7 +37,7 @@ herdr-fleet doctor
 
 `install-cli` writes a small launcher script, not a symlink. Each time it runs, it asks `herdr plugin list --json` where herdr installed the `yarrasys.fleet` plugin and runs that copy's `bin/herdr-fleet`, so the seats always run the released plugin, never a development checkout that someone is half-way through editing. When herdr cannot be asked, it runs the `bin/herdr-fleet` that wrote it. It replaces an earlier launcher or a symlink, and refuses to overwrite any other file. `--dir DIR` writes it elsewhere.
 
-Developers: set `HERDR_FLEET_BIN=/path/to/clone/bin/herdr-fleet` to make the launcher run your clone (for a smoke test of unreleased code, say), or run `install-cli --dev` to symlink your clone the way 0.5.0 did.
+A `--hook` call (the Claude Code hooks of `hooks install`) exits silently when the installed copy predates hooks, so a hook never disturbs an agent during a plugin update. Developers: set `HERDR_FLEET_BIN=/path/to/clone/bin/herdr-fleet` to make the launcher run your clone (for a smoke test of unreleased code, say), or run `install-cli --dev` to symlink your clone the way 0.5.0 did.
 
 ## Quick start
 
@@ -73,6 +73,7 @@ It never overwrites a file: each one is reported as `created` or `kept`, and onl
 | action `yarrasys.fleet.manage` | `herdr-fleet ui manage`: opens the `manage` pane (a popup running the menu: pick a seat, then restart, swap, kickoff, down, up or tile) |
 | action `yarrasys.fleet.doctor` | `herdr-fleet doctor --notify` |
 | action `yarrasys.fleet.tile` | `herdr-fleet tile --notify`: re-tile the live seats in place |
+| action `yarrasys.fleet.watch` | `herdr-fleet ui watch`: opens the `watch` pane as a split beside the focused pane, running `herdr-fleet watch` for its repository until you press Ctrl-C or close the pane (see The watcher) |
 
 Actions run with the plugin root as their working directory, so they find the fleet file from the focused pane instead: `focused_pane_cwd` in `HERDR_PLUGIN_CONTEXT_JSON`, else the `cwd` from `herdr pane get $HERDR_PANE_ID`. On herdr 0.9.4 an action's context JSON has these keys (values abridged):
 
@@ -86,7 +87,7 @@ Actions run with the plugin root as their working directory, so they find the fl
 
 herdr-fleet uses `focused_pane_id` as the caller's pane (never started into) when `HERDR_PANE_ID` is unset, `workspace_id` when `HERDR_WORKSPACE_ID` is unset, and `focused_pane_cwd` for discovery. Other spellings (`pane_id`, or a `focused_pane` object with `pane_id` and `cwd`) are accepted too.
 
-`ui status` and `ui manage` open the pane with `herdr plugin pane open --plugin yarrasys.fleet --entrypoint <id> --cwd <repo root>`, and the pane process runs in that directory, not in the plugin root. That is why the two `[[panes]]` commands are `["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/bin/herdr-fleet\" status --hold"]` and the `menu` equivalent: a relative `bin/herdr-fleet` does not resolve there, and manifest commands are argv with no shell expansion unless they start one.
+`ui status`, `ui manage` and `ui watch` open the pane with `herdr plugin pane open --plugin yarrasys.fleet --entrypoint <id> --cwd <repo root>` (`ui watch` adds `--placement split`), and the pane process runs in that directory, not in the plugin root. That is why the `[[panes]]` commands are `["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/bin/herdr-fleet\" status --hold"]` and its `menu` and `watch` equivalents: a relative `bin/herdr-fleet` does not resolve there, and manifest commands are argv with no shell expansion unless they start one.
 
 Plugin output is shown nowhere on screen. herdr keeps each action's stdout, stderr and exit code in `herdr plugin log list --plugin yarrasys.fleet` (pane entrypoints are not logged; they show their output in the pane). So actions also report through `herdr notification show`: `up --notify` and `doctor --notify` send their summary, and a `ui` action that cannot find the fleet file or fails its preconditions sends the error with the `request` sound and exits 2. Notifications are only sent from inside herdr.
 
@@ -196,10 +197,12 @@ Every command except `init` and `install-cli` accepts `--fleet PATH` to pick the
 | --- | --- |
 | `init [DIR] [--example NAME] [--force]` | Write the starter `.herdr` files at the root of DIR's Git work tree (else DIR; default the current directory), or copy `examples/NAME` with `--example` (`fablyn`). Never overwrites without `--force`. Runs no herdr command and does not need `HERDR_ENV`. Exit 0 when every file was created or kept, 1 when a write failed, 2 for an unknown example or a bad DIR. |
 | `up [NAME...] [--me NAME] [--dry-run] [--no-kickoff] [--note TEXT]` | Start every seat that is not live, then brief the ones it started. Skips seats whose name is live; adopts an unnamed agent of the right kind that herdr resumed in a seat's recorded pane (rename, no kickoff); reuses a recorded pane that is at a shell prompt; else splits a new pane. `--me NAME` names the agent in your own pane as seat NAME (rename only, no kickoff) and records it as `adopted`. If your pane is in another workspace than the fleet's, `up --me` warns with the exact `herdr pane move` that would join them; `--join` runs that move (your session keeps running) and records the new pane id. `--dry-run` prints the exact herdr commands and changes nothing. |
-| `status [--json] [--hold] [--context]` | Every seat: expected kind, live kind, pane, state (`idle`, `working`, `blocked`, `done`, `unknown` or `absent`), cwd (with `~`), Git branch, drift and notes. When every live seat (at least two) has the same cwd, the CWD column goes and the header line says `cwd ~/…` once; the same for BRANCH (`branch main`). Then the contacts with their pane and state, the messages awaiting a reply, the queued messages per mailbox (`queued: fablyn-dev 3 (oldest 10:09), owner 1`), and `herdr integration status` for the kinds in use, flagging `outdated` and `not installed`. When a seat declares `worktrees`, a last line points at `herdr-fleet worktrees`. `--context` adds a CONTEXT column (see Context size). `--json` always keeps `cwd` and `branch` per seat, and adds `"queued": {name: count}`. |
+| `status [--json] [--hold] [--context]` | Every seat: expected kind, live kind, pane, state (`idle`, `working`, `blocked`, `done`, `unknown` or `absent`), cwd (with `~`), Git branch, drift and notes. When every live seat (at least two) has the same cwd, the CWD column goes and the header line says `cwd ~/…` once; the same for BRANCH (`branch main`). Then the contacts with their pane and state, the messages awaiting a reply, whether a watcher runs and the queued messages per mailbox (`watcher: running (pid 123 since 10:00)` or `watcher: not running`, then `queued: fablyn-dev 3 (oldest 10:09), owner 1`, both only while something is queued), and `herdr integration status` for the kinds in use, flagging `outdated` and `not installed`. When a seat declares `worktrees`, a last line points at `herdr-fleet worktrees`. `--context` adds a CONTEXT column (see Context size). `--json` always keeps `cwd` and `branch` per seat, and adds `"queued": {name: count}`, `"queued_oldest": {name: time}` and `"watcher": {"running", "pid", "since"}`. |
 | `send TARGET... [TEXT] [--file PATH] [--fyi] [--queue \| --now] [--reply-to ID] [--ttl DURATION] [--as NAME] [--when-ready MS] [--all] [--dry-run]` | Message seats, contacts, `owner` or live agents through their inbox (see Messages and Inbox). `--fyi` marks a report that awaits no reply and never wakes an idle seat; `--queue` only queues; `--now` delivers or refuses, never queues; `--reply-to` names the message this answers; `--ttl 30m\|2h\|1d` drops it if still queued by then. |
 | `deliver [NAME...] [--fyi] [--dry-run]` | Hand queued messages to the seats that can take them now: an idle or done seat gets its whole queue as one prompt; a working, blocked, unknown or absent one keeps it. Without names: every seat and contact with a queued message that is not FYI (`--fyi`: any), and `owner` (a notification). |
-| `inbox [--as NAME] [--read \| --count \| --history NAME \| --redeliver ID] [--json]` | Your own mailbox: list what is queued for you, `--read` it (print and mark read), `--count` it, replay your delivered messages with NAME (`--history`), or queue a delivered message again (`--redeliver`). Runs no herdr command except finding who you are, and none with `--as`. |
+| `inbox [--as NAME] [--read \| --count \| --history NAME \| --redeliver ID] [--json]` | Your own mailbox: list what is queued for you, `--read` it (print and mark read), `--count` it, replay your delivered messages with NAME (`--history`), or queue a delivered message again (`--redeliver`). Runs no herdr command except finding who you are, and none with `--as`. `inbox --hook stop\|prompt` is what the Claude Code hooks run (see Claude Code hooks). |
+| `watch [--debounce MS] [--once]` | Run in the foreground until Ctrl-C and deliver queued messages as seats become idle (see The watcher). One per fleet. `--once` delivers what can be delivered now and exits. |
+| `hooks install [--remove]` | Add (or remove) the Claude Code `Stop` and `UserPromptSubmit` hooks in `<repo>/.claude/settings.local.json`, keeping everything else in it (see Claude Code hooks). |
 | `ack (NAME \| ID)... [--all] [--as NAME]` | Settle replies you owe by hand: a NAME settles what you owe that sender, an ID (`#3f2a9c`) that one message. Sends nothing to anyone (see FYI messages and ack). |
 | `log [--seat NAME] [--last N] [--json] [--owed]` | The message log, newest last (default the last 50); `--owed` lists the messages awaiting a reply. |
 | `worktrees [--seat NAME] [--json]` | The repository's Git worktrees with branch, age of the last commit, changed files, whether merged into the default branch, and the seats that claim them. Read-only; runs no herdr command (see Worktrees). |
@@ -209,9 +212,9 @@ Every command except `init` and `install-cli` accepts `--fleet PATH` to pick the
 | `kickoff NAME... [--note …] [--drop-inbox]` | Resend the kickoff (`reason = kickoff`), e.g. after you answered a seat's startup prompt. It carries what was queued for the seat, unless `--drop-inbox`. |
 | `tile [--dry-run]` | Re-tile the seats live in the fleet's workspace into the `[layout]` grid or chain with pane moves only (see Re-tiling). |
 | `down [NAME...] [--wait MS] [--close-panes] [--close-workspace]` | Quit seats. `--close-panes` then closes the panes herdr-fleet created, once they are back at a shell. `--close-workspace` closes the workspace only if herdr-fleet created it and no agent is left in it. |
-| `doctor` | Read-only checks: python, herdr binary and version, `HERDR_ENV`, server reachable, fleet file, the fleet file against its committed copies (`fleet file vs git`), kinds, kickoff files, `state_note`, integration status, a quit command per seat, Claude Code permissions per Claude seat, the state file. Exit 1 on any `fail`. |
+| `doctor` | Read-only checks: python, herdr binary and version, `HERDR_ENV`, server reachable, fleet file, the fleet file against its committed copies (`fleet file vs git`), kinds, kickoff files, `state_note`, integration status, a quit command per seat, Claude Code permissions per Claude seat, whether the Claude Code hooks are installed (`ok hooks: installed` or `info hooks: not installed (herdr-fleet hooks install)`, for fleets with a Claude seat), the state file. Exit 1 on any `fail`. |
 | `install-cli [--dir DIR] [--dev]` | Write the `herdr-fleet` launcher into DIR (default `~/.local/bin`) and print the plugin root (see Install). `--dev` symlinks this checkout instead. |
-| `ui status\|manage`, `menu` | Used by the manifest: open the overlay or popup pane; the popup's numbered menu. |
+| `ui status\|manage\|watch`, `menu` | Used by the manifest: open the overlay, popup or watch pane; the popup's numbered menu. |
 
 Exit codes: 0 ok, 1 failure, 2 usage error or invalid fleet file, 3 partial (some seats skipped, refused, blocked or not briefed). Every herdr failure is reported with its `error.code` and message.
 
@@ -251,7 +254,8 @@ Queued messages are delivered later, always to an idle or done seat, always as o
 - by the seat's next kickoff (`up`, `restart`, `kickoff`), through `{inbox}`; `restart --drop-inbox` and `kickoff --drop-inbox` discard them first;
 - in front of the next message `send` delivers to that seat, so the order is never inverted;
 - by `herdr-fleet deliver`, run by you or by the orchestrator when `status` shows a queue beside an idle seat;
-- by the seat itself, with `herdr-fleet inbox --read` during a turn it is already in.
+- by `herdr-fleet watch`, which you leave running in a pane, as soon as the seat turns idle (see The watcher);
+- by the seat itself, with `herdr-fleet inbox --read` during a turn it is already in, or, for a Claude seat with the hooks installed, at the end of each turn (see Claude Code hooks).
 
 The cost rule behind this: an agent re-reads its whole context on every turn, so every prompt costs a full turn. Queuing costs nothing, an FYI never costs an extra turn, and a batch of any size costs one turn. A batch looks like this, oldest first:
 
@@ -269,9 +273,50 @@ When a batch would exceed 16 KiB, the seat gets `[from herdr-fleet] 4 messages w
 
 `herdr-fleet inbox` without options lists your queued messages (`#3f2a9c  10:09  fablyn-orchestrator  Range for 1.25.1…`); you are found as for `send`, or named with `--as`. `--count` prints the number only. `--redeliver ID` moves a delivered message back to `new/`, for example one whose delivery was unconfirmed (herdr-fleet never resends those by itself).
 
+### The watcher
+
+`herdr-fleet watch` runs in the foreground, in a shell or in the pane that **Fleet: watch** opens, and delivers queued messages as seats become idle, so nobody has to remember `deliver`. Only you start it, and Ctrl-C (or closing its pane) stops it.
+
+- For each seat or contact with a queued message that is not FYI, it runs `herdr agent wait NAME --until idle --until done --timeout 30000` in a thread. The wait happens inside the herdr server; after a timeout the next wait starts. Every 2 s it re-reads the mailboxes, which are plain files, so a message for another seat gets its own waiter.
+- When a seat turns idle or done, it waits `--debounce` (default 5000 ms) so that a burst of messages becomes one turn, checks the state again with `herdr agent get`, and if the seat is still idle or done delivers the whole queue as one prompt, as `deliver` would. You get a `delivered 3 to fablyn-dev` notification. If the seat went back to work meanwhile, it waits again. A blocked seat is never prompted.
+- Mailboxes that hold only FYIs get no waiter. An absent agent gets none either: its next kickoff carries the messages (it is looked for again every 30 s). Messages for `owner` become a notification at once.
+- A delivery that may not have arrived (`unconfirmed`) is never repeated; a queue too large for one prompt gets the pointer once, and again only when something new arrives; a failed delivery waits a minute before the next try.
+- One watcher per fleet: it writes `.herdr/watch.lock` (`{"pid", "started", "fleet"}`) and refuses to start while that names a live process (`watcher already running (pid 123)`, exit 1). A lock left by a watcher that died is replaced. The lock goes when the watcher stops.
+- It prints one line per event, with the time: `waiting on fablyn-dev (3 queued)`, `fablyn-dev idle; delivering 3`, `delivered 3 to fablyn-dev`, `fablyn-dev blocked; still waiting`. It runs no herdr command but `agent list`, `agent wait`, `agent get`, `agent prompt` and `notification show`, and never starts, restarts or quits anything.
+- `watch --once` delivers what can be delivered right now (seats already idle or done), prints `deliver`'s lines and exits; it takes no lock.
+
+It reads the fleet file once when it starts; restart it after adding a seat.
+
+**Why the watcher costs nothing.** An agent spends tokens only during a turn, and every turn re-reads its whole context. Waiting for a seat to go idle happens in the herdr server, never in an agent, and every delivery is a batch, so a seat is woken once however many messages piled up:
+
+| Event | Cost |
+| --- | --- |
+| message queued, seat busy or away | 0 tokens |
+| watcher waiting | 0 tokens, no polling |
+| batch delivered to an idle seat | 1 turn (one context re-read), however many messages |
+| FYI | 0 extra turns, ever |
+| seat reads its inbox inside a turn | one tool call |
+| Stop hook, inbox empty | 0 tokens |
+
+### Claude Code hooks
+
+`herdr-fleet hooks install` (opt-in) adds two entries to `<repo>/.claude/settings.local.json`, creating it if needed and keeping every other key, hook and `permissions.allow` entry:
+
+```json
+{"hooks": {
+  "Stop": [{"hooks": [{"type": "command", "command": "herdr-fleet inbox --hook stop", "timeout": 10}]}],
+  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "herdr-fleet inbox --hook prompt", "timeout": 10}]}]
+}}
+```
+
+- **Stop.** When a Claude seat finishes a turn with messages queued for it, the hook hands them back as the hook's `additionalContext`, and Claude Code continues the turn with them; the messages move to `cur/`, logged `delivered` via `hook`. This is the seat reading its own inbox, inside its own process: nothing is typed into it. With nothing queued, or only FYIs, it prints nothing and costs nothing. It never continues a turn that a Stop hook already continued (`stop_hook_active`). Above 9,000 characters (Claude Code takes at most 10,000) it hands back the pointer to `herdr-fleet inbox --read` instead and the messages stay queued.
+- **UserPromptSubmit.** When you prompt a seat by hand while messages wait, the seat is told `2 messages waiting; run: herdr-fleet inbox --read`. Nothing moves.
+
+The hook finds its seat from `HERDR_PANE_ID` with `herdr agent get` (its only herdr command) and the fleet from the session's directory. Anything missing (no pane, not inside herdr, no fleet file, a pane whose agent is not a seat) or any error makes it print nothing and exit 0, so a broken hook never disturbs the agent. `herdr-fleet` must be on `PATH` (`install-cli`); a running Claude Code session may start running new hook entries at once, but after `--remove` a running session can keep them until it restarts. Install twice and nothing changes; `hooks install --remove` takes out exactly these two entries. `doctor` says whether they are installed. Codex, agy and other kinds have nothing like these hooks; the watcher and kickoffs deliver to them.
+
 ### The message log and owed replies
 
-Every `send`, and every kickoff the plugin sends, is appended to `<repo>/.herdr/messages.jsonl`, which `.herdr/.gitignore` ignores. Each line is one JSON object with the message's `id`. `first_line` is the first non-empty line after the `[from …]` prefix, up to 120 characters, and `file` is present only for `--file`. A `send` entry's `delivery` is `sent`; `unconfirmed` when `agent prompt` returned `agent_prompt_stalled` or `timeout` (the text may still have arrived, so the command exits 1 and it is never resent); `queued` when it waits in the inbox; or `refused` for a `--now` that could not be delivered. A queued message delivered later gets a `delivered` entry (`"from": "herdr-fleet"`, `"via"`: `send`, `kickoff`, `deliver`, `inbox` or `notify`); one dropped by its ttl or `--drop-inbox` gets `expired` or `dropped`.
+Every `send`, and every kickoff the plugin sends, is appended to `<repo>/.herdr/messages.jsonl`, which `.herdr/.gitignore` ignores. Each line is one JSON object with the message's `id`. `first_line` is the first non-empty line after the `[from …]` prefix, up to 120 characters, and `file` is present only for `--file`. A `send` entry's `delivery` is `sent`; `unconfirmed` when `agent prompt` returned `agent_prompt_stalled` or `timeout` (the text may still have arrived, so the command exits 1 and it is never resent); `queued` when it waits in the inbox; or `refused` for a `--now` that could not be delivered. A queued message delivered later gets a `delivered` entry (`"from": "herdr-fleet"`, `"via"`: `send`, `kickoff`, `deliver`, `watch`, `inbox`, `hook` or `notify`); one dropped by its ttl or `--drop-inbox` gets `expired` or `dropped`.
 
 ```json
 {"time":"2026-10-20T10:31:04+11:00","from":"fablyn-orchestrator","to":"fablyn-reviewer","kind":"send","id":"20261019T233104Z-3f2a9c","bytes":3412,"first_line":"Review round 3: commits a1b2c3..d4e5f6","delivery":"sent","file":"/private/tmp/brief-3.md"}
@@ -358,7 +403,7 @@ With `restart_hint_tokens = N` at the top of the fleet file, a seat at or above 
 
 herdr-fleet never answers anything for you. In code and in tests:
 
-1. Text reaches agents only through `herdr agent prompt` (kickoffs, quit commands and `send`), and only when the agent is `idle` or `done` at that moment. The one exception is `send`, which may also reach a `working` agent (see rule 2). herdr-fleet never runs `agent send-keys`, `pane send-keys`, `pane send-text` or `pane run`, and never runs bare `herdr`.
+1. Text reaches agents only through `herdr agent prompt` (kickoffs, quit commands, `send`, `deliver` and the watcher), and only when the agent is `idle` or `done` at that moment. The one exception is `send`, which may also reach a `working` agent (see rule 2). herdr-fleet never runs `agent send-keys`, `pane send-keys`, `pane send-text` or `pane run`, and never runs bare `herdr`.
 2. A `blocked` or `unknown` agent is never prompted, quit or restarted. A `working` agent is only quit after `--wait MS` lets it settle. Exception: `send` may deliver to a `working` agent (with that seat's queue in front), because herdr queues the text for its next turn, which is how a team already talks. Kickoffs, `deliver` and quit commands never go to a working agent.
 3. A prompt that returns `agent_prompt_stalled` or `timeout` is reported and never resent: herdr says the text may have been delivered.
 4. Only panes recorded as created by herdr-fleet are closed, and only with `--close-panes`; only a workspace it created is closed, and only with `--close-workspace`.
@@ -367,8 +412,10 @@ herdr-fleet never answers anything for you. In code and in tests:
 7. `worktrees`, the doctor's `fleet file vs git` check and `status --context` only read: no `git fetch`, no `git worktree prune`, no write under `~/.claude`, and no herdr command beyond `agent list` and `agent get`.
 8. `status --context` keeps only token counts and timestamps from a transcript; no transcript content is ever shown.
 9. `ack` only writes the message log and sends nothing. `send --fyi` only marks the message as an FYI in the log, and keeps it from waking an idle seat.
-10. Queued messages are delivered only to `idle` or `done` seats (apart from `send`'s typed-ahead delivery of rule 2), only through `herdr agent prompt`, and only by a command someone ran. Nothing herdr-fleet starts keeps running in the background, and no agent is ever asked to poll.
-11. Message bodies are stored as written, only under the repository's `.herdr/inbox/`, and read only to show them (a batch, a listing, a history).
+10. Queued messages are delivered only to `idle` or `done` seats (apart from `send`'s typed-ahead delivery of rule 2), only through `herdr agent prompt`, and only by a command someone ran or the watcher you started. Nothing herdr-fleet starts keeps running in the background: `watch` is a foreground process you start and stop. No agent is ever asked to poll; waits happen in the herdr server (`agent wait`) or in a silent hook.
+11. The watcher never prompts a `blocked` or `unknown` seat, never answers a dialog, never repeats an unconfirmed delivery, and never starts, restarts or quits anything.
+12. A hook-delivered batch is the seat reading its own inbox inside its own process; herdr-fleet never writes to an agent through a hook, and a hook prints nothing on any error.
+13. Message bodies are stored as written, only under the repository's `.herdr/inbox/`, and read only to show them (a batch, a listing, a history).
 
 If a seat is blocked at startup (typically a trust prompt), `up` records it, notifies you with the `request` sound and moves on. Answer the prompt yourself, then run `herdr-fleet kickoff NAME`.
 
@@ -401,7 +448,7 @@ An adopted session usually runs with its owner's own args (for example a hand-st
 
 ## The state file
 
-`<repo>/.herdr/fleet.state.json`, created on the first `up`, records the workspace and, per seat, the pane, whether herdr-fleet created it, the kind and args it started with, and timestamps. herdr-fleet also creates `<repo>/.herdr/.gitignore` (or appends to it) so the state file, the message log (`messages.jsonl`), the inbox (`inbox/`) and `watch.lock` (reserved for a later version's watcher) are never committed. It lives in the repo rather than the plugin state directory so the manifest actions and an agent running the CLI share it.
+`<repo>/.herdr/fleet.state.json`, created on the first `up`, records the workspace and, per seat, the pane, whether herdr-fleet created it, the kind and args it started with, and timestamps. herdr-fleet also creates `<repo>/.herdr/.gitignore` (or appends to it) so the state file, the message log (`messages.jsonl`), the inbox (`inbox/`) and `watch.lock` (the running watcher) are never committed. It lives in the repo rather than the plugin state directory so the manifest actions and an agent running the CLI share it.
 
 Pane and workspace ids are valid for one herdr server. Every command checks the ids it is about to use and drops the ones herdr no longer knows. There is one exception: a seat whose recorded pane is gone but which is still live by name elsewhere (its pane was moved to another workspace, which changes its id) is re-pointed to its new pane, and every other field is kept. When a live seat turns up in a different pane while its recorded pane still exists, the entry follows it but no longer counts the pane as created by herdr-fleet, so `--close-panes` will not close it. Whenever herdr-fleet moves a seat's pane or finds it moved (`--join`, `tile`, a pane moved by hand, a seat found live elsewhere), it prints `<seat>: pane w1A:p1 → w1H:p5`, so notes that hard-code pane ids can be corrected. Writes are atomic.
 
@@ -422,7 +469,7 @@ Example after `down --close-panes` of a one-seat fleet:
 
 ## Limitations
 
-- Restarts only on request: nothing watches for crashed agents (a plugin must not leave a supervisor running). Run `up` or `restart` to bring a seat back.
+- Restarts only on request: nothing watches for crashed agents (a plugin must not leave a supervisor running, and the foreground watcher only delivers messages). Run `up` or `restart` to bring a seat back.
 - Linux and macOS only; no curses UI; no per-seat worktree creation (brief the orchestrator to create them; `worktrees` lists them).
 - One tab: seats split from each other in one tab of the fleet's workspace.
 - Quitting depends on each agent's own quit command; kinds without a known command must be configured.

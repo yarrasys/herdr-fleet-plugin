@@ -1,5 +1,5 @@
 """Read-only inspection: drift (design 4.4), status (4.2, 16.3, 16.4, 16.7, 17.2,
-17.4, 18.6's queued line) and doctor (4.7, 16.6, 17.3).
+17.4, 18.6's watcher and queued lines) and doctor (4.7, 16.6, 17.3, 18.7's hooks line).
 
 Nothing here changes herdr. ``collect_status`` may rewrite the state file
 when it prunes ids herdr no longer knows, which every command does. Git is
@@ -14,7 +14,8 @@ import shlex
 import sys
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from herdr_fleet import MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, inbox, messages, permissions
+from herdr_fleet import MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, hooks, inbox, messages, permissions
+from herdr_fleet import watch
 from herdr_fleet.context import Ctx
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import Herdr, HerdrError, describe
@@ -146,6 +147,7 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
         "owed": messages.owed(_log_entries(ctx)),
     }
     data["queued"], data["queued_oldest"] = queued_summary(fleet)
+    data["watcher"] = watch.watcher_status(fleet.repo)
     if integrations:
         data["integrations"] = integration_rows(herdr, fleet.kinds())
     return data
@@ -257,7 +259,8 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
                                               "  (%s)" % c["note"] if c["note"] else ""))
     lines.extend(messages.owed_lines(data.get("owed", [])))
     queued = queued_line(data)
-    if queued:
+    if queued:  # design 18.6: whether anything will deliver it, then what waits
+        lines.append(watch.watcher_line(data.get("watcher") or {}))
         lines.append(queued)
     for row in data.get("integrations", []):
         mark = "  <- %s" % row["status"] if row["flag"] else ""
@@ -267,7 +270,7 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
     return "\n".join(lines)
 
 
-Check = Tuple[str, str, str]  # (ok|warn|fail, check name, detail)
+Check = Tuple[str, str, str]  # (ok|warn|fail|skip|info, check name, detail)
 
 
 def run_doctor(ctx: Ctx) -> List[Check]:
@@ -294,6 +297,8 @@ def run_doctor(ctx: Ctx) -> List[Check]:
         add((level, "integration %s" % row["kind"], row["line"] or row["status"]))
     _check_quit(ctx, fleet, add)
     _check_permissions(ctx, fleet, add)
+    if any(seat.kind == "claude" for seat in fleet.seats):  # design 18.7: the hooks are Claude Code's
+        add(hooks.doctor_check(fleet.repo))
     try:
         state = ctx.state
         add(("ok", "state file", state.path if state.existed else "%s (created on first up)" % state.path))

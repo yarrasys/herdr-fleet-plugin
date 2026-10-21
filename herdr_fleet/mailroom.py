@@ -8,6 +8,11 @@
   and moved to ``cur/``), counted, or replayed from ``cur/`` (``--history``);
   ``--redeliver`` moves a message from ``cur/`` back to ``new/``. It runs no
   herdr command except the caller lookup, and none with ``--as``.
+- ``inbox --hook stop|prompt`` (design 18.7) is the same pull from inside a
+  Claude Code hook: the seat is found from ``HERDR_PANE_ID`` with ``agent get``
+  (its only herdr command), ``stop`` hands the batch back as
+  ``additionalContext`` and moves it to ``cur/``, ``prompt`` only counts. Every
+  error path prints nothing and exits 0 (invariant 14).
 
 Both expire messages past their ttl before anything else (logged ``expired``)
 and log one ``delivered`` entry per message they hand over.
@@ -15,17 +20,19 @@ and log one ``delivered`` entry per message they hand over.
 
 from __future__ import annotations
 
+import io
 import json
-from typing import Dict, List, Optional, Sequence, Tuple
+import os
+from typing import Dict, List, Optional, Sequence, TextIO, Tuple
 
 from herdr_fleet import contacts as contact_mod
 from herdr_fleet import inbox
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, Ctx, UsageError, resolve_caller
-from herdr_fleet.fleetfile import NAME_RE
+from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
 from herdr_fleet.messages import (OWNER, Drop, agent_state, compose_prompt, delivered_entry, expire_due,
                                   first_line, notify_owner, prompt_mailbox, queued_in, read, record,
-                                  resolve_sender, since_label)
+                                  resolve_sender, settle, since_label)
 from herdr_fleet.seats import SETTLED
 
 # -- deliver ---------------------------------------------------------------------------------
@@ -38,10 +45,7 @@ def op_deliver(ctx: Ctx, names: Sequence[str], fyi_too: bool = False) -> int:
     fleet, repo = ctx.fleet, ctx.fleet.repo
     agents = ctx.herdr.agent_list()
     if not ctx.dry_run:  # what is past its ttl goes first, logged, wherever it waits
-        for mailbox in inbox.mailboxes(repo):
-            if inbox.has_queued(repo, mailbox):
-                with inbox.locked(repo, mailbox):
-                    expire_due(ctx, mailbox)
+        expire_all(ctx)
     waiting = inbox.queued(repo)
     if names:
         known = ({s.name for s in fleet.seats} | {c.name for c in fleet.contacts} | {OWNER}
@@ -51,9 +55,7 @@ def op_deliver(ctx: Ctx, names: Sequence[str], fyi_too: bool = False) -> int:
             raise UsageError("not a seat, contact, owner or mailbox: %s" % ", ".join(unknown))
         order = list(dict.fromkeys(names))
     else:
-        candidates = [s.name for s in fleet.seats] + [c.name for c in fleet.contacts]
-        order = [n for n in candidates
-                 if any(fyi_too or not m.fyi for m in waiting.get(n, []))]
+        order = candidates(ctx, waiting, fyi_too)
         if waiting.get(OWNER):
             order.append(OWNER)
         if not order:
@@ -62,13 +64,30 @@ def op_deliver(ctx: Ctx, names: Sequence[str], fyi_too: bool = False) -> int:
             return EXIT_OK
     codes = [EXIT_OK]
     for name in order:
-        line, code = _deliver_one(ctx, name, agents, waiting.get(name, []))
+        line, code, _ = deliver_one(ctx, name, agents, waiting.get(name, []))
         ctx.say(line)
         codes.append(code)
     return max(codes)
 
 
-def _herdr_target(ctx: Ctx, name: str, agents: Sequence[Dict]) -> Tuple[Optional[str], Optional[str]]:
+def expire_all(ctx: Ctx) -> None:
+    """Move every queued message past its ttl to ``cur/``, logged ``expired``, in every mailbox."""
+    repo = ctx.fleet.repo
+    for mailbox in inbox.mailboxes(repo):
+        if inbox.has_queued(repo, mailbox):
+            with inbox.locked(repo, mailbox):
+                expire_due(ctx, mailbox)
+
+
+def candidates(ctx: Ctx, waiting: Dict[str, List[Message]], fyi_too: bool = False) -> List[str]:
+    """The mailboxes ``deliver`` takes without names (design 18.5 item 3): seats in file
+    order, then contacts, each only with a message that is not FYI (``fyi_too``: any)."""
+    fleet = ctx.fleet
+    names = [s.name for s in fleet.seats] + [c.name for c in fleet.contacts]
+    return [n for n in names if any(fyi_too or not m.fyi for m in waiting.get(n, []))]
+
+
+def herdr_target(ctx: Ctx, name: str, agents: Sequence[Dict]) -> Tuple[Optional[str], Optional[str]]:
     """(what ``agent prompt`` gets, or None; why it cannot be reached, or None)."""
     contact = ctx.fleet.contact(name)
     if contact is not None and ctx.fleet.seat(name) is None:
@@ -79,32 +98,37 @@ def _herdr_target(ctx: Ctx, name: str, agents: Sequence[Dict]) -> Tuple[Optional
     return (name, None) if name in live else (None, "absent")
 
 
-def _deliver_one(ctx: Ctx, name: str, agents: Sequence[Dict], waiting: List[Message]) -> Tuple[str, int]:
+def deliver_one(ctx: Ctx, name: str, agents: Sequence[Dict], waiting: List[Message],
+                via: str = "deliver") -> Tuple[str, int, Optional[Drop]]:
+    """Hand one mailbox over if its owner can take it now: (line, exit code, what the
+    attempt did, or None when nothing was attempted). ``watch --once`` uses it with
+    ``via="watch"``."""
     count = len(waiting)
     if not count:
-        return "nothing queued for %s" % name, EXIT_OK
+        return "nothing queued for %s" % name, EXIT_OK, None
     plural = "%d message%s" % (count, "" if count == 1 else "s")
     if name == OWNER:
         if ctx.dry_run:
-            return "would notify owner of %s" % plural, EXIT_OK
+            return "would notify owner of %s" % plural, EXIT_OK, None
         with inbox.locked(ctx.fleet.repo, OWNER):
             drop = notify_owner(ctx)
         if drop.status == "sent":
-            return "delivered %d to owner (notification)" % len(drop.carried), EXIT_OK
-        return "owner: %s, %s left queued" % (drop.detail or "not shown", plural), EXIT_OK
-    target, problem = _herdr_target(ctx, name, agents)
+            return "delivered %d to owner (notification)" % len(drop.carried), EXIT_OK, drop
+        return "owner: %s, %s left queued" % (drop.detail or "not shown", plural), EXIT_OK, drop
+    target, problem = herdr_target(ctx, name, agents)
     state = problem or agent_state(ctx, target)
     if problem or state not in SETTLED:
-        return "%s: %s, %d left queued" % (name, state, count), EXIT_OK
+        return "%s: %s, %d left queued" % (name, state, count), EXIT_OK, None
     if ctx.dry_run:
         _, size, pointer = compose_prompt(waiting)
         if pointer:
             return "would prompt %s (%s) with a pointer: %s" % (
-                name, state, inbox.pointer_text(waiting, size, prefix=False)), EXIT_OK
-        return "would deliver %d to %s (%s), %s" % (count, name, state, size_label(size)), EXIT_OK
+                name, state, inbox.pointer_text(waiting, size, prefix=False)), EXIT_OK, None
+        return "would deliver %d to %s (%s), %s" % (count, name, state, size_label(size)), EXIT_OK, None
     with inbox.locked(ctx.fleet.repo, name):
-        drop = prompt_mailbox(ctx, name, str(target), SETTLED, "deliver")
-    return _line(name, drop, state)
+        drop = prompt_mailbox(ctx, name, str(target), SETTLED, via)
+    line, code = _line(name, drop, state)
+    return line, code, drop
 
 
 def _line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
@@ -223,3 +247,93 @@ def _history(ctx: Ctx, caller: str, other: str, as_json: bool) -> int:
     else:
         ctx.say(inbox.render_batch(shown, direction=True))
     return EXIT_OK
+
+
+# -- inbox --hook (design 18.7) ---------------------------------------------------------------------
+
+HOOK_CAP_CHARS = 9000  # Claude Code caps additionalContext at 10,000 characters
+HOOK_EVENTS = {"stop": "Stop", "prompt": "UserPromptSubmit"}
+
+
+def op_inbox_hook(ctx: Ctx, which: str, stdin: TextIO) -> int:
+    """``inbox --hook stop|prompt``: the seat reads its own inbox inside its own Claude
+    Code process. Prints one ``hookSpecificOutput`` object or nothing; always exit 0,
+    and nothing on stderr either, so a broken hook never disturbs the agent."""
+    ctx.stderr = io.StringIO()  # warnings (a fleet file key, a corrupt message) stay out of the hook
+    try:
+        output = _hook_output(ctx, which, stdin)
+    except Exception:  # noqa: BLE001 - invariant 14: a hook prints nothing on any error
+        return EXIT_OK
+    if output:
+        try:
+            ctx.say(output)
+            ctx.stdout.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    return EXIT_OK
+
+
+def _hook_input(stdin: TextIO) -> Dict:
+    try:
+        data = json.loads(stdin.read() or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _hook_seat(ctx: Ctx, data: Dict) -> Optional[str]:
+    """The seat whose Claude Code runs this hook: the fleet is found from the hook's
+    ``cwd`` (else the process cwd), the agent from ``HERDR_PANE_ID`` through ``agent get``.
+    None when any of it is missing or the pane's agent is not a seat."""
+    pane = ctx.env.get("HERDR_PANE_ID")
+    if not pane or not ctx.inside_herdr():
+        return None
+    hook_cwd = data.get("cwd")
+    path = None
+    for directory in ([hook_cwd] if isinstance(hook_cwd, str) and os.path.isdir(hook_cwd) else []) + [ctx.cwd]:
+        try:
+            path = find_fleet_file(directory, ctx.file, ctx.env)
+            break
+        except FleetError:
+            continue
+    if path is None:
+        return None
+    ctx.file = path  # found; loading it may still fail, which the caller turns into silence
+    fleet = ctx.fleet
+    name = ctx.herdr.pane_agent(pane).get("name")
+    return str(name) if name and fleet.seat(str(name)) is not None else None
+
+
+def _hook_output(ctx: Ctx, which: str, stdin: TextIO) -> Optional[str]:
+    data = _hook_input(stdin)
+    if which == "stop" and data.get("stop_hook_active") is True:
+        return None  # a Stop hook already continued this turn: let it end
+    name = _hook_seat(ctx, data)
+    if not name:
+        return None
+    repo = ctx.fleet.repo
+    if not inbox.has_queued(repo, name):
+        return None
+    if which == "prompt":
+        now = inbox.now_utc()
+        count = len([m for m in queued_in(ctx, name) if not inbox.is_due(m, now)])
+        if not count:
+            return None
+        return _hook_json(which, "%d message%s waiting; run: %s" % (count, "" if count == 1 else "s",
+                                                                    inbox.POINTER_COMMAND))
+    with inbox.locked(repo, name):
+        expire_due(ctx, name)
+        waiting = queued_in(ctx, name)
+        if all(m.fyi for m in waiting):
+            return None  # nothing, or only FYIs: an FYI never costs a turn (18.12)
+        batch = inbox.render_batch(waiting)
+        size = inbox.size_of(batch)
+        if size > inbox.BATCH_CAP or len(batch) > HOOK_CAP_CHARS:
+            return _hook_json(which, inbox.pointer_text(waiting, size))  # the files stay queued
+        settle(ctx, waiting, "hook", "sent")
+    return _hook_json(which, batch)
+
+
+def _hook_json(which: str, context: str) -> str:
+    # ASCII only: a hook's stdout may have no UTF-8 encoding, and the files have moved by now.
+    return json.dumps({"hookSpecificOutput": {"hookEventName": HOOK_EVENTS[which], "additionalContext": context}})

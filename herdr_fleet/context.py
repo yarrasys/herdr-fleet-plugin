@@ -245,8 +245,9 @@ class Ctx:
             save_state(self._state)
 
 
-def preflight(ctx: Ctx) -> None:
-    """Common preconditions (design section 4): inside herdr, reachable, new enough."""
+def preflight(ctx: Ctx, caller: bool = True) -> None:
+    """Common preconditions (design section 4): inside herdr, reachable, new enough.
+    ``caller=False`` skips the caller lookup (``watch`` has no use for the caller's pane)."""
     if not ctx.inside_herdr():
         raise OpError("not running inside Herdr (HERDR_ENV=1 or HERDR_BIN_PATH is required)")
     ctx.herdr.agent_list()
@@ -255,7 +256,7 @@ def preflight(ctx: Ctx) -> None:
         found = ".".join(str(v) for v in version) if version else "unknown"
         raise OpError("herdr %s is too old; herdr-fleet needs %s or newer"
                       % (found, ".".join(str(v) for v in MIN_HERDR_VERSION)))
-    if ctx.env.get("HERDR_PANE_ID"):
+    if caller and ctx.env.get("HERDR_PANE_ID"):
         resolve_caller(ctx)
 
 

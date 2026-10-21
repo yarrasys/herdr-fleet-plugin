@@ -13,8 +13,10 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 
 from support import ROOT, THREE_SEATS, install_fake_herdr, read_log
@@ -50,8 +52,11 @@ class ManifestContents(unittest.TestCase):
         self.assertEqual(actions["tile"], {  # design section 15.1
             "id": "tile", "title": "Fleet: tile (re-tile the seats in place)",
             "contexts": ["workspace"], "command": ["python3", "bin/herdr-fleet", "tile", "--notify"]})
+        self.assertEqual(actions["watch"], {  # design 18.6
+            "id": "watch", "title": "Fleet: watch", "contexts": ["workspace"],
+            "command": ["python3", "bin/herdr-fleet", "ui", "watch"]})
         self.assertEqual([a["id"] for a in self.manifest["actions"]],
-                         ["up", "status", "manage", "doctor", "init", "tile"])
+                         ["up", "status", "manage", "doctor", "init", "tile", "watch"])
         for action in actions.values():
             build_parser().parse_args(action["command"][2:])  # still valid CLI arguments
 
@@ -62,6 +67,8 @@ class ManifestContents(unittest.TestCase):
         self.assertEqual(panes["manage"]["placement"], "popup")
         self.assertEqual((panes["manage"]["width"], panes["manage"]["height"]), ("70%", "60%"))
         self.assertEqual(panes["manage"]["command"], ["sh", "-c", PANE_PREFIX + "menu"])
+        self.assertEqual(panes["watch"]["command"], ["sh", "-c", PANE_PREFIX + "watch"])
+        self.assertNotIn("placement", panes["watch"])  # `ui watch` asks for a split when it opens it
         for pane in panes.values():
             args = shlex.split(pane["command"][2])[3:]
             build_parser().parse_args(args)
@@ -121,6 +128,42 @@ class ManifestCommandsRun(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn(["plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "status", "--cwd", self.repo],
                       read_log(self.env))
+
+    def test_watch_action_opens_a_split_at_the_focused_panes_repo(self):
+        context = {"workspace_id": "w1", "focused_pane_id": "w1:p1", "focused_pane_cwd": self.repo}
+        proc = self.run_cmd(self.action_command("watch"), ROOT, HERDR_PLUGIN_ACTION_ID="yarrasys.fleet.watch",
+                            HERDR_PLUGIN_CONTEXT_JSON=json.dumps(context))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(["plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "watch", "--cwd", self.repo,
+                       "--placement", "split"], read_log(self.env))
+
+    def test_watch_pane_runs_until_stopped_and_removes_its_lock(self):
+        # The pane process is the watcher itself (sh -c exec); closing the pane (SIGHUP), a kill
+        # (SIGTERM) or Ctrl-C (SIGINT) stops it cleanly and the lock goes with it.
+        lock = os.path.join(self.repo, ".herdr", "watch.lock")
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            proc = subprocess.Popen(self.pane_command("watch"), cwd=self.repo,
+                                    env=dict(self.env, HERDR_PLUGIN_ENTRYPOINT_ID="watch"),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            try:
+                deadline = time.time() + 30
+                while not os.path.exists(lock) and proc.poll() is None and time.time() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(os.path.exists(lock), proc.stderr.read() if proc.poll() is not None else "no lock")
+                with open(lock) as handle:
+                    self.assertEqual(json.load(handle)["pid"], proc.pid)
+                proc.send_signal(sig)
+                out, err = proc.communicate(timeout=30)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+            self.assertEqual(proc.returncode, 0, out + err)
+            self.assertNotIn("Traceback", err)
+            self.assertRegex(out, r"watching .*fleet\.toml \(pid %d, debounce 5000 ms\); Ctrl-C stops" % proc.pid)
+            self.assertTrue(out.rstrip().endswith("stopped"), out)
+            self.assertFalse(os.path.exists(lock))
+        self.assertEqual({tuple(a[:2]) for a in read_log(self.env)}, {("agent", "list"), ("--version",)})
 
     def test_init_action_writes_into_the_focused_panes_repo(self):
         target = os.path.join(self.tmp, "fresh")

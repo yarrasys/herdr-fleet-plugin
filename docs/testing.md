@@ -21,7 +21,8 @@ The suite takes a few seconds. Nothing in it talks to a real herdr: `HERDR_BIN_P
 
 - canned responses keyed by an argv prefix (`world["canned"]`), for errors and odd output;
 - stateful simulation of `workspace`, `pane` and `agent` commands with the JSON shapes of herdr 0.9.4;
-- behaviours for the hard cases: `agent_pane_busy` for a fresh split, `agent_not_ready`, start errors, a quit that takes N polls of `agent get` before the agent is gone, an agent that never quits, processes that linger after exit, stalled prompts, and `agent wait` outcomes.
+- behaviours for the hard cases: `agent_pane_busy` for a fresh split, `agent_not_ready`, start errors, a quit that takes N polls of `agent get` before the agent is gone, an agent that never quits, processes that linger after exit, stalled prompts, and `agent wait` outcomes;
+- scripted `agent wait` results for the watcher (`wait_results`: per agent, a list of `idle`, `done`, `working`, `blocked`, `timeout` or `not_found`, consumed one per wait). A state that `--until` does not name times out, as live herdr would; `timeout` without `--timeout` answers `fake_wait_forever`, because live herdr would never return. `status_after_wait` changes the agent's state right after a wait answered, as when a seat starts working during the debounce. The log records each wait's `--until` and `--timeout`. In-process calls are serialised by a lock, and the program form takes a file lock, so the watcher's waiter threads can share one world.
 
 Most tests call `herdr_fleet.cli.main` in-process with the fake as the runner and an instant clock, so 250 ms polls and 10 s or 20 s timeouts cost nothing. `tests/test_cli_subprocess.py` runs `bin/herdr-fleet` as a real process with the fake installed as an executable on `HERDR_BIN_PATH`, exactly as herdr would. `tests/test_manifest.py` checks `herdr-plugin.toml` and runs its commands the way herdr does: actions from the plugin root with an action's context JSON, pane entrypoints through `sh -c` from the repo directory that `ui` passes as `--cwd`.
 
@@ -36,7 +37,9 @@ Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry
 - every `agent start` targeted a pane at a bare shell prompt and never the caller's pane;
 - every `pane close` closed a pane herdr-fleet created and that hosted no agent; every `workspace close` closed a workspace herdr-fleet created;
 - an `inbox` command ran nothing but the caller lookup (`pane current`, `agent get`), and nothing at all with `--as` (design 18.5);
-- `deliver` and kickoffs carrying queued messages prompted only idle or done agents (invariant 11); only `send` may reach a working one.
+- `deliver`, `watch` and kickoffs carrying queued messages prompted only idle or done agents (invariant 11); only `send` may reach a working one;
+- `watch` ran nothing but `agent wait`, `agent get`, `agent list`, `agent prompt`, `notification show` and the preflight's `herdr --version`, and every `agent wait` carried `--timeout` (invariants 12 and 13);
+- `inbox --hook` ran nothing but `agent get` (invariant 14), and `hooks` ran no herdr command at all.
 
 Tests that need git use `GitCase` from `tests/support.py`: a real temporary repository (`git init`, `git commit`, `git worktree add`) with HOME set to the test's temp dir and no system git config. The plugin's git calls go through a logging shim on `PATH`, and `tearDown` asserts invariant 8 on them: only `rev-parse`, `symbolic-ref`, `worktree list`, `log`, `status`, `merge-base`, `ls-files` and `cat-file`, never `fetch` or `prune`. These tests are skipped when git is missing.
 
@@ -153,6 +156,27 @@ Version 0.6.0 (design section 18, the inbox), all in `tests/test_inbox.py` unles
 - The safety hook itself fails for a `deliver` prompt to a working agent and for an `inbox` that runs anything beyond the caller lookup.
 - `tests/test_status_doctor.py`: `install-cli` writes the launcher (marker, `FALLBACK`, the `HERDR_FLEET_BIN` line, mode 0755, idempotent, no temp file), replaces a symlink and an older launcher, refuses a foreign file, and `--dev` symlinks the checkout. The launcher is never executed in tests: it calls herdr.
 - Existing tests updated for 0.6.0: the `[from X #id]` prefix, absent and blocked targets queued instead of refused, an FYI to an idle seat queued, `log` lines with `#id`, and the four `.gitignore` entries.
+
+Versions 0.6.1 (design 18.6, the watcher) and 0.7.0 (18.7, hooks):
+
+- `tests/test_watch.py` runs the watcher in-process with its waiters inline (`watch.spawn` patched) on a fake clock whose loop sleep raises `KeyboardInterrupt` after a number of passes, as Ctrl-C would:
+  - one waiter per mailbox with `agent wait NAME --until idle --until done --timeout 30000`, a timeout ending the thread and the next pass starting another, no waiter for an empty mailbox, the batch after the 5 s debounce, `delivered` via `watch`, the notification, and the lines `waiting on`, `idle; delivering`, `delivered`, `stopped`;
+  - the debounce re-check backing off when the seat went working (one prompt, after the second wait), and a seat that went blocked never being prompted;
+  - FYI-only mailboxes getting no waiter while FYIs ride along with a real message; a fleet with only FYIs queued asking herdr nothing after the preflight;
+  - an absent agent getting no waiter, one line, and one `agent list` per 30 s; a contact waited on through its pane id;
+  - `owner` notified once; an unconfirmed prompt moved, logged and never repeated; a failed one tried again only after a minute; a pointer prompted once, and again only when a new message arrives; a message read meanwhile not delivered;
+  - the lock: a live pid refuses (exit 1, `watcher already running (pid N)`, the lock untouched), a dead pid's lock and an unreadable one are replaced, the lock records `pid`, `started` and `fleet` and goes on exit, `release` keeps a lock that is not ours;
+  - `--once`: deliver's lines, no wait, no lock, no sleep, exit 1 for an unconfirmed prompt;
+  - real waiter threads delivering to two seats and leaving no thread behind;
+  - `status`: no watcher line while nothing is queued, `watcher: not running` or `watcher: running (pid N since HH:MM)` before the `queued:` line, a dead pid counted as not running, and `"watcher"` in JSON;
+  - the fake's scripted waits (shapes, `--until`, `--timeout`, `not_found`), and the safety hook failing for a `watch` that runs anything else, waits without a timeout or prompts a working or blocked agent.
+- `tests/test_hooks.py`:
+  - `hooks install` creating the settings file with exactly the two entries (mode 0644, no herdr command), keeping every other key, hook and `permissions` entry, idempotent byte for byte, and `--remove` restoring the original object; removing only our entry from a shared group; refusing invalid JSON, a non-object and a non-object `hooks` without touching the file; the warnings for a fleet without a Claude seat and for `herdr-fleet` missing from `PATH`;
+  - the doctor line: `info` when not installed, `ok` when installed, `warn` when only one is there, none without a Claude seat;
+  - `inbox --hook stop`: the batch as `additionalContext`, files moved and logged `delivered` via `hook`, only `agent get` on the seat's pane; silent with exit 0 and nothing on stderr for `stop_hook_active`, no pane, outside herdr, no fleet, a pane whose agent is not a seat or has no agent, a broken fleet file, an empty mailbox and an FYI-only one; unreadable input counted as no input; the fleet found from the hook's `cwd`; the pointer above 9,000 characters with the files left queued; ASCII-only output;
+  - `inbox --hook prompt`: counts what waits (not what is past its ttl), moves and logs nothing;
+  - usage errors for `--hook` with `--as`, another mode or an unknown event.
+- `tests/test_manifest.py`: the `watch` action and pane entries, the action opening the pane with `--placement split` at the focused pane's repository, and the pane command run as a real process that writes the lock with its own pid and stops cleanly on SIGTERM and on SIGINT, removing it.
 
 ### Running the CLI against the fake by hand
 
@@ -325,3 +349,79 @@ env -u HERDR_FLEET_BIN "$S/bin/herdr-fleet" --version; "$S/bin/herdr-fleet" --ve
 | 13. launcher | without `HERDR_FLEET_BIN` it prints the installed plugin's version (from `herdr plugin list --json`); with it, `herdr-fleet 0.6.0` from this clone |
 
 Then run `down --close-panes --fleet "$F"` and remove `$S` as in the first smoke test.
+
+## Live smoke test for 0.6.1 and 0.7.0 (to run by hand)
+
+Not run yet. For the designer or the owner, inside herdr, from this repository, with the one-seat Haiku fleet of the first smoke test (`$S`, `$F`), and with `HERDR_FLEET_BIN` exported and in the seat's `env` as in the 0.6.0 test. Wait for the seat to be idle between steps unless a step says otherwise.
+
+### The watcher
+
+```bash
+python3 bin/herdr-fleet up --fleet "$F"                                         # 1
+herdr plugin link "$PWD"                                                        # 2: the pane runs this clone
+herdr plugin pane open --plugin yarrasys.fleet --entrypoint watch --placement split --cwd "$S" --no-focus   # 3
+python3 bin/herdr-fleet watch --fleet "$F"; echo "exit $?"                      # 4
+python3 bin/herdr-fleet send --queue --as owner fleet-smoke "Reply with the single word WATCH" --fleet "$F"     # 5
+python3 bin/herdr-fleet send --as owner fleet-smoke "Count from 1 to 30, one number per line" --fleet "$F"     # 6
+python3 bin/herdr-fleet send --queue --as owner fleet-smoke "Then reply with the single word LATER" --fleet "$F"  # 7 (at once)
+python3 bin/herdr-fleet send --queue --fyi --as owner fleet-smoke "FYI: no reply needed" --fleet "$F"          # 8
+python3 bin/herdr-fleet status --fleet "$F"                                     # 9
+herdr plugin pane close <pane id from step 3>                                   # 10
+python3 bin/herdr-fleet status --fleet "$F"; ls -a "$S/.herdr"                  # 11
+python3 bin/herdr-fleet watch --once --fleet "$F"                               # 12
+python3 bin/herdr-fleet log --fleet "$F"                                        # 13
+```
+
+| Step | Expected |
+| --- | --- |
+| 3. watch pane | a split beside the focused pane printing `HH:MM:SS  watching $S/.herdr/fleet.toml (pid N, debounce 5000 ms); Ctrl-C stops`; `$S/.herdr/watch.lock` holds that pid |
+| 4. a second watcher | `herdr-fleet: error: watcher already running (pid N)`, exit 1 |
+| 5. queued to an idle seat | within 2 s the pane prints `waiting on fleet-smoke (1 queued)` and `fleet-smoke idle; delivering 1`, about 5 s later `delivered 1 to fleet-smoke`; a notification `delivered 1 to fleet-smoke`; the seat answers WATCH |
+| 6, 7. queued while working | step 6 is delivered at once and the seat starts counting; step 7 stays queued while it counts, and only after the count ends does the pane print `fleet-smoke idle; delivering 1` and `delivered 1 to fleet-smoke`; the seat answers LATER. If the seat starts another turn within the 5 s, the pane prints `fleet-smoke working; still waiting` and delivers later |
+| 8, 9. FYI only | no waiter, nothing printed; `status` shows `watcher: running (pid N since HH:MM)`, then `queued: fleet-smoke 1` |
+| 10, 11. pane closed | the watcher stops: `status` shows `watcher: not running`, and `watch.lock` is gone (if it is still there, closing a plugin pane sent the watcher no SIGHUP; note it) |
+| 12. --once | `nothing to deliver` (only an FYI is queued); no lock is written |
+| 13. log | `delivered #… via watch` entries for steps 5 and 7, none for the FYI |
+
+### Hooks
+
+The seat's Claude Code reads `.claude/settings.local.json` from its own working directory, so this part uses a second scratch fleet whose seat runs in that directory. Claude Code asks once whether to trust the new directory: `up` reports the seat blocked, the owner answers the prompt in the seat's pane, then `kickoff fleet-hooks` briefs it.
+
+```bash
+H=$(mktemp -d /tmp/fleet-hooks.XXXXXX); mkdir -p "$H/.herdr"; G="$H/.herdr/fleet.toml"
+cat > "$G" <<EOF
+cwd = "$H"
+
+[[agents]]
+name = "fleet-hooks"
+kind = "claude"
+args = ["--model", "claude-haiku-5-5"]
+env = { HERDR_FLEET_BIN = "$HERDR_FLEET_BIN" }
+kickoff_text = "[from herdr-fleet] Hooks smoke test ({reason}). You are {name}. Reply with the single word READY, then wait. Run no tools unless a message asks you to."
+EOF
+python3 bin/herdr-fleet doctor --fleet "$G" | grep hooks                       # 14
+python3 bin/herdr-fleet hooks install --fleet "$G"; cat "$H/.claude/settings.local.json"   # 15
+python3 bin/herdr-fleet hooks install --fleet "$G"                             # 16
+python3 bin/herdr-fleet doctor --fleet "$G" | grep hooks                       # 17
+python3 bin/herdr-fleet up --fleet "$G"                                        # 18, then the owner answers the trust prompt
+python3 bin/herdr-fleet kickoff fleet-hooks --fleet "$G"                       # 19
+python3 bin/herdr-fleet send --as owner fleet-hooks "Count from 1 to 30, one number per line" --fleet "$G"   # 20
+python3 bin/herdr-fleet send --queue --as owner fleet-hooks "Then reply with the single word HOOKED" --fleet "$G"   # 21 (at once)
+python3 bin/herdr-fleet send --queue --as owner fleet-hooks "Reply with the single word PULLED" --fleet "$G"   # 22
+herdr agent prompt fleet-hooks "Say hi"                                         # 23
+python3 bin/herdr-fleet log --fleet "$G"                                       # 24
+python3 bin/herdr-fleet hooks install --remove --fleet "$G"; cat "$H/.claude/settings.local.json"   # 25
+```
+
+| Step | Expected |
+| --- | --- |
+| 14 | `info  hooks: not installed (herdr-fleet hooks install)` |
+| 15 | `installed the Stop and UserPromptSubmit hooks in $H/.claude/settings.local.json`; the file holds the two entries with `"timeout": 10` |
+| 16 | `already installed in …`; the file is unchanged |
+| 17 | `ok    hooks: installed` |
+| 20, 21 | the seat counts; step 21 stays queued; when the count ends, the Stop hook hands the message back and the seat answers HOOKED in the same turn, then stops (the second Stop sees `stop_hook_active` and the hook prints nothing); the file is in `cur/` |
+| 22, 23 | step 22 stays queued (idle seat, `--queue`); the prompt of step 23 arrives with the note `1 message waiting; run: herdr-fleet inbox --read`, and the seat may run it and answer PULLED |
+| 24 | `delivered #… via hook` for step 21, and `via inbox` if the seat read step 22 |
+| 25 | `removed the Stop and UserPromptSubmit hooks from …`; the file holds no `hooks` key |
+
+Then `down --close-panes` both fleets, `herdr plugin unlink yarrasys.fleet` if it was linked only for this test, and remove `$S` and `$H`.

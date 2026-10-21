@@ -26,10 +26,12 @@ from herdr_fleet.ops import op_down, op_install_cli, op_kickoff, op_restart, op_
 from herdr_fleet.scaffold import available_examples, run_init
 from herdr_fleet.seats import Clock
 from herdr_fleet.state import StateError
-from herdr_fleet.mailroom import op_deliver, op_inbox
+from herdr_fleet.hooks import op_hooks
+from herdr_fleet.mailroom import op_deliver, op_inbox, op_inbox_hook
 from herdr_fleet.messages import op_ack, op_log, op_send
 from herdr_fleet.statenote import op_state
 from herdr_fleet.tile import op_tile
+from herdr_fleet.watch import DEFAULT_DEBOUNCE_MS, op_watch
 from herdr_fleet.worktrees import op_worktrees
 
 
@@ -144,7 +146,33 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--history", metavar="NAME",
                         help="every delivered message between you and NAME, oldest first")
     action.add_argument("--redeliver", metavar="ID", help="queue a delivered message (#3f2a9c) again")
+    action.add_argument("--hook", choices=("stop", "prompt"),
+                        help="run as a Claude Code hook (installed by `hooks install`): reads the hook JSON on "
+                             "stdin, prints hookSpecificOutput or nothing, always exits 0")
     p.add_argument("--json", action="store_true", help="print JSON")
+
+    p = sub.add_parser("watch", parents=[fleet], help="deliver queued messages as seats become idle (foreground)",
+                       description="Run until Ctrl-C: for every seat or contact with a queued message that is not "
+                                   "FYI, wait in the herdr server (`herdr agent wait`) until it is idle or done, "
+                                   "then deliver its queue as one prompt, as `deliver` does. owner gets a "
+                                   "notification at once. One watcher per fleet (.herdr/watch.lock).")
+    p.add_argument("--debounce", metavar="MS", type=int, default=DEFAULT_DEBOUNCE_MS,
+                   help="after a seat turns idle, wait MS ms and check again before delivering (default %d)"
+                        % DEFAULT_DEBOUNCE_MS)
+    p.add_argument("--once", action="store_true",
+                   help="deliver what can be delivered now (seats already idle or done) and exit; no lock")
+
+    p = sub.add_parser("hooks", help="Claude Code hooks that let seats read their inbox (opt-in)",
+                       description="Pick a fleet file with --fleet PATH after the action (hooks install --fleet ...).")
+    hooks_sub = p.add_subparsers(dest="hooks_action", metavar="ACTION")
+    hooks_sub.required = True
+    q = hooks_sub.add_parser("install", parents=[fleet],
+                             help="add the Stop and UserPromptSubmit hooks to .claude/settings.local.json",
+                             description="Add a Stop hook (`herdr-fleet inbox --hook stop`: a seat ending a turn "
+                                         "reads its queued messages) and a UserPromptSubmit hook (`herdr-fleet "
+                                         "inbox --hook prompt`: says how many wait) to the repository's "
+                                         ".claude/settings.local.json, keeping everything else in it.")
+    q.add_argument("--remove", action="store_true", help="remove exactly those two hooks instead")
 
     p = sub.add_parser("ack", parents=[fleet], help="settle replies you owe by hand; sends nothing",
                        description="Log an acknowledgement for each NAME whose message you owe a reply, so it "
@@ -201,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dev", action="store_true", help="symlink this checkout's bin/herdr-fleet instead (developers)")
 
     p = sub.add_parser("ui", parents=[common], help="open the status overlay or manage popup (manifest actions)")
-    p.add_argument("entrypoint", choices=("status", "manage"))
+    p.add_argument("entrypoint", choices=("status", "manage", "watch"))
 
     sub.add_parser("menu", parents=[common], help="the numbered popup menu (manifest pane)")
     return parser
@@ -284,7 +312,18 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     if command == "ack":  # appends to the message log; herdr only to learn who you are (without --as)
         return op_ack(ctx, args.names, args.all_owed, args.as_name)
     if command == "inbox":  # your mailbox; herdr only to learn who you are (without --as)
+        if args.hook:  # a Claude Code hook: silent on every error (design 18.7)
+            if args.as_name or args.json:
+                raise UsageError("--hook takes neither --as nor --json: the seat is the hook's own pane")
+            return op_inbox_hook(ctx, args.hook, stdin)
         return op_inbox(ctx, args.as_name, args.read, args.count, args.history, args.redeliver, args.json)
+    if command == "hooks":  # edits .claude/settings.local.json only; no herdr command
+        return op_hooks(ctx, args.remove)
+    if command == "watch":  # the caller's pane plays no part: no caller lookup
+        if args.debounce < 0:
+            raise UsageError("--debounce takes milliseconds, 0 or more")
+        preflight(ctx, caller=False)
+        return op_watch(ctx, args.debounce, args.once)
     if command == "send":  # preflight inside, since a message to owner may queue outside herdr
         return op_send(ctx, args.words, args.message_file, args.as_name, args.when_ready, args.all_seats, args.fyi,
                        args.queue, args.now, args.reply_to, args.ttl)
@@ -387,7 +426,8 @@ def _fail(ctx: Ctx, args: argparse.Namespace, stdin: TextIO, code: int, kind: st
         ctx.stderr.write("herdr-fleet: %s: %s\n" % (kind, line))
     if args.command == "ui":
         code = EXIT_USAGE
-    if ctx.notify_enabled or args.command == "ui" or ctx.env.get("HERDR_PLUGIN_ACTION_ID"):
+    pane = args.command == "watch" and ctx.env.get("HERDR_PLUGIN_ENTRYPOINT_ID")  # the watch pane shows no error
+    if ctx.notify_enabled or args.command == "ui" or ctx.env.get("HERDR_PLUGIN_ACTION_ID") or pane:
         what = args.entrypoint if args.command == "ui" else args.command
         ctx.notify("Fleet %s failed" % what, "\n".join(lines), "request")
     if getattr(args, "hold", False) or args.command == "menu":

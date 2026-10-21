@@ -22,7 +22,14 @@ acts, writes it back and appends one JSON line to the call log (env
   gone), ``ignore_quit`` (names that never exit), ``linger_polls`` (n
   process-info answers that still show a non-shell process after exit),
   ``prompt_errors`` ({name: code}), ``wait_status`` ({name: status}),
-  ``argv_absent`` (agent processes carry ``cmdline`` but no ``argv``).
+  ``wait_results`` ({name or pane: [outcome, ...]}: each ``agent wait`` consumes one
+  of ``idle``, ``done``, ``working``, ``blocked``, ``timeout`` or ``not_found``; a state
+  sets the agent's status and answers it when ``--until`` names it, else the wait
+  times out as live herdr would; ``timeout`` needs ``--timeout``, since without it
+  live herdr waits for ever), ``status_after_wait`` ({name or pane: [status, ...]}:
+  after a successful wait the agent's status becomes the next one, as when it
+  starts working during a debounce), ``argv_absent`` (agent processes carry
+  ``cmdline`` but no ``argv``).
 - ``agent get``/``agent list`` records carry ``agent_session`` only when a test set
   one with ``put_agent(..., session=...)`` (live herdr 0.9.5 shape, e.g.
   ``claude_session(uuid)``; ``None`` gives ``"agent_session": null``); by
@@ -37,7 +44,8 @@ acts, writes it back and appends one JSON line to the call log (env
   workspace was created by a command in this world (``split``/``workspace
   create``) rather than set up by a test.
 
-Use it in-process (``Fake(world, log)(argv)``) or as a program.
+Use it in-process (``Fake(world, log)(argv)``) or as a program. In-process calls are
+serialised by a lock, so the watcher's waiter threads can share one world.
 """
 
 from __future__ import annotations
@@ -45,6 +53,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from typing import Dict, List, Optional, Tuple
 
 KINDS = ["pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline", "omp", "mastracode",
@@ -124,6 +133,9 @@ def put_agent(world: Dict, pane: str, kind: str, name: Optional[str] = None, sta
                                   world["behaviors"].get("argv_absent", False))]
 
 
+LOCK = threading.Lock()  # one call at a time reads, changes and writes the world
+
+
 class Fake:
     """Callable runner: ``Fake(world_path, log_path)([binary, *argv])``."""
 
@@ -133,6 +145,10 @@ class Fake:
         self.caller = caller  # the calling process's HERDR_PANE_ID, for `pane current --current`
 
     def __call__(self, argv: List[str]) -> Result:
+        with LOCK:
+            return self._call(argv)
+
+    def _call(self, argv: List[str]) -> Result:
         args = list(argv[1:])
         with open(self.world_path, "r", encoding="utf-8") as handle:
             world = json.load(handle)
@@ -350,17 +366,37 @@ class Sim:
 
     def _agent_wait(self, args: List[str]) -> Result:
         pos, opts, _ = _opts(args, ("--until", "--timeout"))
+        until = opts.get("--until") or ["idle", "done", "blocked"]
+        timeout = (opts.get("--timeout") or [None])[0]
+        self.info["until"], self.info["timeout"] = until, timeout
         pid = self._resolve(pos[0])
         if pid is None:
             return _err("agent_not_found", "no agent for %s" % pos[0])
         agent = self.w["panes"][pid]["agent"]
-        new = self.b.get("wait_status", {}).get(agent.get("name") or pid)
-        if new:
-            agent["agent_status"] = new
-        until = opts.get("--until") or ["idle", "done", "blocked"]
-        if agent["agent_status"] not in until:
-            return _err("timeout", "timed out waiting for %s" % pos[0])
-        return _ok({"agent": self._agent_record(pid), "type": "agent_info"}, "cli:agent:wait")
+        key = agent.get("name") or pid
+        script = self.b.get("wait_results", {}).get(key) or self.b.get("wait_results", {}).get(pid)
+        if script:
+            outcome = script.pop(0)
+            self.info["outcome"] = outcome
+            if outcome == "not_found":
+                return _err("agent_not_found", "no agent for %s" % pos[0])
+            if outcome != "timeout":
+                agent["agent_status"] = outcome
+            if outcome == "timeout" or outcome not in until:
+                if timeout is None:  # live herdr would block for ever; a test must never ask for that
+                    return _err("fake_wait_forever", "agent wait without --timeout would never return")
+                return _err("timeout", "timed out waiting for %s" % pos[0])
+        else:
+            new = self.b.get("wait_status", {}).get(key)
+            if new:
+                agent["agent_status"] = new
+            if agent["agent_status"] not in until:
+                return _err("timeout", "timed out waiting for %s" % pos[0])
+        record = self._agent_record(pid)
+        after = self.b.get("status_after_wait", {}).get(key)
+        if after:
+            agent["agent_status"] = after.pop(0)
+        return _ok({"agent": record, "type": "agent_info"}, "cli:agent:wait")
 
     def _agent_rename(self, args: List[str]) -> Result:
         pid = self._resolve(args[0])
@@ -557,7 +593,10 @@ def main() -> int:
     if not world or not log:
         sys.stderr.write("fake herdr: FAKE_HERDR_WORLD and FAKE_HERDR_LOG must be set\n")
         return 98
-    code, out, err = Fake(world, log, os.environ.get("HERDR_PANE_ID"))([sys.argv[0]] + sys.argv[1:])
+    import fcntl  # several fake processes at once (a watcher's threads) take turns with the world
+    with open(world + ".lock", "a") as guard:
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        code, out, err = Fake(world, log, os.environ.get("HERDR_PANE_ID"))([sys.argv[0]] + sys.argv[1:])
     sys.stdout.write(out)
     sys.stderr.write(err)
     return code
