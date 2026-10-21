@@ -8,6 +8,8 @@ Read AGENTS.md and docs/agent-team.md in {repo} before you start.
 Team:
 {roster}
 
+{inbox}
+
 Where things stand:
 {state}
 

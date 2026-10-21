@@ -1,5 +1,5 @@
 """Read-only inspection: drift (design 4.4), status (4.2, 16.3, 16.4, 16.7, 17.2,
-17.4) and doctor (4.7, 16.6, 17.3).
+17.4, 18.6's queued line) and doctor (4.7, 16.6, 17.3).
 
 Nothing here changes herdr. ``collect_status`` may rewrite the state file
 when it prunes ids herdr no longer knows, which every command does. Git is
@@ -14,7 +14,7 @@ import shlex
 import sys
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from herdr_fleet import MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, messages, permissions
+from herdr_fleet import MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, inbox, messages, permissions
 from herdr_fleet.context import Ctx
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import Herdr, HerdrError, describe
@@ -145,9 +145,32 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
                       "problem": r.problem()} for r in contact_mod.resolve_all(fleet, agents)],
         "owed": messages.owed(_log_entries(ctx)),
     }
+    data["queued"], data["queued_oldest"] = queued_summary(fleet)
     if integrations:
         data["integrations"] = integration_rows(herdr, fleet.kinds())
     return data
+
+
+def queued_summary(fleet: Fleet) -> Tuple[Dict[str, int], Dict[str, str]]:
+    """({mailbox: queued count}, {mailbox: time of the oldest}) for every non-empty mailbox,
+    seats in file order, then contacts, other names, and ``owner`` last. Read-only:
+    messages past their ttl are not counted, and nothing moves."""
+    found = inbox.queued(fleet.repo)
+    order = [s.name for s in fleet.seats] + [c.name for c in fleet.contacts]
+    names = [n for n in order if n in found] + sorted(n for n in found if n not in order and n != messages.OWNER)
+    if messages.OWNER in found:
+        names.append(messages.OWNER)
+    return ({n: len(found[n]) for n in names}, {n: found[n][0].time for n in names})
+
+
+def queued_line(data: Dict) -> Optional[str]:
+    """``queued: fablyn-dev 3 (oldest 10:09), owner 1``; None when every mailbox is empty."""
+    counts, oldest = data.get("queued") or {}, data.get("queued_oldest") or {}
+    if not counts:
+        return None
+    return "queued: " + ", ".join("%s %d%s" % (name, count, " (oldest %s)" % messages.since_label(oldest[name])
+                                               if count > 1 and name in oldest else "")
+                                  for name, count in counts.items())
 
 
 def git_branch(cwd: str) -> str:
@@ -233,6 +256,9 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
             lines.append("  %s  %s  %s%s" % (c["name"], where, c["state"],
                                               "  (%s)" % c["note"] if c["note"] else ""))
     lines.extend(messages.owed_lines(data.get("owed", [])))
+    queued = queued_line(data)
+    if queued:
+        lines.append(queued)
     for row in data.get("integrations", []):
         mark = "  <- %s" % row["status"] if row["flag"] else ""
         lines.append("integration %s: %s%s" % (row["kind"], row["line"] or row["status"], mark))

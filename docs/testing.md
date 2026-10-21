@@ -34,7 +34,9 @@ Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry
 - the log never contains bare `herdr`, `agent send-keys`, `pane send-keys`, `pane send-text` or `pane run`;
 - every `agent prompt` went to an agent that was `idle` or `done` at that moment (never `blocked`, `unknown` or `working`);
 - every `agent start` targeted a pane at a bare shell prompt and never the caller's pane;
-- every `pane close` closed a pane herdr-fleet created and that hosted no agent; every `workspace close` closed a workspace herdr-fleet created.
+- every `pane close` closed a pane herdr-fleet created and that hosted no agent; every `workspace close` closed a workspace herdr-fleet created;
+- an `inbox` command ran nothing but the caller lookup (`pane current`, `agent get`), and nothing at all with `--as` (design 18.5);
+- `deliver` and kickoffs carrying queued messages prompted only idle or done agents (invariant 11); only `send` may reach a working one.
 
 Tests that need git use `GitCase` from `tests/support.py`: a real temporary repository (`git init`, `git commit`, `git worktree add`) with HOME set to the test's temp dir and no system git config. The plugin's git calls go through a logging shim on `PATH`, and `tearDown` asserts invariant 8 on them: only `rev-parse`, `symbolic-ref`, `worktree list`, `log`, `status`, `merge-base`, `ls-files` and `cat-file`, never `fetch` or `prune`. These tests are skipped when git is missing.
 
@@ -132,6 +134,25 @@ Version 0.5.0 (design section 17):
   - CWD and BRANCH folding: a shared cwd and branch fold into the header (real repository), a blank branch folds away, a different cwd keeps the column, absent seats do not count, one live seat keeps both columns.
 - `tests/test_context.py` (fake transcripts under the test's HOME): the last `assistant` line with usage wins over later user and other lines and a trailing partial line; the parsed record has exactly `type`, `timestamp` and the four usage integers, with no text, tool call or other field; synthetic all-zero lines are skipped; the chunked backward read gives the same answer for any chunk size and honours the 4 MiB limit (scaled down); missing, empty and session-less cases; `status --context` and `--json --context` with no transcript text, path or session id in the output and nothing written under `~/.claude`; no extra herdr command; nothing read without `--context`; `restart_hint_tokens` (at or above, joined to notes, JSON) and its validation; `HERDR_FLEET_CLAUDE_PROJECTS`.
 - `tests/test_fleetfile.py`: `worktrees` (list of non-empty strings, `~` expanded, a relative glob warned about) and `restart_hint_tokens` (positive integer).
+
+Version 0.6.0 (design section 18, the inbox), all in `tests/test_inbox.py` unless noted. The fake herdr is unchanged: `agent wait` with `wait_status`, `prompt_errors` and canned answers cover every case.
+
+- Storage: the id format, the hex part drawn again when taken, the message file round trip (body verbatim, optional headers, no temp file left, `inbox/` in `.herdr/.gitignore`), short forms (unique, with and without `#`, full id, ambiguous with both ids listed, unknown, malformed), the write order of two messages in the same second, and mailbox names that cannot become paths.
+- Rendering: the batch header (`at HH:MM`, another day's date, `re #id`), `--history` direction, the direct form and the existing `[from` prefix, the pointer text, `compose_prompt` (alone, batched, over 16 KiB), and the new `log` lines.
+- Kickoff templates: with nothing queued the text is byte for byte the 0.5.0 text (the built-in default and a template with an `{inbox}` paragraph); with something queued the block sits at the placeholder, or is appended when the template has none; `{{inbox}}` stays literal.
+- `send`: every cell of the 18.3 table (idle, done, working, blocked, unknown, absent × default, `--queue`, `--now`, `--fyi`): the output line, exit code, prompt count, log `delivery` and whether the file is in `new/` or `cur/`; `--queue --now`, bad `--ttl` and unknown `--reply-to` are usage errors that write nothing; a failed write prompts nothing (the other target is still sent); an FYI never wakes a seat that turned idle between the check and the prompt; `--dry-run` writes nothing.
+- Flush before send: two queued messages and a third in one prompt in order, one `delivered` entry each before the `send` entry, all three in `cur/`; the same typed ahead to a working seat; a prompt refused at the last moment leaves everything queued; an unconfirmed batch is moved and logged `unconfirmed`.
+- The 16 KiB pointer from `send` (one large message) and from `deliver` (a large queue): the files stay, nothing is logged `delivered`, and `inbox --read` prints the whole body.
+- `--reply-to` stored, logged and rendered; `--ttl` absolute in the file; a message past its ttl is not counted by `status`, is expired by `deliver` (logged `expired` via `ttl`, never prompted) and by `inbox`.
+- Kickoffs: the queue delivered by `kickoff` (`with 2 queued`, `delivered` via `kickoff`), appended without the placeholder, left queued when the kickoff is refused (working) or never sent (blocked at startup in `up`); `up` delivering a message sent to a seat that was absent; `up --dry-run` saying which seat carries queued messages; `kickoff --drop-inbox` and `restart --drop-inbox` (logged `dropped`, nothing carried).
+- `deliver`: without names (FYI-only mailboxes skipped, working seats left queued, `--fyi`), with names (blocked left queued, FYI-only taken), unknown names, `nothing to deliver`, `--dry-run`, and an unconfirmed prompt (exit 1, never redelivered).
+- `inbox`: list, `--count`, `--json`, `--read` (printed in batch format, moved, logged `delivered` via `inbox`), no herdr command with `--as`, `--history` (both directions, unlogged `cur/` files shown, expired ones and other senders left out), `--redeliver` (and its usage errors), the caller from its pane (only `pane current` and `agent get`), `owner` outside herdr, `--as owner`.
+- `owner`: the notification inside herdr (title, first line, `--history` hint, `delivered` via `notify`), queued outside herdr with no herdr command at all and delivered later by `deliver`, `--queue`.
+- Owed replies (pure and through the CLI): nothing owed while queued, expired or refused; counted from the `delivered` entry; an answer written before the delivery does not settle; a queued answer settles, a refused one does not; `--reply-to` and `ack #id` settle exactly one message, and an older unanswered request shows again; `ack` by id, by the bare hex part, unknown ids.
+- `status`: the `queued:` line (order, `oldest` only from two messages) and `"queued"` in JSON.
+- The safety hook itself fails for a `deliver` prompt to a working agent and for an `inbox` that runs anything beyond the caller lookup.
+- `tests/test_status_doctor.py`: `install-cli` writes the launcher (marker, `FALLBACK`, the `HERDR_FLEET_BIN` line, mode 0755, idempotent, no temp file), replaces a symlink and an older launcher, refuses a foreign file, and `--dev` symlinks the checkout. The launcher is never executed in tests: it calls herdr.
+- Existing tests updated for 0.6.0: the `[from X #id]` prefix, absent and blocked targets queued instead of refused, an FYI to an idle seat queued, `log` lines with `#id`, and the four `.gitignore` entries.
 
 ### Running the CLI against the fake by hand
 
@@ -258,5 +279,49 @@ python3 bin/herdr-fleet log --fleet "$F"; python3 bin/herdr-fleet log --owed --f
 | 8. `log --owed` | one line, `awaiting: fleet-smoke owes owner since … (Reply with the single word PONG)`; nothing for the FYI |
 | 9. `ack` | `acked owner since … (Reply with the single word PONG)`; no prompt reaches the seat |
 | 10. log | the FYI line shows `[fyi]`, the ack line ends in `ack`; `log --owed` says `nothing awaiting a reply`; the last entries carry `"fyi": true` and `"kind": "ack", "delivery": "logged"` |
+
+Then run `down --close-panes --fleet "$F"` and remove `$S` as in the first smoke test.
+
+## Live smoke test for 0.6.0 (to run by hand)
+
+Not run yet. For the designer or the owner, inside herdr, from this repository, with the one-seat Haiku fleet of the first smoke test (`$S`, `$F`), before its `up`.
+
+Unreleased code must never reach a seat through the installed launcher: `~/.local/bin/herdr-fleet` (written by `install-cli`) runs the plugin copy herdr installed, not this clone. Run the commands below as `python3 bin/herdr-fleet …` from the clone, export `HERDR_FLEET_BIN` for anything that calls `herdr-fleet` by name, and give the seat the same variable so a seat that runs `herdr-fleet inbox --read` runs this clone too:
+
+```bash
+cd /Users/nabsha/work/yarrasys/projects/herdr-fleet-plugin
+export HERDR_FLEET_BIN="$PWD/bin/herdr-fleet"
+echo "env = { HERDR_FLEET_BIN = \"$HERDR_FLEET_BIN\" }" >> "$F"   # the seat's table is the file's last
+
+python3 bin/herdr-fleet send --as owner fleet-smoke "Reply with the single word INBOX" --fleet "$F"   # 1
+python3 bin/herdr-fleet status --fleet "$F"                                     # 2
+python3 bin/herdr-fleet up --fleet "$F"                                         # 3
+python3 bin/herdr-fleet send --fyi --as owner fleet-smoke "FYI: no reply needed" --fleet "$F"    # 4
+python3 bin/herdr-fleet inbox --as fleet-smoke --fleet "$F"                     # 5
+python3 bin/herdr-fleet deliver --fleet "$F"; python3 bin/herdr-fleet deliver --fyi --fleet "$F"  # 6
+python3 bin/herdr-fleet send --queue --as owner fleet-smoke "queued only" --fleet "$F"           # 7
+python3 bin/herdr-fleet inbox --as fleet-smoke --read --fleet "$F"              # 8
+python3 bin/herdr-fleet send --as fleet-smoke owner "Smoke test: owner notification" --fleet "$F" # 9
+python3 bin/herdr-fleet inbox --as owner --history fleet-smoke --fleet "$F"     # 10
+python3 bin/herdr-fleet log --fleet "$F"; ls "$S/.herdr/inbox"/*/*              # 11
+python3 bin/herdr-fleet install-cli --dir "$S/bin"                              # 12
+env -u HERDR_FLEET_BIN "$S/bin/herdr-fleet" --version; "$S/bin/herdr-fleet" --version   # 13
+```
+
+| Step | Expected |
+| --- | --- |
+| 1. send to an absent seat | `queued for fleet-smoke (absent) #xxxxxx`, exit 0; a file in `$S/.herdr/inbox/fleet-smoke/new/`; `inbox/` and `watch.lock` in `$S/.herdr/.gitignore` |
+| 2. status | `queued: fleet-smoke 1` after the owed lines |
+| 3. up delivers at kickoff | `fleet-smoke: briefed - kickoff sent (up) with 1 queued`; the kickoff (its `kickoff_text` has no `{inbox}`) ends with `Messages that arrived while you were away:` and `[from owner at HH:MM #xxxxxx]` / `Reply with the single word INBOX`; the seat answers READY and INBOX in its pane; the file is in `cur/` |
+| 4. FYI to an idle seat | `queued for fleet-smoke (idle, fyi) #yyyyyy`; nothing reaches the seat (it stays idle; check with `status`) |
+| 5. inbox list | one line `#yyyyyy  HH:MM  owner  [fyi]  FYI: no reply needed`; runs no herdr command; nothing moves |
+| 6. deliver | first `nothing to deliver (only FYIs are queued; deliver --fyi takes them)`, then `delivered 1 to fleet-smoke (idle), …`; the seat receives `[from owner at HH:MM #yyyyyy]` and the FYI as one prompt |
+| 7. --queue | `queued for fleet-smoke (idle) #zzzzzz`; nothing reaches the seat |
+| 8. inbox --read | prints `[from owner at HH:MM #zzzzzz]` / `queued only`; the file moves to `cur/`; `inbox --count` would now print 0 |
+| 9. owner | `sent to owner (notification), …`; a herdr notification titled `message from fleet-smoke #…` with the first line in its body |
+| 10. history | the owner's messages to the seat and the seat's message to the owner, oldest first, as `[from A to B at HH:MM #id]` |
+| 11. log | `send` entries with `#id` and `[queued]` tags, `delivered #id via kickoff`, `via deliver`, `via inbox`, `via notify` |
+| 12. install-cli | `wrote launcher $S/bin/herdr-fleet: runs the herdr-fleet that herdr installed (falls back to …; HERDR_FLEET_BIN overrides)`; the file is executable and starts with the `herdr-fleet launcher` comment |
+| 13. launcher | without `HERDR_FLEET_BIN` it prints the installed plugin's version (from `herdr plugin list --json`); with it, `herdr-fleet 0.6.0` from this clone |
 
 Then run `down --close-panes --fleet "$F"` and remove `$S` as in the first smoke test.

@@ -8,6 +8,7 @@ import datetime
 import io
 import json
 import os
+import re
 import unittest
 
 import fake_herdr
@@ -24,23 +25,34 @@ def log_entries(repo):
         return [json.loads(line) for line in handle if line.strip()]
 
 
+ID_PREFIX = re.compile(r"^\[from ([^\]#]*?) #[0-9a-f]{6}\]")
+
+
+def strip_ids(texts):
+    """``[from X #3f2a9c] text`` -> ``[from X] text`` (design 18.3 adds the short id)."""
+    return [ID_PREFIX.sub(r"[from \1]", text) for text in texts]
+
+
 class Send(LiveFleet):
     """Seats live in w2; the caller is the agent named "caller" in w1:p1."""
 
     def test_one_seat(self):
         code, out, err = self.run_cli("send", "fablyn-dev", "Review round 3: commits a1b2c3..d4e5f6\nDetails follow.")
         self.assertEqual(code, 0, out + err)
-        text = "[from caller] Review round 3: commits a1b2c3..d4e5f6\nDetails follow."
+        (entry,) = log_entries(self.repo)
+        short = entry["id"][-6:]
+        text = "[from caller #%s] Review round 3: commits a1b2c3..d4e5f6\nDetails follow." % short
         self.assertEqual(self.argvs("agent", "prompt"), [["agent", "prompt", "fablyn-dev", text]])
         self.assertEqual(out.strip(), "sent to fablyn-dev (idle), %d B" % len(text.encode()))
         self.assertIn(["pane", "current", "--current"], self.argvs("pane", "current"))  # sender from your pane
-        (entry,) = log_entries(self.repo)
         self.assertEqual({k: entry[k] for k in ("from", "to", "kind", "bytes", "first_line", "delivery")},
                          {"from": "caller", "to": "fablyn-dev", "kind": "send", "bytes": len(text.encode()),
                           "first_line": "Review round 3: commits a1b2c3..d4e5f6", "delivery": "sent"})
         self.assertNotIn("file", entry)
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, ".herdr", "inbox", "fablyn-dev", "cur",
+                                                    entry["id"] + ".md")))  # direct sends land in cur/
         with open(os.path.join(self.repo, ".herdr", ".gitignore")) as handle:
-            self.assertIn("messages.jsonl", handle.read().split())
+            self.assertEqual(handle.read().split(), ["fleet.state.json", "messages.jsonl", "inbox/", "watch.lock"])
 
     def test_working_target_gets_it_queued(self):
         self.status_of("w2:p2", "working")
@@ -49,23 +61,26 @@ class Send(LiveFleet):
         self.assertIn("sent to fablyn-dev (working)", out)
         self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)  # the safety hook allows it for send only
 
-    def test_blocked_unknown_and_absent_are_refused_and_not_logged(self):
+    def test_blocked_unknown_and_absent_are_queued_and_nothing_is_sent(self):  # design 18.3, third row
         self.status_of("w2:p2", "blocked")
         self.status_of("w2:p3", "unknown")
         self.world["panes"]["w2:p1"]["agent"] = None
         code, out, _ = self.run_cli("send", "fablyn-dev", "fablyn-reviewer", "fablyn-orchestrator", "hello")
-        self.assertEqual(code, 3)
-        self.assertEqual(out.splitlines(), ["refused fablyn-dev (blocked): nothing sent",
-                                            "refused fablyn-reviewer (unknown): nothing sent",
-                                            "refused fablyn-orchestrator (absent): nothing sent"])
+        self.assertEqual(code, 0)
+        entries = log_entries(self.repo)
+        self.assertEqual(out.splitlines(), ["queued for fablyn-dev (blocked) #%s" % entries[0]["id"][-6:],
+                                            "queued for fablyn-reviewer (unknown) #%s" % entries[1]["id"][-6:],
+                                            "queued for fablyn-orchestrator (absent) #%s" % entries[2]["id"][-6:]])
         self.assertEqual(self.argvs("agent", "prompt"), [])
-        self.assertEqual(log_entries(self.repo), [])
+        self.assertEqual([(e["to"], e["delivery"]) for e in entries],
+                         [("fablyn-dev", "queued"), ("fablyn-reviewer", "queued"), ("fablyn-orchestrator", "queued")])
 
-    def test_some_sent_some_refused(self):
+    def test_some_sent_some_queued(self):
         self.status_of("w2:p3", "blocked")
         code, out, _ = self.run_cli("send", "fablyn-dev", "fablyn-reviewer", "x")
-        self.assertEqual(code, 3)
-        self.assertEqual([e["to"] for e in log_entries(self.repo)], ["fablyn-dev"])
+        self.assertEqual(code, 0)
+        self.assertEqual([(e["to"], e["delivery"]) for e in log_entries(self.repo)],
+                         [("fablyn-dev", "sent"), ("fablyn-reviewer", "queued")])
 
     def test_sender_as_and_owner(self):
         self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "a")
@@ -74,7 +89,7 @@ class Send(LiveFleet):
         env = dict(self.env)
         del env["HERDR_PANE_ID"]                                   # not run from a pane at all
         self.run_cli("send", "fablyn-dev", "c", env=env)
-        self.assertEqual(self.prompts_to("fablyn-dev"),
+        self.assertEqual(strip_ids(self.prompts_to("fablyn-dev")),
                          ["[from fablyn-orchestrator] a", "[from owner] b", "[from owner] c"])
         self.assertEqual(self.run_cli("send", "--as", "Not A Name", "fablyn-dev", "d")[0], 2)
 
@@ -121,10 +136,14 @@ class Send(LiveFleet):
                                                         "--until", "done", "--timeout", "5000"]])
         self.assertIn("sent to fablyn-dev (idle)", out)
 
-    def test_when_ready_refuses_a_target_still_busy(self):
+    def test_when_ready_queues_for_a_target_still_busy(self):
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "--when-ready", "5000", "fablyn-dev", "your turn")
-        self.assertEqual(code, 3)
+        self.assertEqual(code, 0)
+        self.assertRegex(out, r"queued for fablyn-dev \(working after --when-ready 5000 ms\) #[0-9a-f]{6}")
+        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        code, out, _ = self.run_cli("send", "--now", "--when-ready", "5000", "fablyn-dev", "your turn")
+        self.assertEqual(code, 1)  # --now keeps the 16.1 refusal
         self.assertIn("refused fablyn-dev (working after --when-ready 5000 ms): nothing sent", out)
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
 
@@ -132,25 +151,27 @@ class Send(LiveFleet):
         self.world["behaviors"]["prompt_errors"] = {"fablyn-dev": "agent_prompt_stalled"}
         code, out, _ = self.run_cli("send", "fablyn-dev", "fablyn-reviewer", "x")
         self.assertEqual(code, 1)
-        self.assertIn("unconfirmed fablyn-dev, 15 B: herdr error agent_prompt_stalled", out)
+        self.assertIn("unconfirmed fablyn-dev, 23 B: herdr error agent_prompt_stalled", out)
         self.assertIn("not resent; logged as unconfirmed", out)
         self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
         self.assertEqual([(e["to"], e["delivery"]) for e in log_entries(self.repo)],
                          [("fablyn-dev", "unconfirmed"), ("fablyn-reviewer", "sent")])
 
-    def test_timeout_is_unconfirmed_too_and_other_errors_are_not_logged(self):
+    def test_timeout_is_unconfirmed_too_and_other_errors_leave_it_queued(self):
         self.world["behaviors"]["prompt_errors"] = {"fablyn-dev": "timeout", "fablyn-reviewer": "agent_not_found"}
         code, out, _ = self.run_cli("send", "fablyn-dev", "fablyn-reviewer", "x")
         self.assertEqual(code, 1)
-        self.assertIn("failed fablyn-reviewer: herdr error agent_not_found", out)
-        self.assertEqual([(e["to"], e["delivery"]) for e in log_entries(self.repo)], [("fablyn-dev", "unconfirmed")])
+        self.assertRegex(out, r"failed fablyn-reviewer: herdr error agent_not_found: .*; #[0-9a-f]{6} left queued")
+        self.assertEqual([(e["to"], e["delivery"]) for e in log_entries(self.repo)],
+                         [("fablyn-dev", "unconfirmed"), ("fablyn-reviewer", "queued")])
 
     def test_dry_run(self):
         code, out, _ = self.run_cli("send", "--dry-run", "fablyn-dev", "x")
         self.assertEqual(code, 0)
-        self.assertIn("would send to fablyn-dev (idle), 15 B", out)
+        self.assertIn("would send to fablyn-dev (idle), 23 B", out)  # [from caller #3f2a9c] x
         self.assertEqual(self.argvs("agent", "prompt"), [])
         self.assertEqual(log_entries(self.repo), [])
+        self.assertFalse(os.path.exists(os.path.join(self.repo, ".herdr", "inbox")))  # --dry-run writes nothing
 
 
 class SendArguments(LiveFleet):
@@ -167,14 +188,14 @@ class SendArguments(LiveFleet):
                      ["fablyn-dev", "fablyn-reviewer", "--as", "owner", "hi"],
                      ["fablyn-dev", "fablyn-reviewer", "hi", "--as", "owner"]):
             self.assertEqual(self.run_cli("send", *argv)[0], 0, argv)
-        self.assertEqual(self.prompts_to("fablyn-dev"), ["[from owner] hi"] * 4)
-        self.assertEqual(self.prompts_to("fablyn-reviewer"), ["[from owner] hi"] * 4)
+        self.assertEqual(strip_ids(self.prompts_to("fablyn-dev")), ["[from owner] hi"] * 4)
+        self.assertEqual(strip_ids(self.prompts_to("fablyn-reviewer")), ["[from owner] hi"] * 4)
 
     def test_all_with_only_a_text(self):
         code, out, _ = self.run_cli("send", "--all", "--as", "fablyn-dev", "standup")
         self.assertEqual(code, 0, out)
         self.assertEqual([a[2] for a in self.argvs("agent", "prompt")], ["fablyn-orchestrator", "fablyn-reviewer"])
-        self.assertEqual(self.prompts_to("fablyn-reviewer"), ["[from fablyn-dev] standup"])
+        self.assertEqual(strip_ids(self.prompts_to("fablyn-reviewer")), ["[from fablyn-dev] standup"])
 
     def test_file_with_several_targets_around_options(self):
         brief = self.write_file("brief.md", "Brief\n")
@@ -219,7 +240,7 @@ class LogCommand(LiveFleet):
         self.assertEqual(code, 0)
         lines = out.splitlines()
         self.assertEqual(len(lines), 3)
-        self.assertRegex(lines[0], r"^\S+  fablyn-orchestrator → fablyn-dev  \d+  first$")
+        self.assertRegex(lines[0], r"^\S+  fablyn-orchestrator → fablyn-dev  \d+  #[0-9a-f]{6}  first$")
         self.assertIn("corrupt line skipped", err)
         self.assertEqual(len(self.run_cli("log", "--seat", "fablyn-reviewer")[1].splitlines()), 1)
         self.assertEqual(len(self.run_cli("log", "--last", "2")[1].splitlines()), 2)
@@ -245,8 +266,8 @@ class Unconfirmed(LiveFleet):
         self.world["behaviors"]["prompt_errors"] = {}
         self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Task 4")
         lines = self.run_cli("log")[1].splitlines()
-        self.assertRegex(lines[0], r"  fablyn-orchestrator → fablyn-reviewer  \d+\?  Review round 3$")
-        self.assertRegex(lines[1], r"  fablyn-orchestrator → fablyn-dev  \d+  Task 4$")
+        self.assertRegex(lines[0], r"  fablyn-orchestrator → fablyn-reviewer  \d+\?  #[0-9a-f]{6}  Review round 3$")
+        self.assertRegex(lines[1], r"  fablyn-orchestrator → fablyn-dev  \d+  #[0-9a-f]{6}  Task 4$")
         owed = [(o["to"], o["first_line"]) for o in json.loads(self.run_cli("log", "--owed", "--json")[1])]
         self.assertEqual(owed, [("fablyn-reviewer", "Review round 3"), ("fablyn-dev", "Task 4")])
 
@@ -291,7 +312,7 @@ class FleetOption(LiveFleet):
         brief = self.write_file("brief.md", "Round 4 brief\n")
         code, out, _ = self.run_elsewhere("send", "--fleet", self.fleet_path, "--file", brief, "fablyn-dev")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.prompts_to("fablyn-dev"), ["[from caller] Round 4 brief\n"])
+        self.assertEqual(strip_ids(self.prompts_to("fablyn-dev")), ["[from caller] Round 4 brief\n"])
         note = self.write_file("next.md", "ship it\n")
         code, out, _ = self.run_elsewhere("state", "set", "next", "--fleet", self.fleet_path, "--file", note)
         self.assertEqual(code, 0, out)
@@ -397,24 +418,33 @@ class OwedWithFyiAndAck(unittest.TestCase):
 
 
 class Fyi(LiveFleet):
-    def test_flag_logs_fyi_and_sends_the_text_as_written(self):
+    def test_flag_logs_fyi_and_keeps_it_queued_for_an_idle_seat(self):  # design 18.3: never wakes an idle seat
         code, out, _ = self.run_cli("send", "--fyi", "--as", "fablyn-dev", "fablyn-orchestrator", "cleanup done")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.prompts_to("fablyn-orchestrator"), ["[from fablyn-dev] cleanup done"])
+        self.assertRegex(out.strip(), r"^queued for fablyn-orchestrator \(idle, fyi\) #[0-9a-f]{6}$")
+        self.assertEqual(self.prompts_to("fablyn-orchestrator"), [])
         (item,) = log_entries(self.repo)
         self.assertIs(item["fyi"], True)
-        self.assertEqual(item["kind"], "send")
+        self.assertEqual((item["kind"], item["delivery"]), ("send", "queued"))
         self.assertEqual(json.loads(self.run_cli("log", "--owed", "--json")[1]), [])
+
+    def test_fyi_to_a_working_seat_is_typed_ahead_as_written(self):
+        self.status_of("w2:p1", "working")
+        code, out, _ = self.run_cli("send", "--fyi", "--as", "fablyn-dev", "fablyn-orchestrator", "cleanup done")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(strip_ids(self.prompts_to("fablyn-orchestrator")), ["[from fablyn-dev] cleanup done"])
 
     def test_prefix_marks_fyi_and_other_messages_carry_no_key(self):
         self.run_cli("send", "--as", "fablyn-dev", "fablyn-orchestrator", "FYI: holding until review")
         self.run_cli("send", "--as", "fablyn-dev", "fablyn-orchestrator", "fyi committed a1b2c3")
         self.run_cli("send", "--as", "fablyn-dev", "fablyn-orchestrator", "[from the owner] Fyi: main is green")
         self.run_cli("send", "--as", "fablyn-dev", "fablyn-orchestrator", "FYIs pile up; can you look?")
-        items = log_entries(self.repo)
+        items = [i for i in log_entries(self.repo) if i["kind"] == "send"]
         self.assertEqual([i.get("fyi") for i in items], [True, True, True, None])
         self.assertNotIn("fyi", items[3])
-        self.assertEqual(self.prompts_to("fablyn-orchestrator")[0], "[from fablyn-dev] FYI: holding until review")
+        (prompt,) = self.prompts_to("fablyn-orchestrator")  # the three FYIs ride along with the request
+        self.assertRegex(prompt, r"^\[from fablyn-dev at \d\d:\d\d #[0-9a-f]{6}\]\nFYI: holding until review\n\n")
+        self.assertTrue(prompt.endswith("]\nFYIs pile up; can you look?"), prompt)
         owed = json.loads(self.run_cli("log", "--owed", "--json")[1])
         self.assertEqual([o["first_line"] for o in owed], ["FYIs pile up; can you look?"])
 
@@ -422,9 +452,10 @@ class Fyi(LiveFleet):
         self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Task 4: export button")
         self.run_cli("send", "--fyi", "--as", "fablyn-dev", "fablyn-orchestrator", "Task 4 committed")
         lines = self.run_cli("log")[1].splitlines()
-        self.assertRegex(lines[0], r"  fablyn-orchestrator → fablyn-dev  \d+  Task 4: export button$")
-        self.assertRegex(lines[1], r"  fablyn-dev → fablyn-orchestrator  \d+  \[fyi\]  Task 4 committed$")
-        self.assertNotIn("awaiting:", self.run_cli("status")[1])
+        self.assertRegex(lines[0], r"  fablyn-orchestrator → fablyn-dev  \d+  #[0-9a-f]{6}  Task 4: export button$")
+        self.assertRegex(lines[1], r"  fablyn-dev → fablyn-orchestrator  \d+  #[0-9a-f]{6}  \[queued\]  \[fyi\]  "
+                                   r"Task 4 committed$")
+        self.assertNotIn("awaiting:", self.run_cli("status")[1])  # a queued report still answers
 
 
 class Ack(LiveFleet):
@@ -490,7 +521,7 @@ class Ack(LiveFleet):
         written = len(log_entries(self.repo))
         code, _, err = self.run_cli("ack", "--as", "fablyn-dev", "fablyn-orchestrator", "nobody")
         self.assertEqual(code, 2)
-        self.assertIn("not a seat, contact or name in the message log: nobody", err)
+        self.assertIn("not a seat, contact, message id or name in the message log: nobody", err)
         self.assertEqual(len(log_entries(self.repo)), written)  # nothing written when a name is unknown
         self.assertEqual(self.run_cli("ack", "--as", "fablyn-dev")[0], 2)
         self.assertEqual(self.run_cli("ack", "--as", "Not A Name", "owner")[0], 2)

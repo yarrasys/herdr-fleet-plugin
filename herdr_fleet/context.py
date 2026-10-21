@@ -184,12 +184,16 @@ class Ctx:
     def warn(self, text: str) -> None:
         self.stderr.write("herdr-fleet: %s\n" % text)
 
-    def notify(self, title: str, body: str, sound: str) -> None:
+    def inside_herdr(self) -> bool:
+        """``HERDR_ENV=1`` or ``HERDR_BIN_PATH`` set: herdr commands reach this session."""
+        return self.env.get("HERDR_ENV") == "1" or bool(self.env.get("HERDR_BIN_PATH"))
+
+    def notify(self, title: str, body: str, sound: str) -> bool:
         """Notify through herdr, but only from inside herdr: outside it, ``herdr``
-        on PATH could reach some other session."""
-        if self.env.get("HERDR_ENV") != "1" and not self.env.get("HERDR_BIN_PATH"):
-            return
-        notify(self.herdr, title, body, sound, errors=self.stderr)
+        on PATH could reach some other session. True when herdr showed it."""
+        if not self.inside_herdr():
+            return False
+        return notify(self.herdr, title, body, sound, errors=self.stderr)
 
     # -- lazily loaded pieces -----------------------------------------------
 
@@ -243,7 +247,7 @@ class Ctx:
 
 def preflight(ctx: Ctx) -> None:
     """Common preconditions (design section 4): inside herdr, reachable, new enough."""
-    if ctx.env.get("HERDR_ENV") != "1" and not ctx.env.get("HERDR_BIN_PATH"):
+    if not ctx.inside_herdr():
         raise OpError("not running inside Herdr (HERDR_ENV=1 or HERDR_BIN_PATH is required)")
     ctx.herdr.agent_list()
     version = ctx.herdr.version()

@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 from herdr_fleet.herdr import Herdr, HerdrError
 
 STATE_NAME = "fleet.state.json"
-IGNORED = (STATE_NAME, "messages.jsonl")  # .herdr/.gitignore entries (design sections 5 and 16.2)
+IGNORED = (STATE_NAME, "messages.jsonl", "inbox/", "watch.lock")  # .herdr/.gitignore entries (5, 16.2, 18.1)
 VERSION = 1
 
 
@@ -183,8 +183,9 @@ def _empty(repo: str) -> Dict:
 
 
 def ensure_gitignore(folder: str) -> None:
-    """Make ``.herdr/.gitignore`` ignore the files herdr-fleet writes there
-    (the state file and the message log), appending only missing lines."""
+    """Make ``.herdr/.gitignore`` ignore the files herdr-fleet writes there (the
+    state file, the message log, the inbox and the watcher's lock), appending
+    only missing lines."""
     path = os.path.join(folder, ".gitignore")
     lines: List[str] = []
     if os.path.exists(path):

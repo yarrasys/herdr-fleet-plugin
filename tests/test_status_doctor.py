@@ -12,9 +12,10 @@ import unittest
 
 import fake_herdr
 from support import CALLER_PANE, GIT, FleetCase, GitCase, LiveFleet
-from herdr_fleet import gitinfo
+from herdr_fleet import PLUGIN_ROOT, gitinfo
 from herdr_fleet.cli import main
 from herdr_fleet.context import context_cwd, context_id, parse_context
+from herdr_fleet.ops import launcher_text
 
 
 class Status(LiveFleet):
@@ -290,25 +291,76 @@ class UiAndMenu(LiveFleet):
 
 
 class InstallCli(FleetCase):
+    """install-cli writes a launcher that runs the plugin copy herdr installed (0.6.0);
+    --dev links this checkout. The launcher itself calls herdr, so it is never run here."""
+
     fleet_text = None
 
-    def test_links_and_is_idempotent(self):
-        target = os.path.join(self.tmp, "bin")
-        code, out, _ = self.run_cli("install-cli", "--dir", target)
+    def setUp(self):
+        super().setUp()
+        self.target = os.path.join(self.tmp, "bin")
+        self.path = os.path.join(self.target, "herdr-fleet")
+        self.source = os.path.join(PLUGIN_ROOT, "bin", "herdr-fleet")
+
+    def read_target(self):
+        with open(self.path) as handle:
+            return handle.read()
+
+    def test_writes_the_launcher_and_is_idempotent(self):
+        code, out, _ = self.run_cli("install-cli", "--dir", self.target)
         self.assertEqual(code, 0, out)
-        link = os.path.join(target, "herdr-fleet")
-        self.assertTrue(os.path.islink(link))
-        self.assertTrue(os.path.realpath(link).endswith(os.path.join("bin", "herdr-fleet")))
+        self.assertFalse(os.path.islink(self.path))
+        text = self.read_target()
+        self.assertEqual(text, launcher_text(self.source))
+        self.assertTrue(text.startswith("#!/bin/sh\n# herdr-fleet launcher, written by `herdr-fleet install-cli`."))
+        self.assertIn("\nFALLBACK=%s\n" % self.source, text)
+        self.assertIn('\nif [ -n "$HERDR_FLEET_BIN" ]; then exec python3 "$HERDR_FLEET_BIN" "$@"; fi\n', text)
+        self.assertIn("herdr plugin list --json", text)
+        self.assertIn('"yarrasys.fleet" in json.dumps(plugin)', text)
+        self.assertTrue(text.endswith('exec python3 "$FALLBACK" "$@"\n'))
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o755)
+        self.assertIn("wrote launcher %s" % self.path, out)
         self.assertIn("plugin root:", out)
         self.assertIn("is not on PATH", out)
-        code, out, _ = self.run_cli("install-cli", "--dir", target)
+        code, out, _ = self.run_cli("install-cli", "--dir", self.target)
         self.assertEqual(code, 0)
-        self.assertIn("already linked", out)
-        os.remove(link)
-        with open(link, "w") as handle:
-            handle.write("x")
-        self.assertEqual(self.run_cli("install-cli", "--dir", target)[0], 1)
+        self.assertIn("launcher already installed", out)
+        self.assertEqual([f for f in os.listdir(self.target) if f != "herdr-fleet"], [])  # no temp file left
         self.assertEqual(self.calls(), [])
+
+    def test_replaces_a_symlink_and_an_older_launcher(self):
+        os.makedirs(self.target)
+        os.symlink(self.source, self.path)
+        code, out, _ = self.run_cli("install-cli", "--dir", self.target)
+        self.assertEqual(code, 0, out)
+        self.assertFalse(os.path.islink(self.path))
+        self.assertTrue(os.path.isfile(self.source))  # the link was replaced, not followed
+        self.assertEqual(self.read_target(), launcher_text(self.source))
+        with open(self.path, "w") as handle:
+            handle.write("#!/bin/sh\n# herdr-fleet launcher (hand-written)\nexec python3 /old/bin/herdr-fleet \"$@\"\n")
+        self.assertEqual(self.run_cli("install-cli", "--dir", self.target)[0], 0)
+        self.assertEqual(self.read_target(), launcher_text(self.source))
+
+    def test_refuses_a_foreign_file(self):
+        os.makedirs(self.target)
+        with open(self.path, "w") as handle:
+            handle.write("#!/bin/sh\necho mine\n")
+        code, out, _ = self.run_cli("install-cli", "--dir", self.target)
+        self.assertEqual(code, 1)
+        self.assertIn("is not a herdr-fleet launcher or symlink; remove it first", out)
+        self.assertEqual(self.read_target(), "#!/bin/sh\necho mine\n")
+        self.assertEqual(self.run_cli("install-cli", "--dev", "--dir", self.target)[0], 1)
+
+    def test_dev_links_this_checkout(self):
+        self.assertEqual(self.run_cli("install-cli", "--dir", self.target)[0], 0)  # a launcher first
+        code, out, _ = self.run_cli("install-cli", "--dev", "--dir", self.target)
+        self.assertEqual(code, 0, out)
+        self.assertTrue(os.path.islink(self.path))
+        self.assertEqual(os.path.realpath(self.path), os.path.realpath(self.source))
+        self.assertIn("linked %s -> %s (--dev" % (self.path, self.source), out)
+        code, out, _ = self.run_cli("install-cli", "--dev", "--dir", self.target)
+        self.assertEqual(code, 0)
+        self.assertIn("already linked (--dev)", out)
 
 
 @unittest.skipUnless(GIT, "git is not installed")

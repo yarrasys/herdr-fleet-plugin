@@ -24,7 +24,8 @@ from herdr_fleet.kickoff import DEFAULT_TEMPLATE
 from herdr_fleet.statenote import starter_text
 
 EXAMPLES_DIR = os.path.join(PLUGIN_ROOT, "examples")
-SKIP_NAMES = (".DS_Store", "fleet.state.json", "messages.jsonl")  # never copied from an example
+SKIP_NAMES = (".DS_Store", "fleet.state.json", "messages.jsonl", "watch.lock")  # never copied from an example
+SKIP_DIRS = ("inbox",)  # .herdr/inbox: messages are never copied either
 NAME_SUFFIX = "-dev"
 
 Files = List[Tuple[str, bytes]]  # (path relative to the root, content)
@@ -70,8 +71,8 @@ kind = "claude"                  # a kind from `herdr agent start --help`
 '''
 
 KICKOFF_COMMENT = ("<!-- herdr-fleet kickoff template. Lines like this one are not sent. Placeholders: "
-                   "{name} {kind} {args} {repo} {cwd} {workspace} {roster} {state} {note} {reason}; "
-                   "{{ and }} are literal braces. See \"Kickoff templates\" in the herdr-fleet README. -->\n")
+                   "{name} {kind} {args} {repo} {cwd} {workspace} {roster} {contacts} {inbox} {state} {note} "
+                   "{reason}; {{ and }} are literal braces. See \"Kickoff templates\" in the herdr-fleet README. -->\n")
 
 STATE_NOTE = starter_text("Where things stand: (nothing yet).")  # with the four sections of design 16.5
 
@@ -135,7 +136,7 @@ def starter_files(root: str) -> Files:
         (".herdr/fleet.toml", fleet.encode("utf-8")),
         (".herdr/kickoff/default.md", (KICKOFF_COMMENT + DEFAULT_TEMPLATE).encode("utf-8")),
         (".herdr/STATE.md", STATE_NOTE.encode("utf-8")),
-        (".herdr/.gitignore", b"fleet.state.json\nmessages.jsonl\n"),
+        (".herdr/.gitignore", b"fleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\n"),
     ]
 
 
@@ -152,7 +153,7 @@ def example_files(name: str) -> Files:
     base = os.path.join(EXAMPLES_DIR, name)
     files: Files = []
     for folder, dirs, names in os.walk(base):
-        dirs.sort()
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         for filename in sorted(names):
             if filename in SKIP_NAMES:
                 continue

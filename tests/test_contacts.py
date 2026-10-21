@@ -4,6 +4,7 @@ and that no lifecycle command ever touches a contact's pane."""
 from __future__ import annotations
 
 import json
+import re
 import os
 import unittest
 
@@ -116,23 +117,28 @@ class SendToContact(ContactCase):
         code, out, err = self.run_cli("send", "--as", "fablyn-orchestrator", "winner-chronicles",
                                       "Thanks for the notes")
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(self.argvs("agent", "prompt"),
-                         [["agent", "prompt", CONTACT_PANE, "[from fablyn-orchestrator] Thanks for the notes"]])
+        (call,) = self.argvs("agent", "prompt")
+        self.assertEqual(call[:3], ["agent", "prompt", CONTACT_PANE])
+        self.assertRegex(call[3], r"^\[from fablyn-orchestrator #[0-9a-f]{6}\] Thanks for the notes$")
         self.assertIn("sent to winner-chronicles (idle)", out)
         with open(os.path.join(self.repo, ".herdr", "messages.jsonl")) as handle:
             self.assertEqual(json.loads(handle.readline())["to"], "winner-chronicles")
 
-    def test_absent_and_ambiguous_are_refused_with_candidates(self):
+    def test_absent_and_ambiguous_are_queued_or_refused_with_candidates(self):
         fake_herdr.add_pane(self.world, "w3:p5", "w3", self.winner)
         fake_herdr.put_agent(self.world, "w3:p5", "claude", name="twin")
         code, out, _ = self.run_cli("send", "winner-chronicles", "x")
-        self.assertEqual(code, 3)
+        self.assertEqual(code, 0)
+        self.assertRegex(out, r"queued for winner-chronicles \(ambiguous: 2 live agents match cwd %s: w3:p4, "
+                              r"w3:p5 \(twin\)\) #[0-9a-f]{6}" % re.escape(self.winner))
+        code, out, _ = self.run_cli("send", "--now", "winner-chronicles", "x")
+        self.assertEqual(code, 1)
         self.assertIn("refused winner-chronicles (ambiguous: 2 live agents match cwd %s: w3:p4, w3:p5 (twin)): "
                       "nothing sent" % self.winner, out)
         del self.world["panes"]["w3:p5"]
         del self.world["panes"][CONTACT_PANE]
-        code, out, _ = self.run_cli("send", "winner-chronicles", "x")
-        self.assertEqual(code, 3)
+        code, out, _ = self.run_cli("send", "--now", "winner-chronicles", "x")
+        self.assertEqual(code, 1)
         self.assertIn("refused winner-chronicles (absent: no live agent matches cwd %s)" % self.winner, out)
         self.assertEqual(self.argvs("agent", "prompt"), [])
 

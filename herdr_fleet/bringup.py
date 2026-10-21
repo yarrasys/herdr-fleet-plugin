@@ -6,7 +6,8 @@ with its name is live, adopt an unnamed agent of its kind that herdr resumed
 in its recorded pane, reuse its recorded pane when that is at a shell prompt,
 or mark it as needing a pane, which ``placement`` then splits (chain or
 grid). ``start_claimed`` starts it through ``seats.start_in_pane``, and
-``send_kickoffs`` briefs seats in file order once all have started.
+``send_kickoffs`` briefs seats in file order once all have started, each
+kickoff carrying the seat's queued messages through ``{inbox}`` (design 18.5).
 Everything here honours ``--dry-run`` by reporting plans instead of acting.
 """
 
@@ -20,7 +21,8 @@ from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, has_agent, render_cmd, start_argv, workspace_create_argv
 from herdr_fleet.contacts import contacts_block
 from herdr_fleet.kickoff import compose, roster_table
-from herdr_fleet.messages import log_kickoff
+from herdr_fleet import inbox
+from herdr_fleet.messages import inbox_block, log_kickoff, settle
 from herdr_fleet.placement import Placed, Target, existing_panes, place_chain
 from herdr_fleet.seats import at_shell_prompt, describe_foreground, safe_prompt, start_in_pane
 from herdr_fleet.state import now_iso, pane_moved, refresh_pane
@@ -241,11 +243,15 @@ def start_seat(ctx: Ctx, seat: Seat, pane: str, created: bool, report: Report) -
 
 def send_kickoffs(ctx: Ctx, seats: Sequence[Seat], reason: str, note: Optional[str],
                   label: str, report: Report) -> None:
-    """Brief seats in file order, after every seat has started (design 3)."""
+    """Brief seats in file order, after every seat has started (design 3). A kickoff
+    carries the seat's queued messages; they move to ``cur/`` once herdr took the
+    prompt (or may have: unconfirmed), and stay queued when it was refused."""
     ordered = sorted(seats, key=lambda s: s.index)
     if ctx.dry_run:
-        report.add("kickoff", "plan", "herdr agent prompt (reason %s) to %s"
-                   % (reason, ", ".join(s.name for s in ordered)))
+        waiting = {s.name: len(inbox.queued(ctx.fleet.repo).get(s.name, [])) for s in ordered}
+        carries = ["%s carries %d queued" % (n, c) for n, c in waiting.items() if c]
+        report.add("kickoff", "plan", "herdr agent prompt (reason %s) to %s%s"
+                   % (reason, ", ".join(s.name for s in ordered), "; " + ", ".join(carries) if carries else ""))
         return
     agents = ctx.herdr.agent_list()
     live = {str(a["name"]): a for a in agents if a.get("name")}
@@ -255,18 +261,40 @@ def send_kickoffs(ctx: Ctx, seats: Sequence[Seat], reason: str, note: Optional[s
     roster = roster_table(rows)
     contacts = contacts_block(ctx.fleet, agents)
     for seat in ordered:
-        try:
-            text = compose(seat, ctx.fleet, label, roster, reason, note, contacts=contacts)
-        except OSError as exc:
-            report.add(seat.name, "not briefed", "cannot read kickoff template: %s" % exc, "fail")
-            continue
-        outcome = safe_prompt(ctx.herdr, seat.name, text)
-        if outcome.ok:
-            ctx.state.update(seat.name, last_kickoff_at=now_iso(), blocked_at_startup=False)
-            ctx.save()
-            problem = log_kickoff(ctx.fleet.repo, seat.name, text)
-            if problem:
-                ctx.warn(problem)
-            report.add(seat.name, "briefed", "kickoff sent (%s)" % reason)
+        if inbox.has_queued(ctx.fleet.repo, seat.name):
+            with inbox.locked(ctx.fleet.repo, seat.name):
+                _brief(ctx, seat, label, roster, contacts, reason, note, report, with_inbox=True)
         else:
-            report.add(seat.name, "not briefed", outcome.detail, "partial")
+            _brief(ctx, seat, label, roster, contacts, reason, note, report, with_inbox=False)
+
+
+def _brief(ctx: Ctx, seat: Seat, label: str, roster: str, contacts: str, reason: str, note: Optional[str],
+           report: Report, with_inbox: bool) -> None:
+    """One kickoff. With ``with_inbox`` the caller holds the seat's mailbox lock."""
+    block, carried, left = inbox_block(ctx, seat.name) if with_inbox else ("", [], [])
+    try:
+        text = compose(seat, ctx.fleet, label, roster, reason, note, contacts=contacts, inbox=block)
+    except OSError as exc:
+        report.add(seat.name, "not briefed", "cannot read kickoff template: %s" % exc, "fail")
+        return
+    outcome = safe_prompt(ctx.herdr, seat.name, text)
+    if outcome.ok or outcome.status == "unconfirmed":
+        settle(ctx, carried, "kickoff", "sent" if outcome.ok else "unconfirmed")
+    queued = ""
+    if carried:
+        queued = " with %d queued" % len(carried)
+    elif left:
+        queued = "; %d queued left in the inbox (over 16 KiB; the kickoff says to run %s)" % (
+            len(left), inbox.POINTER_COMMAND)
+    if outcome.ok:
+        ctx.state.update(seat.name, last_kickoff_at=now_iso(), blocked_at_startup=False)
+        ctx.save()
+        problem = log_kickoff(ctx.fleet.repo, seat.name, text)
+        if problem:
+            ctx.warn(problem)
+        report.add(seat.name, "briefed", "kickoff sent (%s)%s" % (reason, queued))
+    elif outcome.status == "unconfirmed" and carried:
+        report.add(seat.name, "not briefed", "%s; %d queued logged as delivered (unconfirmed), not resent"
+                   % (outcome.detail, len(carried)), "partial")
+    else:
+        report.add(seat.name, "not briefed", outcome.detail, "partial")

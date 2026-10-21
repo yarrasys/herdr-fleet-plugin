@@ -15,7 +15,10 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 - ``fleetfile`` / ``state``: the two files on disk; ``kickoff``: templates.
 - ``context``: per-invocation context and preconditions; ``menu``: the popup;
   ``notify``: ``herdr notification show``.
-- ``messages``: ``send``, ``ack``, the message log and owed replies;
+- ``inbox``: the mailboxes under ``.herdr/inbox`` (ids, message files, batches,
+  moves between ``new/`` and ``cur/``, ttl); ``messages``: ``send``, ``ack``, the
+  message log, owed replies and the delivery engine; ``mailroom``: ``deliver``
+  and ``inbox``;
   ``contacts``: peers the team messages but never manages; ``statenote``:
   ``state`` sections; ``permissions``: the advisory Claude Code permission
   check in ``doctor``.
@@ -27,7 +30,7 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 
 import os
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

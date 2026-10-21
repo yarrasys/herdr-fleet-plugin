@@ -14,6 +14,8 @@ You design, review, run the browser and server tests, merge and deploy.
 - Restart a teammate with `herdr-fleet restart <name> --note "..."`; see the fleet with `herdr-fleet status`.
 - Never prompt a teammate whose state is blocked; tell the owner instead.
 
+{inbox}
+
 Where things stand:
 {state}
 

@@ -201,6 +201,11 @@ These are enforced in code and covered by tests:
 8. `worktrees`, the `fleet file vs git` check and `--context` are read-only: no `git fetch`, no `git worktree prune`, no write under `~/.claude`, and no herdr command beyond `agent list`/`agent get`.
 9. `--context` extracts usage numbers and timestamps only; no transcript content is ever surfaced.
 10. `ack` and `--fyi` only write the message log; `ack` sends nothing.
+11. Queued messages are delivered only to `idle` or `done` seats, only through `safe_prompt`, and only by a plugin command that a person, an agent's own tool call, or the owner-started watcher invoked. Nothing the plugin spawns runs in the background; `watch` is a foreground process the owner starts and stops. (The one exception is the exception of invariant 2: `send` to a `working` seat types its message ahead with the seat's queue in front, design 18.3 and 18.11.)
+12. The watcher never prompts a `blocked` or `unknown` seat, never answers a dialog, never redelivers an unconfirmed message, and never starts, restarts or quits anything.
+13. An agent is never asked to poll. Waits live in the herdr server (`agent wait`) or in a silent hook.
+14. A hook-delivered batch is the seat reading its own inbox inside its own process; the plugin never writes to an agent through a hook, and a hook prints nothing on any error.
+15. Message bodies are stored verbatim and only under `.herdr/inbox/` of the fleet's repository; the plugin never reads them for any purpose but rendering a batch, a listing or a history.
 
 Output: plugin commands print to stdout, which herdr shows nowhere, so when invoked as an action (`--notify` flag set by the manifest) the result summary also goes to `herdr notification show "<title>" --body "<text>" --sound done|request`. Blocked-at-startup seats always notify with `--sound request`.
 
@@ -583,3 +588,139 @@ Fake herdr: `agent_session` on agent records (shape as above). Fake transcripts:
 - **Context reader.** An `assistant` line whose three input counts are all zero is skipped: Claude Code writes such lines for errors and interrupted turns, and a context of 0 would be wrong. The session id must look like an id (letters, digits, `.`, `_`, `-`) before it goes into the glob; when several transcripts match, the newest is read. Labels: plain below 1000, rounded thousands (`183k`), one decimal from a million (`1.2M`). A timestamp that cannot be parsed drops the age bracket. A missing or unreadable transcript, a seat with no `agent_session` (or `null`) and an absent seat all show `-`.
 - **`init`.** The starter fleet file is unchanged: it shows the keys of section 2, and `worktrees` and `restart_hint_tokens` are documented in the README instead.
 - **Tests.** The fake herdr's agent records carry `agent_session` only when a scenario sets one (`put_agent(..., session=fake_herdr.claude_session(uuid))`). `tests/support.py` gains `GitCase`, a real temporary git repository whose git calls from the plugin go through a logging shim on `PATH`; its `tearDown` asserts invariant 8 (read-only subcommands only, no `fetch`, no `prune`).
+
+## 18. The inbox: durable, batched, token-free delivery (versions 0.6.0, 0.6.1, 0.7.0)
+
+Decided by the owner on 21 Oct 2026 ("yes to all") from `docs/proposals/inbox.md`, which keeps the reasoning; this section is the spec. Cost model that drives it: an agent only runs during a turn, every turn re-reads its whole context (400k to 730k tokens per Fablyn seat), and an idle agent does nothing until prompted. So an agent is never asked to poll, every wait lives in the herdr server (`agent wait` blocks server-side) or in a silent harness hook, and every delivery is batched so one wake-up carries everything queued. Facts verified live: `herdr status server` reports protocol 22 on `~/.config/herdr/herdr.sock`; the API schema has `events.subscribe` with a `pane_agent_status_changed` event (not used before 0.6.1 is reconsidered); Claude Code `Stop` hooks accept `hookSpecificOutput.additionalContext` to continue the turn with feedback and `UserPromptSubmit` hooks accept `additionalContext`; hook input carries `stop_hook_active` when a Stop hook already continued the conversation.
+
+### 18.1 Storage
+
+```
+.herdr/inbox/<name>/new/<id>.md     queued
+.herdr/inbox/<name>/cur/<id>.md     delivered, expired or dropped (kept for replay)
+.herdr/watch.lock                   the running watcher (18.6)
+```
+
+`<name>` is a seat name, a contact name or `owner`. `<id>` is `<UTC time as YYYYMMDDTHHMMSSZ>-<6 lowercase hex>`, for example `20261020T230900Z-3f2a9c`; the hex part is random and re-drawn if the file exists. The short form `#3f2a9c` (the hex part, with or without `#`) names a message on the command line; a short form that matches several ids in the fleet's inbox tree is a usage error that lists them. Files are written atomically (write to a temp file in the same directory, rename) and never modified afterwards; the location (`new/` or `cur/`) is the state, and the log holds the timeline. `ensure_gitignore` adds `inbox/` and `watch.lock` to `.herdr/.gitignore`.
+
+A message file is header lines `key: value`, a blank line, then the body exactly as the sender wrote it (no `[from]` prefix):
+
+```
+id: 20261020T230900Z-3f2a9c
+from: fablyn-orchestrator
+to: fablyn-dev
+time: 2026-10-21T10:09:00+11:00
+fyi: false
+reply_to: 20261020T225300Z-91be02      (only when given)
+ttl: 2026-10-21T12:00:00+11:00         (only when given; absolute, from --ttl)
+file: .herdr/briefs/range.md           (only when sent with --file; the path as given)
+
+Range for 1.25.1: 90ba47c..a659ceb. Build in /private/tmp/fablyn-tm1251.
+```
+
+Every message, including one delivered at once, gets a file (direct sends land in `cur/` right away). Writing the file is the first thing `send` does; a message that could not be written is a failure (exit 1) and nothing is prompted.
+
+### 18.2 Log entries
+
+Every entry keeps the 16.2 fields and gains `id`. New `kind` values and `delivery` values:
+
+- `send` with `delivery: "queued"`: written when the message waits in `new/`. `send` with `delivery: "sent"` or `"unconfirmed"`: as today, when it was prompted at once.
+- `delivered`: `{time, from: "herdr-fleet", to: <name>, kind: "delivered", id, via, bytes: 0, first_line: "<original first line>", delivery: "sent"|"unconfirmed"}`. `via` is one of `send` (flushed before a direct send), `kickoff`, `deliver`, `watch`, `inbox` (the seat read it), `hook`, `notify` (owner). One entry per message delivered.
+- `expired` and `dropped`: same shape with `via: "ttl"` or `via: "drop-inbox"`, `delivery: "none"`.
+- `ack` gains `id` when it acknowledges one message, and `reply_to` on a `send` records the id it answers.
+
+### 18.3 `send`
+
+`send TARGET... [TEXT | --file PATH] [--fyi] [--queue] [--now] [--reply-to ID] [--ttl DURATION] [--as NAME] [--when-ready MS] [--all] [--dry-run] [--fleet PATH]`. `--ttl` takes `30m`, `2h`, `1d` (integers with `m`, `h` or `d`). For each target, after writing the file:
+
+| target state | default | `--queue` | `--now` | `--fyi` |
+|---|---|---|---|---|
+| idle or done | deliver now: the batch (18.4) of everything in `new/` plus this message, one prompt | stays queued | deliver now | stays queued (an FYI never wakes an idle seat) |
+| working | typed ahead now, with the batch in front, as 16.1 allows | stays queued | typed ahead now | typed ahead now, batch in front |
+| blocked, unknown, absent | stays queued; `queued for fablyn-dev (absent) #3f2a9c`, exit 0 | stays queued | refused as 16.1, the file moves to `cur/` and the entry says `delivery: "refused"`, exit 1 | stays queued |
+
+`--queue` and `--now` together is a usage error. `--when-ready` keeps its meaning and then applies the default row. `--dry-run` writes nothing. Direct delivery prefixes the text `[from X #3f2a9c]` (the short id joins the 16.1 prefix so a seat can `--reply-to` it); the kickoff templates' sentence "the [from] prefix is added for you" stays true. `--reply-to` accepts an id or short form that exists in the fleet's inbox tree, else usage error. Output lines: `sent to X (idle), 2.4 KB` as today; `sent to X (idle) with 3 queued, 5.1 KB`; `queued for X (absent) #3f2a9c`; `queued for X (idle, fyi) #3f2a9c`.
+
+`owner` is a valid target in every mode. Delivery to the owner is `herdr notification show` with the first line (`message from fablyn-dev #3f2a9c: ...`) plus the file in `cur/`, logged `delivered` with `via: "notify"`; without `HERDR_ENV` or `HERDR_BIN_PATH` (notify.py's rule) the message stays in `new/` and is reported queued.
+
+### 18.4 The batch
+
+A batch is the `new/` files of one mailbox, oldest id first, each rendered as
+
+```
+[from fablyn-orchestrator at 10:09 #3f2a9c]
+<body>
+```
+
+joined by blank lines. `at` is the message time as in `since_label` (local `HH:MM`, or `YYYY-MM-DD HH:MM` for another day). A `reply_to` adds ` re #91be02` after the short id. FYIs in the mailbox ride along in every batch. When the rendered batch (plus the new message, for `send`) exceeds 16 KiB, the prompt is instead `[from herdr-fleet] 4 messages waiting (oldest 10:09, 41 KB); run: herdr-fleet inbox --read` and the files stay in `new/` until the seat reads them. Before rendering, files past their `ttl` are moved to `cur/` and logged `expired`; they are not delivered. After a successful prompt (`sent`) or an unconfirmed one, the files move to `cur/` and one `delivered` entry per message is logged with the prompt's delivery value; a refused prompt (blocked, unknown) leaves the files in `new/` and logs nothing. An unconfirmed message is never redelivered by the plugin; `inbox --redeliver ID` moves its file back to `new/` by hand.
+
+### 18.5 Delivery paths
+
+1. **Kickoff.** `up`, `restart` and `kickoff` render the seat's batch through a new placeholder `{inbox}`: the block `Messages that arrived while you were away:` followed by the batch, or the empty string when `new/` is empty. A template without `{inbox}` gets the block appended after the template text when the mailbox is non-empty, so emberline's existing templates deliver without edits. The files move to `cur/` only after the kickoff prompt was accepted (`delivered` via `kickoff`); a kickoff that was skipped (blocked at startup) leaves them queued. The size cap of 18.4 applies to the block alone. `examples/fablyn` templates and the `init` starter gain the `{inbox}` block before "Where things stand:". `restart --drop-inbox` and `kickoff --drop-inbox` first move every queued file of that seat to `cur/`, logged `dropped`.
+2. **Flush before send.** 18.3: any direct delivery carries the mailbox in front. Order is never inverted.
+3. **`deliver [NAME...] [--fyi] [--dry-run] [--fleet PATH]`.** Without names: every seat and contact whose `new/` holds at least one non-FYI message; `--fyi` also takes mailboxes that hold only FYIs; `owner` is included (notification). For each: idle or done → the batch through `safe_prompt`, logged via `deliver`; working, blocked, unknown or absent → `fablyn-dev: working, 3 left queued`, nothing sent (queued messages never interrupt). Exit 0 when nothing was refused by error; a stalled or timed-out prompt exits 1 as `send` does.
+4. **Pull: `inbox`.** `inbox [--as NAME] [--read] [--count] [--history NAME] [--redeliver ID] [--json] [--fleet PATH]`. The mailbox is the caller's (resolved as `send` resolves the sender; `--as` overrides, and `--as owner` is how the owner reads theirs). Default: list `new/` as `#3f2a9c  10:09  fablyn-orchestrator  Range for 1.25.1...` (`[fyi]` tag when set), oldest first, nothing moved. `--read`: print the batch format in full, move the files to `cur/`, log `delivered` via `inbox`. `--count`: print the number of files in `new/` and nothing else (exit 0 even for 0). `--history NAME`: every delivered message between the caller and NAME from both `cur/` directories, oldest first, in batch format with direction, for replay into a fresh context. `--redeliver ID`: move that `cur/` file back to `new/` (usage error if it is not in `cur/`). `inbox` runs no herdr command except the caller lookup, and none with `--as`.
+5. **Watcher** (18.6) and **hooks** (18.7).
+
+### 18.6 Watcher (0.6.1)
+
+`watch [--debounce MS] [--once] [--fleet PATH]` runs in the foreground until Ctrl-C and delivers queued messages as seats become idle. Only the owner starts it: from a shell, or with the manifest pane `watch` (`Fleet: watch`, `--placement split`, cwd from the focused pane) which runs `herdr-fleet watch` for that repository.
+
+- One watcher per fleet: it writes `.herdr/watch.lock` (`{"pid", "started", "fleet"}`) and refuses to start when the lock names a live pid (exit 1, `watcher already running (pid 123)`); a lock whose pid is dead is replaced. The lock is removed on exit, including Ctrl-C.
+- Loop: read every mailbox; for each seat or contact with at least one non-FYI message in `new/` and no waiter yet, start a thread that runs `herdr agent wait NAME --until idle --until done --timeout 30000`. A `timeout` result just ends the thread; the loop re-reads the mailboxes every 2 s (filesystem only) and starts waiters again, so new messages for new targets are picked up without touching any agent. An agent that is absent gets no waiter (`agent wait` would fail); it is delivered at its next kickoff.
+- On an observed `idle` or `done`: sleep `--debounce` (default 5000 ms), re-read the state with `agent get`, and if still idle or done deliver the batch exactly as `deliver` does (18.4, via `watch`). If the seat went working or blocked meanwhile, go back to waiting. Then `herdr notification show "delivered 3 to fablyn-dev"`.
+- FYI-only mailboxes get no waiter. Mailbox `owner` is delivered at once (notification), as `send` does.
+- `--once`: deliver whatever can be delivered right now (seats already idle or done) and exit 0; no waiters, no lock.
+- Output: one line per event (`waiting on fablyn-dev (3 queued)`, `fablyn-dev idle; delivering 3`, `delivered 3 to fablyn-dev`, `fablyn-dev blocked; still waiting`). `status` prints `watcher: running (pid 123 since 10:00)` or `watcher: not running` after the owed lines whenever any mailbox is non-empty, and the per-seat queued counts: `queued: fablyn-dev 3 (oldest 10:09), owner 1`. `status --json` adds `"queued": {name: count}` and `"watcher": {"running", "pid", "since"}`.
+- The watcher never prompts a `blocked` or `unknown` seat, never answers a dialog, never redelivers an unconfirmed message, and never starts, restarts or quits anything. It runs only `agent wait`, `agent get`, `agent prompt` (through `safe_prompt`) and `notification show`.
+
+### 18.7 Hooks (0.7.0, Claude Code only, opt-in)
+
+`hooks install [--remove] [--fleet PATH]` edits `<repo>/.claude/settings.local.json` (creating it if absent, preserving everything else, atomic write): under `hooks`, a `Stop` entry running `herdr-fleet inbox --hook stop` and a `UserPromptSubmit` entry running `herdr-fleet inbox --hook prompt`, both `type: "command"`, `timeout: 10`. Entries are recognised by their command text, so install is idempotent and `--remove` deletes exactly those. `doctor` reports `ok hooks: installed` / `info hooks: not installed (herdr-fleet hooks install)` for fleets with a Claude seat.
+
+`inbox --hook stop|prompt` reads the hook JSON from stdin, resolves the seat from `HERDR_PANE_ID` through `agent get` (no pane, no herdr, no fleet, or the pane's agent is not a seat: print nothing, exit 0; every error path is silent and exit 0, so a broken hook never disturbs the agent). `stop`: if the input has `stop_hook_active: true`, print nothing (loop protection); else if `new/` is empty, print nothing; else print `{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "<batch>"}}`, move the files to `cur/` and log `delivered` via `hook`. The size cap of 18.4 applies (pointer text instead of the batch). `prompt`: if `new/` is non-empty, print `{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "N messages waiting; run: herdr-fleet inbox --read"}}`, moving nothing. Codex, agy and other kinds have no equivalent; they rely on 18.5 and 18.6.
+
+### 18.8 Owed replies with ids
+
+16.3 and 17.1 stay, with two changes: a message counts from the time of its `delivered` entry (a message still queued or expired creates no debt; a `send` entry with `delivery: "sent"` or `"unconfirmed"` is its own delivery), and a `send` with `reply_to`, or an `ack` with an `id`, settles that message exactly even if a newer message from the same sender to the same recipient is awaiting. `ack` therefore accepts ids and short forms as well as names: `ack #3f2a9c`, `ack fablyn-dev`, `ack --all`.
+
+### 18.9 Invariants (added to section 7)
+
+11. Queued messages are delivered only to `idle` or `done` seats, only through `safe_prompt`, and only by a plugin command that a person, an agent's own tool call, or the owner-started watcher invoked. Nothing the plugin spawns runs in the background; `watch` is a foreground process the owner starts and stops.
+12. The watcher never prompts a `blocked` or `unknown` seat, never answers a dialog, never redelivers an unconfirmed message, and never starts, restarts or quits anything.
+13. An agent is never asked to poll. Waits live in the herdr server (`agent wait`) or in a silent hook.
+14. A hook-delivered batch is the seat reading its own inbox inside its own process; the plugin never writes to an agent through a hook, and a hook prints nothing on any error.
+15. Message bodies are stored verbatim and only under `.herdr/inbox/` of the fleet's repository; the plugin never reads them for any purpose but rendering a batch, a listing or a history.
+
+### 18.10 Tests
+
+Fake herdr unchanged in shape; `agent wait` already exists there (check) or gains `--until`/`--timeout` with scripted outcomes (`wait_results: {name: [idle|timeout|...]}`). Cover: id generation and short-form resolution (unique, ambiguous, unknown); file write then prompt order (a failed write prompts nothing); every row of the 18.3 table; FYI never wakes idle; flush before send keeps order and logs one `delivered` per message; batch rendering, the 16 KiB pointer, `reply_to` rendering; ttl expiry at delivery and in `inbox`; kickoff `{inbox}` with and without the placeholder, skipped kickoff leaves files queued, `--drop-inbox`; `deliver` with and without names, `--fyi`, working/blocked left queued; `inbox` list/read/count/history/redeliver and `--as owner`; owner notification path with and without `HERDR_ENV`; owed from delivery, `reply_to` and `ack #id`; watcher (0.6.1) with the fake clock and scripted waits: lock creation and stale lock, waiter per target, debounce re-check that backs off when the seat went working, FYI-only skip, `--once`; hooks (0.7.0): install/remove idempotence on a settings file with other content, `--hook stop` silent cases (no pane, not a seat, `stop_hook_active`, empty), batch output and files moved, `--hook prompt` counts. `tests/support.py` learns the new commands so its invariant checks apply (`agent wait` allowed; prompts from `watch` and `deliver` only to idle/done).
+
+### 18.11 Amendments from the 0.6.0 build
+
+0.6.0 builds 18.1 to 18.5 (items 1 to 4), 18.8 and invariants 11 to 15; `watch` (18.6) and hooks (18.7) are not built. New modules: `inbox.py` (mailboxes: ids, files, batches, moves, ttl; no herdr, no log) and `mailroom.py` (`deliver`, `inbox`); the delivery engine every path shares is `messages.prompt_mailbox`.
+
+- **One file per recipient.** `send A B TEXT` writes one message per target, each with its own id. The hex part is drawn again while any file in the fleet's inbox tree uses it, so short forms are unique when written; an ambiguous short form can only come from files made by hand.
+- **Order within a second.** Messages sort by the id's second, then the file's mtime (a rename keeps it), then the id, so two messages written in the same second keep their write order.
+- **Mailbox lock.** A command holds `flock` on `.herdr/inbox/<name>/.lock` while it expires, renders, prompts and moves one mailbox, so two commands flushing the same seat never deliver a message twice. Kickoffs take it only when `new/` holds a file, so no mailbox directory is created for a seat with nothing queued.
+- **Names and headers.** A mailbox name must match the herdr name pattern; a live agent that is neither seat nor contact gets a mailbox under its herdr name. Header values are one line (a newline in a `--file` path becomes a space). The `file:` header is the path as given; the log keeps the absolute path (16.2).
+- **Log entries.** Kickoff entries carry no `id` (a kickoff is not a stored message and nothing can reply to it); `ack NAME` carries none either, `ack #id` does. A `send` entry's `bytes` is the message on its own (`[from X #id] body`), whatever the prompt carried. The `delivered` entries of a flushed queue come before the `send` entry of the new message, in prompt order. `--redeliver` writes no entry (18.2 defines none); the later `delivered` entry records the second delivery. A herdr error after the file was written (other than a refusal) logs the `send` as `queued` and reports `failed X: …; #id left queued`, exit 1.
+- **`log` lines.** `#id` follows the bytes, then `[queued]` or `[refused]`, then `[fyi]`: `time  a → b  412  #3f2a9c  [queued]  [fyi]  cleanup done`. Plugin entries read `time  herdr-fleet → b  delivered #3f2a9c via send  first line` (`delivered?` when unconfirmed; `expired #id`, `dropped #id` alike); an acknowledgement of one message reads `ack #3f2a9c`.
+- **The table's columns.** `--queue` and `--now` win over the FYI column: `--now --fyi` to an idle seat delivers, `--queue --fyi` queues. A message that is FYI by its prefix (17.1) follows the FYI column too. An FYI typed ahead is prompted with only `working` allowed, so a seat that turned idle between the check and the prompt is not woken: the FYI stays queued.
+- **`--when-ready`.** 16.1 refused a target still busy after the wait; 18.3 says the default row then applies, whose `working` cell types ahead and so defeats the option. Built: the wait is unchanged (working, blocked and unknown targets); then idle or done follows the mode's column; anything else stays queued (`queued for X (working after --when-ready 5000 ms) #id`), never typed ahead; with `--now` it is refused (exit 1). `--queue` skips the wait.
+- **Prompt text.** A message alone is `[from X #id] body`; with anything queued, the whole prompt is the batch of 18.4 with the new message last. A text that already starts with `[from` is sent as written (16.1), so it carries no short id.
+- **The cap includes a lone message.** 18.4 measures "the batch plus the new message", so a single message over 16 KiB to an idle seat is queued and the seat gets the pointer: `queued for X (idle) #id; prompted a pointer instead: 1 message waiting (oldest 10:09, 17.0 KB); run: herdr-fleet inbox --read`. A pointer prompt is not logged; the files stay in `new/` and the `send` entry says `queued`. Sizes use the 1000-based `KB` of `send`'s output.
+- **Refusals and exit codes.** A prompt refused after the state check (the seat turned blocked) leaves the message queued (exit 0), or with `--now` moves it to `cur/` logged `refused` (exit 1). Exit 1 also for a failed write and an unconfirmed prompt; 3 only for `--all` with no live seat; queued is 0.
+- **Owner.** `owner` is notified in every mode but `--queue`, FYIs included (a notification costs no tokens). One notification carries the whole owner mailbox: titled `message from fablyn-dev #3f2a9c` for one message, `N messages for owner (oldest 10:09)` for several, with the first lines and `read: herdr-fleet inbox --as owner --history NAME` in the body, sound `request`. The new message is logged `send` `queued`, then each message `delivered` via `notify`. 18.3's "without HERDR_ENV or HERDR_BIN_PATH it stays queued" could not happen under `send`'s preflight, so a `send` whose only target is `owner` skips the preflight outside herdr and reports `queued for owner (not in herdr) #id` without running any herdr command; any other target still needs herdr. A failed notification leaves the messages queued.
+- **Contacts.** A contact that resolves to no agent or to several is treated as absent: queued with its reason in the label (`queued for winner-chronicles (absent: no live agent matches cwd …) #id`); `deliver` resolves it again.
+- **Batch rendering.** Trailing newlines of a body are trimmed in the batch only; the file is never changed. The batch shows no `[fyi]` tag (18.4); listings do.
+- **Kickoffs.** With nothing queued, a line that is only `{inbox}` is removed together with one blank line after it, so a kickoff reads byte for byte as in 0.5.0. Above the cap the block is the heading and the pointer line without a `[from herdr-fleet]` prefix, and the files stay queued. An unconfirmed kickoff moves the files it carried with `delivered` entries marked `unconfirmed` (18.4), while the kickoff itself is reported `not briefed` and not logged, as before. The built-in default template, which is also the `init` starter, has no "Where things stand:" line, so `{inbox}` sits between `{contacts}` and `{state}` (the starter state note begins with "Where things stand:"); the starter's comment line now lists `{contacts}` and `{inbox}`. `up --dry-run` and other dry runs say which seats' kickoffs would carry queued messages.
+- **`--drop-inbox`** runs first, before any quit, for each named seat, and reports `fablyn-dev: dropped - 2 queued messages moved to cur/ (inbox --redeliver brings one back)`. It is on `restart` and `kickoff` only, not `swap` or `up`.
+- **`deliver`.** Without names, the order is seats in file order, then contacts, then `owner`, which is included whenever its mailbox holds anything (FYI or not). Named mailboxes are delivered even when they hold only FYIs. A name may be a seat, a contact, `owner`, an existing mailbox or a live agent. Before choosing, `deliver` expires past-ttl messages in every mailbox. Lines: `delivered 3 to fablyn-dev (idle), 5.1 KB`, `fablyn-dev: working, 3 left queued`, `prompted fablyn-dev (idle) with a pointer: …`, `nothing queued for X`, `nothing to deliver (only FYIs are queued; deliver --fyi takes them)`.
+- **`inbox`.** The caller lookup is `pane current --current` then `agent get`, only inside herdr; outside herdr, or without a pane, the caller is `owner`. Every mode first expires past-ttl messages. `--read` prints everything with no cap (it is what the pointer asks for). The modes are mutually exclusive. `--history` shows `cur/` files between the two names as `[from A to B at 10:09 #id]`, leaving out those whose last log entry is `expired`, `dropped` or a refused `send` (a `cur/` file the log does not mention is shown). `--redeliver` accepts a message in any mailbox, so the owner can requeue a seat's unconfirmed delivery. `--json`: a list of `{id, from, to, time, fyi, reply_to, ttl, file, first_line}` (plus `body` with `--read` and `--history`); `--count --json` prints `{"name", "count"}`.
+- **Owed replies.** A plain answer from B to A (a `send` without `reply_to`, FYI or not, in any delivery state but `refused`, or an `ack` without `id`) settles every request from A to B delivered before it. An exact answer (`reply_to`, `ack #id`) settles only its target, and does not count as a plain answer, so when the newest request is settled exactly an older unanswered one shows again. An answer counts from its own time even while it waits in `new/`: B has answered. `status` still shows one line per pair (the latest unsettled request); `owed` items gain `id` in JSON when the message has one.
+- **`ack` with ids.** `#3f2a9c` or a full id is always an id; a bare hex part is an id unless it is also a known name. `ack #id` for a message the caller does not owe (not to the caller, FYI, not delivered, already settled) prints `nothing owed for #3f2a9c` and exits 0.
+- **`status`.** The `queued:` line of 18.6 is built now (the `watcher:` line comes with 0.6.1): mailboxes in the order seats, contacts, other names, `owner`; `(oldest HH:MM)` only when a mailbox holds two or more. `status` counts only messages not past their ttl and moves nothing. `--json` adds `"queued": {name: count}` and `"queued_oldest": {name: time}`.
+- **`.gitignore` and `init`.** The starter `.gitignore` lists all four entries; `init --example` never copies an `inbox/` directory or `watch.lock`.
+- **`install-cli` writes a launcher** (added by the designer during the build, after a seat ran a half-edited development checkout through the 0.5.0 symlink). `~/.local/bin/herdr-fleet` (or `--dir`) becomes a `/bin/sh` script, written atomically with mode 0755, that runs `$HERDR_FLEET_BIN` when set, else the `bin/herdr-fleet` of the enabled `yarrasys.fleet` plugin found through `herdr plugin list --json` (the directory of its `manifest_path`), else the `bin/herdr-fleet` that ran `install-cli` (`FALLBACK`). It replaces a symlink or a file containing the marker `herdr-fleet launcher`, and refuses any other file (exit 1). `install-cli --dev` writes the 0.5.0 symlink to this checkout instead. The text is `ops.LAUNCHER_TEMPLATE`; tests check it but never run it, since it calls herdr. Live smoke tests of unreleased code set `HERDR_FLEET_BIN` to the clone's `bin/herdr-fleet`.
+- **Tests.** The fake herdr is unchanged (`agent wait` with `wait_status` and canned responses cover 0.6.0). `tests/support.py` adds: an `inbox` command may run only `pane current` and `agent get`, and none with `--as`; `deliver` and kickoffs keep the strict rule (idle or done only), and only `send` may reach a working agent. `tests/test_inbox.py` covers 18.10's 0.6.0 list.

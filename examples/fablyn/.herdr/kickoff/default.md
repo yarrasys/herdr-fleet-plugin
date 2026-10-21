@@ -6,6 +6,8 @@ Read AGENTS.md and docs/agent-team.md in {repo} before you start; they define yo
 Team (herdr names; message them with `herdr agent prompt <name> "..."`):
 {roster}
 
+{inbox}
+
 Where things stand:
 {state}
 

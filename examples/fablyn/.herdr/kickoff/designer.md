@@ -16,6 +16,8 @@ Rules:
 Team:
 {roster}
 
+{inbox}
+
 Where things stand:
 {state}
 

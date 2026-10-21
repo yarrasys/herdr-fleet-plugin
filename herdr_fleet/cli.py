@@ -26,6 +26,7 @@ from herdr_fleet.ops import op_down, op_install_cli, op_kickoff, op_restart, op_
 from herdr_fleet.scaffold import available_examples, run_init
 from herdr_fleet.seats import Clock
 from herdr_fleet.state import StateError
+from herdr_fleet.mailroom import op_deliver, op_inbox
 from herdr_fleet.messages import op_ack, op_log, op_send
 from herdr_fleet.statenote import op_state
 from herdr_fleet.tile import op_tile
@@ -50,6 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
     wait = argparse.ArgumentParser(add_help=False)
     wait.add_argument("--wait", metavar="MS", type=int,
                       help="let a working agent settle for up to MS milliseconds before quitting it")
+    drop = argparse.ArgumentParser(add_help=False)
+    drop.add_argument("--drop-inbox", action="store_true",
+                      help="first move every message queued for the seat to cur/ (logged dropped), so the "
+                           "kickoff carries none")
 
     parser = argparse.ArgumentParser(
         prog="herdr-fleet",
@@ -73,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--context", action="store_true",
                    help="add a CONTEXT column: each Claude seat's context size from its transcript (read-only)")
 
-    p = sub.add_parser("restart", parents=[common, notes, wait],
+    p = sub.add_parser("restart", parents=[common, notes, wait, drop],
                        help="quit idle seats and start them again in the same pane, then brief them")
     p.add_argument("names", nargs="+", metavar="NAME")
     p.add_argument("--dry-run", action="store_true", help="print the plan and change nothing")
@@ -83,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("names", nargs="*", metavar="NAME", help="only these seats (default: all)")
     p.add_argument("--dry-run", action="store_true", help="list what would change and why")
 
-    p = sub.add_parser("kickoff", parents=[common, notes], help="resend the kickoff to idle seats")
+    p = sub.add_parser("kickoff", parents=[common, notes, drop], help="resend the kickoff to idle seats")
     p.add_argument("names", nargs="+", metavar="NAME")
 
     p = sub.add_parser("down", parents=[common, wait], help="quit seats; optionally close what herdr-fleet created")
@@ -92,22 +97,54 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--close-workspace", action="store_true",
                    help="close the workspace if herdr-fleet created it and no agent is left")
 
-    p = sub.add_parser("send", parents=[fleet], help="message seats, contacts or live agents: [from <you>] TEXT",
-                       description="Send TEXT (or --file PATH) to each TARGET with one `herdr agent prompt`, "
-                                   "prefixed [from <sender>]. Working targets get it queued; blocked, unknown and "
-                                   "absent ones are refused. Here --file is the text; pick a fleet file with "
-                                   "--fleet PATH.")
+    p = sub.add_parser("send", parents=[fleet], help="message seats, contacts, owner or live agents",
+                       description="Write TEXT (or --file PATH) to each TARGET's inbox (.herdr/inbox), then: an "
+                                   "idle or done seat gets it now, with anything queued for it in front, as one "
+                                   "`herdr agent prompt` prefixed [from <sender> #id]; a working seat gets it typed "
+                                   "ahead; a blocked, unknown or absent seat keeps it queued for its next kickoff, "
+                                   "`deliver` or `inbox --read`. An FYI never wakes an idle seat. owner gets a "
+                                   "herdr notification. Here --file is the text; pick a fleet file with --fleet PATH.")
     p.add_argument("words", nargs="*", metavar="TARGET... [TEXT]",
-                   help="seat, contact or live agent names, then the text; with --file every item is a target, "
-                        "and with --all a single item is the text. Options may go anywhere.")
+                   help="seat, contact, owner or live agent names, then the text; with --file every item is a "
+                        "target, and with --all a single item is the text. Options may go anywhere.")
     p.add_argument("--file", dest="message_file", metavar="PATH", help="read the text from this UTF-8 file")
     p.add_argument("--as", dest="as_name", metavar="NAME", help="sender name (default: your pane's agent, or owner)")
     p.add_argument("--when-ready", dest="when_ready", metavar="MS", type=int,
                    help="wait up to MS ms for each target to be idle or done; refuse it if not")
     p.add_argument("--all", dest="all_seats", action="store_true", help="every live seat except the sender")
     p.add_argument("--fyi", action="store_true",
-                   help='a report that awaits no reply (text starting with "FYI:" or "FYI " counts too)')
-    p.add_argument("--dry-run", action="store_true", help="say what would be sent and send nothing")
+                   help='a report that awaits no reply and never wakes an idle seat (text starting with "FYI:" '
+                        'or "FYI " counts too)')
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--queue", action="store_true", help="only queue it; deliver nothing now")
+    mode.add_argument("--now", action="store_true",
+                      help="deliver now or refuse (blocked, unknown, absent: exit 1), never queue")
+    p.add_argument("--reply-to", dest="reply_to", metavar="ID",
+                   help="the message this answers (#3f2a9c or a full id); settles exactly that one")
+    p.add_argument("--ttl", metavar="DURATION",
+                   help="drop it undelivered if still queued after DURATION (30m, 2h, 1d)")
+    p.add_argument("--dry-run", action="store_true", help="say what would happen and write or send nothing")
+
+    p = sub.add_parser("deliver", parents=[fleet], help="hand queued messages to seats that are idle or done",
+                       description="For each NAME (default: every seat and contact with a queued message that "
+                                   "is not FYI, and owner): an idle or done seat gets its queue as one prompt; a "
+                                   "working, blocked, unknown or absent one keeps it. owner gets a notification.")
+    p.add_argument("names", nargs="*", metavar="NAME", help="mailboxes to deliver (default: see above)")
+    p.add_argument("--fyi", dest="fyi_too", action="store_true",
+                   help="without names, also deliver queues that hold only FYIs")
+    p.add_argument("--dry-run", action="store_true", help="say what would be delivered and send nothing")
+
+    p = sub.add_parser("inbox", parents=[fleet], help="your own queued messages: list, read, count, history",
+                       description="Your mailbox (.herdr/inbox/<you>): by default list what is queued. Runs no "
+                                   "herdr command except finding who you are, and none with --as.")
+    p.add_argument("--as", dest="as_name", metavar="NAME", help="whose mailbox (default: your pane's agent, or owner)")
+    action = p.add_mutually_exclusive_group()
+    action.add_argument("--read", action="store_true", help="print every queued message in full and mark it read")
+    action.add_argument("--count", action="store_true", help="print the number of queued messages only")
+    action.add_argument("--history", metavar="NAME",
+                        help="every delivered message between you and NAME, oldest first")
+    action.add_argument("--redeliver", metavar="ID", help="queue a delivered message (#3f2a9c) again")
+    p.add_argument("--json", action="store_true", help="print JSON")
 
     p = sub.add_parser("ack", parents=[fleet], help="settle replies you owe by hand; sends nothing",
                        description="Log an acknowledgement for each NAME whose message you owe a reply, so it "
@@ -156,8 +193,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="overwrite files that already exist")
     p.add_argument("--notify", action="store_true", help="also send the result as a herdr notification")
 
-    p = sub.add_parser("install-cli", help="symlink bin/herdr-fleet into DIR so agents can run it by name")
+    p = sub.add_parser("install-cli", help="put a herdr-fleet launcher into DIR so agents can run it by name",
+                       description="Write DIR/herdr-fleet, a launcher that runs the copy of herdr-fleet herdr "
+                                   "installed (HERDR_FLEET_BIN overrides; this checkout is the fallback). --dev "
+                                   "symlinks this checkout instead.")
     p.add_argument("--dir", metavar="DIR", help="target directory (default ~/.local/bin)")
+    p.add_argument("--dev", action="store_true", help="symlink this checkout's bin/herdr-fleet instead (developers)")
 
     p = sub.add_parser("ui", parents=[common], help="open the status overlay or manage popup (manifest actions)")
     p.add_argument("entrypoint", choices=("status", "manage"))
@@ -168,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 # Commands whose positional list may be split by options: `send A --dry-run TEXT`.
 LIST_POSITIONALS = {"send": "words", "up": "names", "restart": "names", "swap": "names", "kickoff": "names",
-                    "down": "names", "ack": "names"}
+                    "down": "names", "ack": "names", "deliver": "names"}
 
 
 def parse(parser: argparse.ArgumentParser, argv: List[str]) -> argparse.Namespace:
@@ -208,7 +249,7 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
     except SystemExit as exc:
         return int(exc.code or 0) if isinstance(exc.code, int) else EXIT_USAGE
     if args.command == "install-cli":
-        return op_install_cli(PLUGIN_ROOT, args.dir, stdout, env.get("PATH", ""))
+        return op_install_cli(PLUGIN_ROOT, args.dir, stdout, env.get("PATH", ""), args.dev)
     herdr = Herdr(find_binary(env), runner)
     ctx = Ctx(herdr, env, clock or Clock(), stdout, stderr, cwd or os.getcwd(), file=getattr(args, "fleet", None),
               notify=getattr(args, "notify", False), dry_run=getattr(args, "dry_run", False))
@@ -242,6 +283,11 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         return op_worktrees(ctx, args.seat, args.json)
     if command == "ack":  # appends to the message log; herdr only to learn who you are (without --as)
         return op_ack(ctx, args.names, args.all_owed, args.as_name)
+    if command == "inbox":  # your mailbox; herdr only to learn who you are (without --as)
+        return op_inbox(ctx, args.as_name, args.read, args.count, args.history, args.redeliver, args.json)
+    if command == "send":  # preflight inside, since a message to owner may queue outside herdr
+        return op_send(ctx, args.words, args.message_file, args.as_name, args.when_ready, args.all_seats, args.fyi,
+                       args.queue, args.now, args.reply_to, args.ttl)
     if command == "doctor":
         return _doctor(ctx)
     preflight(ctx)
@@ -257,17 +303,17 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         report = op_up(ctx, args.names, me=args.me, no_kickoff=args.no_kickoff, note=args.note, join=args.join)
         return _finish(ctx, report, status_table=True)
     if command == "restart":
-        return _finish(ctx, op_restart(ctx, args.names, note, args.wait))
+        return _finish(ctx, op_restart(ctx, args.names, note, args.wait, drop_inbox=args.drop_inbox))
     if command == "swap":
         return _finish(ctx, op_swap(ctx, args.names, note, args.wait))
     if command == "kickoff":
-        return _finish(ctx, op_kickoff(ctx, args.names, note))
+        return _finish(ctx, op_kickoff(ctx, args.names, note, drop_inbox=args.drop_inbox))
     if command == "down":
         return _finish(ctx, op_down(ctx, args.names, args.wait, args.close_panes, args.close_workspace))
     if command == "tile":
         return _finish(ctx, op_tile(ctx))
-    if command == "send":
-        return op_send(ctx, args.words, args.message_file, args.as_name, args.when_ready, args.all_seats, args.fyi)
+    if command == "deliver":
+        return op_deliver(ctx, args.names, args.fyi_too)
     raise UsageError("unknown command %s" % command)
 
 

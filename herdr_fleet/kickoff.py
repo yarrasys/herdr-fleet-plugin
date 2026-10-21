@@ -9,6 +9,11 @@ The composed text starts with ``[from herdr-fleet]`` unless the template
 already starts with ``[from``. Whole lines that are HTML comments
 (``<!-- ... -->``) are notes for humans and are removed before rendering, so
 they are never sent (``init`` writes one into its starter template).
+
+``{inbox}`` (design 18.5) is the block of messages that arrived while the
+seat was away. With nothing queued, a line holding only ``{inbox}`` goes away
+together with one blank line after it, so the kickoff reads as it did before;
+a template without ``{inbox}`` gets a non-empty block appended at the end.
 """
 
 from __future__ import annotations
@@ -20,14 +25,16 @@ from typing import Dict, List, Mapping, Optional, Sequence
 from herdr_fleet.fleetfile import Fleet, Seat
 
 PREFIX = "[from herdr-fleet]"
-PLACEHOLDERS = ("name", "kind", "args", "repo", "cwd", "workspace", "roster", "contacts", "state", "note",
-                "reason")
+PLACEHOLDERS = ("name", "kind", "args", "repo", "cwd", "workspace", "roster", "contacts", "inbox", "state",
+                "note", "reason")
+INBOX_HEADING = "Messages that arrived while you were away:"
 
 DEFAULT_TEMPLATE = """[from herdr-fleet] You are {name}, a {kind} agent in the "{workspace}" fleet for {repo}.
 Read AGENTS.md there. This message was sent by the fleet tool on {reason}.
 Team (herdr names; message them with `herdr agent prompt <name> "..."`):
 {roster}
 {contacts}
+{inbox}
 {state}
 {note}
 """
@@ -65,6 +72,30 @@ def _render_plain(template: str, values: Mapping[str, str]) -> str:
     for key, value in values.items():
         template = template.replace("{" + key + "}", value)
     return template
+
+
+def uses(template: str, placeholder: str) -> bool:
+    """True when the template has ``{placeholder}`` as a field (not ``{{placeholder}}``)."""
+    try:
+        return any(field == placeholder for _, field, _, _ in string.Formatter().parse(template))
+    except ValueError:
+        return "{" + placeholder + "}" in template
+
+
+def drop_empty_inbox(template: str) -> str:
+    """Remove each line that is only ``{inbox}``, with one blank line after it."""
+    out: List[str] = []
+    skip_blank = False
+    for line in template.split("\n"):
+        if line.strip() == "{inbox}":
+            skip_blank = True
+            continue
+        if skip_blank and not line.strip():
+            skip_blank = False
+            continue
+        skip_blank = False
+        out.append(line)
+    return "\n".join(out)
 
 
 def strip_comments(template: str) -> str:
@@ -110,8 +141,10 @@ def read_state_note(fleet: Fleet) -> str:
 
 
 def compose(seat: Seat, fleet: Fleet, workspace: str, roster: str, reason: str,
-            note: Optional[str] = None, state_text: Optional[str] = None, contacts: str = "") -> str:
-    """The full kickoff message for one seat."""
+            note: Optional[str] = None, state_text: Optional[str] = None, contacts: str = "",
+            inbox: str = "") -> str:
+    """The full kickoff message for one seat. ``inbox`` is the rendered ``{inbox}`` block
+    (empty when nothing is queued)."""
     values: Dict[str, str] = {
         "name": seat.name,
         "kind": seat.kind,
@@ -121,12 +154,17 @@ def compose(seat: Seat, fleet: Fleet, workspace: str, roster: str, reason: str,
         "workspace": workspace or "",
         "roster": roster,
         "contacts": contacts,
+        "inbox": inbox,
         "state": read_state_note(fleet) if state_text is None else state_text,
         "note": note or "",
         "reason": reason,
     }
     template = strip_comments(template_for(seat, fleet))
+    if not inbox:
+        template = drop_empty_inbox(template)
     text = render(template, values).strip()
+    if inbox and not uses(template, "inbox"):
+        text = text + "\n\n" + inbox
     if not text.startswith("[from"):
         text = PREFIX + " " + text
     return text

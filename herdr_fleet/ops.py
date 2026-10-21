@@ -14,15 +14,16 @@ from __future__ import annotations
 
 import os
 import shlex
-from typing import Dict, List, Optional, Sequence, TextIO
+from typing import Callable, Dict, List, Optional, Sequence, TextIO
 
-from herdr_fleet import PLUGIN_ID
+from herdr_fleet import PLUGIN_ID, inbox
 from herdr_fleet.bringup import (claim_seat, ensure_seat, follow_pane, label_for, label_of, require_caller_context,
                                 resolve_target, send_kickoffs, start_claimed, start_seat)
 from herdr_fleet.checks import drift_reasons, is_adopted
 from herdr_fleet.context import Ctx, Report, UsageError
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import HerdrError, describe, has_agent, pane_move_argv, render_cmd, start_argv
+from herdr_fleet.messages import drop_queued
 from herdr_fleet.placement import Target, place_chain, place_grid
 from herdr_fleet.seats import (QUIT_CONFIG_HINT, SETTLED, at_shell_prompt, describe_foreground,
                                live_by_name, quit_agent, quit_command)
@@ -63,6 +64,21 @@ def prune(ctx: Ctx) -> None:
     for message in prune_state(ctx.state, ctx.herdr):
         ctx.say(message)
     ctx.save()
+
+
+def drop_inboxes(ctx: Ctx, seats: Sequence[Seat], report: Report) -> None:
+    """``--drop-inbox`` (design 18.5): before anything else, move every queued message of
+    these seats to ``cur/``, logged ``dropped``, so the kickoff starts clean."""
+    for seat in seats:
+        if ctx.dry_run:
+            count = len(inbox.queued(ctx.fleet.repo).get(seat.name, []))
+            if count:
+                report.add(seat.name, "plan", "drop %d queued message%s" % (count, "" if count == 1 else "s"))
+            continue
+        count = drop_queued(ctx, seat.name)
+        if count:
+            report.add(seat.name, "dropped", "%d queued message%s moved to cur/ (inbox --redeliver brings one back)"
+                       % (count, "" if count == 1 else "s"))
 
 
 # -- up ------------------------------------------------------------------------------
@@ -274,11 +290,13 @@ def _quit_live(ctx: Ctx, seat: Seat, agent: Dict, report: Report, then: str = ""
 
 
 def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_ms: Optional[int] = None,
-               reason: str = "restart") -> Report:
+               reason: str = "restart", drop_inbox: bool = False) -> Report:
     report = Report(reason)
     seats = select_seats(ctx.fleet, names, required=True)
     refuse_unknown_kinds(ctx)
     prune(ctx)
+    if drop_inbox:
+        drop_inboxes(ctx, seats, report)
     live = live_by_name(ctx.herdr)
     target: Optional[Target] = None
     to_brief: List[Seat] = []
@@ -347,11 +365,13 @@ def op_swap(ctx: Ctx, names: Sequence[str], note: Optional[str] = None,
 # -- kickoff and down --------------------------------------------------------------
 
 
-def op_kickoff(ctx: Ctx, names: Sequence[str], note: Optional[str] = None) -> Report:
+def op_kickoff(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, drop_inbox: bool = False) -> Report:
     """Resend kickoffs. safe_prompt refuses blocked, unknown, working and absent agents."""
     report = Report("kickoff")
     seats = select_seats(ctx.fleet, names, required=True)
     prune(ctx)
+    if drop_inbox:
+        drop_inboxes(ctx, seats, report)
     send_kickoffs(ctx, seats, "kickoff", note, label_for(ctx, None), report)
     return report
 
@@ -451,24 +471,98 @@ def op_ui(ctx: Ctx, entrypoint: str) -> None:
     ctx.herdr.plugin_pane_open(plugin, entrypoint, repo)
 
 
-def op_install_cli(root: str, directory: Optional[str], out: TextIO, path_env: str) -> int:
-    """Symlink bin/herdr-fleet into DIR (default ~/.local/bin)."""
+LAUNCHER_MARKER = "herdr-fleet launcher"
+LAUNCHER_TEMPLATE = """#!/bin/sh
+# herdr-fleet launcher, written by `herdr-fleet install-cli`. Runs the copy of herdr-fleet that herdr has
+# installed (plugin yarrasys.fleet), so fleet seats never run a half-edited development checkout.
+# HERDR_FLEET_BIN=<path to a bin/herdr-fleet> runs that copy instead. Falls back to FALLBACK when herdr
+# cannot be asked.
+FALLBACK=__FALLBACK__
+if [ -n "$HERDR_FLEET_BIN" ]; then exec python3 "$HERDR_FLEET_BIN" "$@"; fi
+ROOT=$(herdr plugin list --json 2>/dev/null | python3 -c '
+import json, os, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for plugin in data.get("result", {}).get("plugins", []):
+    if "yarrasys.fleet" in json.dumps(plugin) and plugin.get("enabled", True):
+        manifest = plugin.get("manifest_path") or ""
+        if manifest:
+            print(os.path.dirname(manifest))
+            break
+' 2>/dev/null)
+if [ -n "$ROOT" ] && [ -f "$ROOT/bin/herdr-fleet" ]; then exec python3 "$ROOT/bin/herdr-fleet" "$@"; fi
+exec python3 "$FALLBACK" "$@"
+"""
+
+
+def launcher_text(fallback: str) -> str:
+    """The launcher ``install-cli`` writes: it runs the plugin copy herdr installed, or
+    ``$HERDR_FLEET_BIN``, or ``fallback`` (the bin/herdr-fleet that ran install-cli)."""
+    return LAUNCHER_TEMPLATE.replace("__FALLBACK__", shlex.quote(fallback))
+
+
+def _is_launcher(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            return LAUNCHER_MARKER.encode("ascii") in handle.read(64 * 1024)
+    except OSError:
+        return False
+
+
+def op_install_cli(root: str, directory: Optional[str], out: TextIO, path_env: str, dev: bool = False) -> int:
+    """Put ``herdr-fleet`` into DIR (default ~/.local/bin). By default a launcher script
+    that runs the copy herdr installed (written atomically, mode 0755); with ``dev`` a
+    symlink to this checkout. Replaces a symlink or an earlier launcher, never another file."""
     source = os.path.join(root, "bin", "herdr-fleet")
     folder = os.path.abspath(os.path.expanduser(directory or "~/.local/bin"))
-    link = os.path.join(folder, "herdr-fleet")
+    target = os.path.join(folder, "herdr-fleet")
     out.write("plugin root: %s\n" % root)
-    if os.path.islink(link):
-        if os.path.realpath(link) != os.path.realpath(source):
-            out.write("herdr-fleet: error: %s already points to %s; remove it first\n" % (link, os.readlink(link)))
-            return 1
-        out.write("already linked: %s -> %s\n" % (link, source))
-    elif os.path.exists(link):
-        out.write("herdr-fleet: error: %s exists and is not a symlink; remove it first\n" % link)
+    if os.path.lexists(target) and not os.path.islink(target) and not _is_launcher(target):
+        out.write("herdr-fleet: error: %s exists and is not a herdr-fleet launcher or symlink; remove it first\n"
+                  % target)
         return 1
+    os.makedirs(folder, exist_ok=True)
+    if dev:
+        if os.path.islink(target) and os.path.realpath(target) == os.path.realpath(source):
+            out.write("already linked (--dev): %s -> %s\n" % (target, source))
+        else:
+            _atomic(folder, target, lambda tmp: os.symlink(source, tmp))
+            out.write("linked %s -> %s (--dev: runs this checkout as it is)\n" % (target, source))
     else:
-        os.makedirs(folder, exist_ok=True)
-        os.symlink(source, link)
-        out.write("linked %s -> %s\n" % (link, source))
+        text = launcher_text(source)
+        if not os.path.islink(target) and os.path.isfile(target) and _read(target) == text:
+            out.write("launcher already installed: %s\n" % target)
+        else:
+            _atomic(folder, target, lambda tmp: _write_launcher(tmp, text))
+            out.write("wrote launcher %s: runs the herdr-fleet that herdr installed (falls back to %s; "
+                      "HERDR_FLEET_BIN overrides)\n" % (target, source))
     if folder not in path_env.split(os.pathsep):
         out.write("note: %s is not on PATH\n" % folder)
     return 0
+
+
+def _read(path: str) -> str:
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+def _write_launcher(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.chmod(path, 0o755)
+
+
+def _atomic(folder: str, target: str, make: "Callable[[str], None]") -> None:
+    """Create the new launcher or link beside ``target`` and rename it over it."""
+    tmp = os.path.join(folder, ".herdr-fleet.%d.tmp" % os.getpid())
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    try:
+        make(tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise

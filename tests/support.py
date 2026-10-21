@@ -30,6 +30,8 @@ from herdr_fleet.cli import main  # noqa: E402
 
 CALLER_WS = "w1"
 CALLER_PANE = "w1:p1"
+# Design 18.5: `inbox` asks herdr only who the caller is (and nothing at all with --as).
+INBOX_CALLS = (["pane", "current"], ["agent", "get"])
 
 THREE_SEATS = """
 workspace = "fablyn"
@@ -193,7 +195,9 @@ class FleetCase(unittest.TestCase):
 
     def assert_safety(self) -> None:
         """Design section 7 invariants, checked against the full call log. The one
-        exception (design 16.1): a prompt issued by `send` may reach a working agent."""
+        exception (design 16.1, 18.3): a prompt issued by `send` may reach a working agent;
+        `deliver` and kickoffs carry queued messages to idle or done seats only
+        (invariant 11), and `inbox` runs nothing but the caller lookup."""
         caller = self.env.get("HERDR_PANE_ID")
         command: List[str] = []
         entries = []
@@ -206,6 +210,9 @@ class FleetCase(unittest.TestCase):
                 continue
             argv, info = call["argv"], call["info"]
             self.assertTrue(argv, "bare herdr was run")
+            if command[:1] == ["inbox"]:
+                self.assertIn(argv[:2], INBOX_CALLS, "inbox ran more than the caller lookup: %s" % argv)
+                self.assertNotIn("--as", command, "inbox --as ran a herdr command: %s" % argv)
             self.assertNotIn(tuple(argv[:2]), fake_herdr.FORBIDDEN, "forbidden command: %s" % argv)
             self.assertFalse(any(a in ("send-keys", "send-text") for a in argv[:2]), argv)
             self.assertNotEqual(argv[:2], ["pane", "run"], argv)
