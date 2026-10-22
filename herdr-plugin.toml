@@ -1,6 +1,6 @@
 id = "yarrasys.fleet"
 name = "Fleet"
-version = "0.10.0"
+version = "0.11.0"
 min_herdr_version = "0.9.4"
 description = "Start, restart and swap a team of named coding agents from a per-repository fleet file (.herdr/fleet.toml)."
 platforms = ["linux", "macos"]
@@ -47,6 +47,12 @@ title = "Fleet: watch"
 contexts = ["workspace"]
 command = ["python3", "bin/herdr-fleet", "ui", "watch"]
 
+[[actions]]
+id = "go"
+title = "Fleet: go to a seat"
+contexts = ["workspace"]
+command = ["python3", "bin/herdr-fleet", "ui", "go"]
+
 [[panes]]
 id = "status"
 title = "Fleet status"
@@ -60,6 +66,15 @@ placement = "popup"
 width = "70%"
 height = "60%"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/bin/herdr-fleet\" menu"]
+
+# Opened by `ui go` (design 22.2): pick a seat or contact, focus it, close.
+[[panes]]
+id = "go"
+title = "Fleet: go"
+placement = "popup"
+width = "50%"
+height = "50%"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/bin/herdr-fleet\" menu --go"]
 
 # Opened by `ui watch` with --placement split (design 18.6); runs until Ctrl-C or the pane closes.
 [[panes]]

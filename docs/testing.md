@@ -27,6 +27,8 @@ The suite takes a few seconds. Nothing in it talks to a real herdr: `HERDR_BIN_P
 
 - focus and screens (design 21.2): panes and workspaces answer `focused` (false unless a test calls `fake_herdr.focus(world, pane)`, which makes that pane the owner's: focused in its tab, its tab the workspace's `active_tab_id`, its workspace the only focused one; `fake_herdr.unfocus(world)` unfocuses every workspace). `pane read PANE --lines N` prints the last N lines of a scripted screen as plain text, as live herdr does even in JSON mode: by default a rule, the empty prompt line of the pane's agent kind (`❯`, `› Ask Codex to do anything`, `>`) and a status line; `fake_herdr.type_in(world, pane, text)` puts the owner's text on the prompt line, `fake_herdr.show_dialog(world, pane)` shows a permission dialog with no prompt line, and `fake_herdr.set_screen` scripts any text. At every `agent prompt` the log records `owner_typing`: whether the target pane was then the owner's with text on its prompt line or no prompt line on screen, judged with the fake's own glyph table, independently of `presence.py`;
 
+- pane names and focus (design 22): `pane rename PANE LABEL...` sets the pane's `label` (the words joined), `--clear` removes it, and `pane get`/`pane list` records carry `label` (null when unset); a plugin pane is named after its manifest title (`Fleet watch`), as live; `rename_errors` ({pane: code}) makes a rename fail. At every `pane rename` the log records the pane, the name asked for or `clear`, whether the pane then hosted a seat of the fleet (`seat`) and the name the fleet wants for it (`wanted`: the seat's `label`, else its name), judged by the fake from the fleet file (passed by `tests/support.py`, or `FAKE_HERDR_FLEET` for the program), and whether it hosted an agent or was a plugin pane. `agent focus TARGET` (a name or a pane id) moves the owner's focus there through `fake_herdr.focus` and marks the agent seen (`done` becomes `idle`);
+
 - at every `agent prompt` the log also records the target's name and, read from the fleet's `.herdr/inbox` (passed to the in-process runner by `tests/support.py`, or `FAKE_HERDR_INBOX` for the program), the mailboxes and short ids that held a message queued on refusal (`queued_by: refusal` in `new/`) at that moment (design 20.8). Nothing the fake answers changes: its response shapes stay those of herdr 0.9.5.
 
 Most tests call `herdr_fleet.cli.main` in-process with the fake as the runner and an instant clock, so 250 ms polls and 10 s or 20 s timeouts cost nothing. `tests/test_cli_subprocess.py` runs `bin/herdr-fleet` as a real process with the fake installed as an executable on `HERDR_BIN_PATH`, exactly as herdr would. `tests/test_manifest.py` checks `herdr-plugin.toml` and runs its commands the way herdr does: actions from the plugin root with an action's context JSON, pane entrypoints through `sh -c` from the repo directory that `ui` passes as `--cwd`.
@@ -46,7 +48,8 @@ Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry
 - no `agent prompt` reached a pane that was, at that call, the owner's pane with text on its prompt line or no prompt line on screen (`owner_typing` in the fake's log; invariant 19);
 - `watch` ran nothing but `agent wait`, `agent get`, `agent list`, `agent prompt`, `notification show`, the presence guard's `pane get`, `workspace list` and `pane read`, and the preflight's `herdr --version`, and every `agent wait` carried `--timeout` (invariants 12 and 13);
 - `inbox --hook` ran nothing but `agent get` (invariant 14), and `hooks` ran no herdr command at all;
-- `plugin pane open` came only from `up` (also through the popup menu) or `ui`, `pane resize` only from `up`, and a pane opened as a plugin pane was never prompted, renamed or started into (design 19.3).
+- `plugin pane open` came only from `up` (also through the popup menu) or `ui`, `pane resize` only from `up`, and a pane opened as a plugin pane was never prompted, renamed or started into (design 19.3);
+- every `pane rename` came from `up`, `restart`, `swap`, `kickoff`, `tile`, `status`, `down` or the popup, never touched a plugin pane, and named a pane hosting a seat of the fleet with exactly that seat's wanted name; `--clear` came only from `down` (or the popup, whose `down` runs it) and only for a pane hosting no agent; `agent focus` came only from `go` or `menu` (invariant 20, design 22).
 
 Tests that need git use `GitCase` from `tests/support.py`: a real temporary repository (`git init`, `git commit`, `git worktree add`) with HOME set to the test's temp dir and no system git config. The plugin's git calls go through a logging shim on `PATH`, and `tearDown` asserts invariant 8 on them: only `rev-parse`, `symbolic-ref`, `worktree list`, `log`, `status`, `merge-base`, `ls-files` and `cat-file`, never `fetch` or `prune`. These tests are skipped when git is missing.
 
@@ -228,6 +231,20 @@ Version 0.10.0 (design 21), `tests/test_section21.py` (46 tests):
 - the safety hook failing for a prompt the fake recorded as `owner_typing`, and `typed_ahead_allowed` true only for `send --now` and `deliver --now`.
 
 The 517 tests of 0.9.0 pass, with the expectations of the withdrawn typed-ahead paths (a plain `send`, `deliver`, the flush and the watcher to a working seat) turned into their 0.10.0 lines.
+
+Version 0.11.0 (design 22), `tests/test_section22.py` (63 tests), plus two in `tests/test_manifest.py` that run the `go` action and the `go` pane as herdr does:
+
+- names applied by `up` (adopted `--me` seats included, the strip left as `Fleet watch`), `restart` (a seat restarted into a new pane named again, one restarted in place keeping its name), `swap` (once, at its end), `kickoff`, `tile` and `status` (nothing printed; the `--json` payload unchanged); the one `panes:` line (`named 3 after their seats`, `named 1 (fablyn-reviewer)`) and no line when nothing changed; no rename for a pane already named, nor for an absent seat;
+- the `label` key: the pane named `ORCH` while listings and kickoffs keep the seat name, surrounding blanks dropped, a pane named after the seat renamed to its label, and the errors (empty, blank, 41 characters, not a string, two lines, a leading `-`) reported together;
+- contacts, another fleet's live agent and the watcher strip never renamed, even with a state record pointing the strip at a seat's pane;
+- `down` clearing a pane it left at a shell and not one it closed, nor one without a name, nor a refused seat's; a failed clear as a warning;
+- dry runs (`up`, `restart`, `swap`, `tile`) renaming nothing; a failed `pane rename` or `pane get` as a `panes: could not name …` warning with the exit code unchanged, and on stderr only for `status`;
+- the doctor line both ways (`info pane names: 2 seats unnamed (…); run herdr-fleet status`, `1 seat`, `ok pane names: every live seat's pane is named`), a `label` counted as the wanted name, and doctor renaming nothing;
+- `go` for a seat, a done seat (reported `done`, then marked seen), a contact (by its pane), a live agent of another fleet, an absent seat and an absent contact (exit 3, nothing focused), an unknown name and `owner` (exit 2), `--fleet`, outside herdr, a failed focus (exit 1), and writing nothing under `.herdr/`;
+- the `manage` popup's `go` (one seat, no confirmation, no Enter; `a` answered `go needs one seat` and the action asked again; an absent seat waiting for Enter; quitting), `menu --go` (seats, then contacts as `c1`; a seat; a contact; `q`, Enter and end of input; an absent seat and a bad answer asked again; no contacts), and `ui go`;
+- the client's argv for `pane rename`, `pane rename --clear` and `agent focus` (none of them forbidden), and the safety hook failing a rename by another command, of a pane hosting no seat, to another name, of a plugin pane, a `--clear` outside `down` or on a pane hosting an agent, and an `agent focus` from `status`.
+
+The 563 tests of 0.10.0 pass; two expectations changed: the manifest's action list gains `go`, and `status --context` is compared with a second plain `status`, since the first one names the panes.
 
 ### Running the CLI against the fake by hand
 
@@ -691,3 +708,31 @@ $H down --close-panes --close-workspace --fleet "$F"                            
 | 10 | everything closes; remove `$W` |
 
 The hold lasts as long as the owner's focus and text do (design 21.2): leaving the pane with text still in its box ends it, and the next delivery would merge with that text. Step 5 therefore clears the line before leaving.
+
+## Live smoke test for 0.11.0 (to run by hand)
+
+Not run yet. For the owner, inside herdr, on a fleet that is up (Fablyn or Winner Chronicles), with the working tree's copy through `HERDR_FLEET_BIN` or after installing 0.11.0. `pane rename` and `agent focus` send nothing to any agent, so this is safe while seats work.
+
+```bash
+cd <the fleet's repository>
+herdr-fleet doctor | grep "pane names"                 # 1
+herdr-fleet status                                     # 2
+herdr-fleet doctor | grep "pane names"                 # 3
+herdr-fleet go <the orchestrator's seat name>          # 4 from a plain shell pane, not a seat
+herdr-fleet go nobody; echo "exit $?"                  # 5
+```
+
+Then 6: open the plugin menu and run **Fleet: go to a seat**; pick a seat by its number. 7: open it again and press Enter. 8: in **Fleet: manage**, pick one seat, then `go`; then pick `a` and `go`.
+
+| Step | Expected |
+| --- | --- |
+| 1 | `info pane names: N seats unnamed (…); run herdr-fleet status` while the borders still say the agent kind (or `ok …` if they were named by hand as the seats) |
+| 2 | the status table as before, with no `panes:` line; every seat pane's border now shows its seat name (or its `label`), the watcher strip still says `Fleet watch`, and a contact's pane keeps its own border |
+| 3 | `ok    pane names: every live seat's pane is named` |
+| 4 | `focused <seat> (<pane>, <state>)` and the UI moves to that seat's pane; a `done` badge on it clears |
+| 5 | `herdr-fleet: usage: not a seat, contact or live agent: nobody`, exit 2, the focus stays |
+| 6 | a small popup lists the seats with state and pane, then the contacts as `c1`, …; after the number it closes and the focus is on that seat's pane, not on the popup |
+| 7 | the popup closes and nothing moves |
+| 8 | one seat: the popup closes on that seat with no question; `a`: `go needs one seat`, and the action is asked again (`q` closes) |
+
+Also worth one look, on a scratch seat only (for example the one-seat Haiku fleet of the 0.10.0 test): close its pane by hand, run `herdr-fleet restart <seat>` and see the new pane named by the restart itself (`panes: named 1 (<seat>)`); then `herdr-fleet down <seat>` leaves the pane at a shell with its border back to unnamed.

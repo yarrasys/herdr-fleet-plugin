@@ -18,6 +18,9 @@ parked after the seats and brought back under the first seat's pane, which
 keeps ``1 - [watch] ratio``, before any seat comes back; so it spans the whole
 layout afterwards. A strip in another tab or workspace is reported and left
 alone; a failed strip move is reported and the seats are tiled anyway.
+
+Afterwards every live seat's pane is named after its seat (``labels.apply``, design
+22.1), which is a display name only and moves nothing.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from herdr_fleet import watchpane
+from herdr_fleet import labels, watchpane
 from herdr_fleet.context import Ctx, OpError, Report
 from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, pane_move_argv, pane_park_argv, render_cmd
@@ -79,6 +82,12 @@ def plan_moves(ctx: Ctx, seats: List[Seat]) -> List[Move]:
 
 def op_tile(ctx: Ctx) -> Report:
     report = Report("tile")
+    _tile(ctx, report)
+    labels.apply(ctx, None, report)  # design 22.1; never on a dry run
+    return report
+
+
+def _tile(ctx: Ctx, report: Report) -> None:
     fleet = ctx.fleet
     workspace = fleet_workspace(ctx)
     live = live_by_name(ctx.herdr)
@@ -94,7 +103,7 @@ def op_tile(ctx: Ctx) -> Report:
             here.append((seat, agent))
     if not here:
         report.add("tile", "nothing to do", "no seat is live in workspace %s" % workspace)
-        return report
+        return
     tabs = sorted({str(agent.get("tab_id")) for _, agent in here})
     if len(tabs) > 1:
         raise OpError("the seats in workspace %s span %d tabs, and tile works within one tab: %s"
@@ -118,9 +127,8 @@ def op_tile(ctx: Ctx) -> Report:
             report.add(move.seat, "plan", "%s, then %s" % (
                 render_cmd(pane_park_argv(pane, workspace, PARK_LABEL)),
                 render_cmd(pane_move_argv(pane, tab, move.direction, move.ratio, source))))
-        return report
+        return
     _execute(ctx, moves, panes, workspace, tab, report, (strip, anchor) if strip else None)
-    return report
 
 
 def _execute(ctx: Ctx, moves: List[Move], panes: Dict[str, str], workspace: str, tab: str, report: Report,

@@ -55,8 +55,11 @@ class ManifestContents(unittest.TestCase):
         self.assertEqual(actions["watch"], {  # design 18.6
             "id": "watch", "title": "Fleet: watch", "contexts": ["workspace"],
             "command": ["python3", "bin/herdr-fleet", "ui", "watch"]})
+        self.assertEqual(actions["go"], {  # design 22.2
+            "id": "go", "title": "Fleet: go to a seat", "contexts": ["workspace"],
+            "command": ["python3", "bin/herdr-fleet", "ui", "go"]})
         self.assertEqual([a["id"] for a in self.manifest["actions"]],
-                         ["up", "status", "manage", "doctor", "init", "tile", "watch"])
+                         ["up", "status", "manage", "doctor", "init", "tile", "watch", "go"])
         for action in actions.values():
             build_parser().parse_args(action["command"][2:])  # still valid CLI arguments
 
@@ -69,6 +72,9 @@ class ManifestContents(unittest.TestCase):
         self.assertEqual(panes["manage"]["command"], ["sh", "-c", PANE_PREFIX + "menu"])
         self.assertEqual(panes["watch"]["command"], ["sh", "-c", PANE_PREFIX + "watch"])
         self.assertNotIn("placement", panes["watch"])  # `ui watch` asks for a split when it opens it
+        self.assertEqual(panes["go"], {  # design 22.2
+            "id": "go", "title": "Fleet: go", "placement": "popup", "width": "50%", "height": "50%",
+            "command": ["sh", "-c", PANE_PREFIX + "menu --go"]})
         for pane in panes.values():
             args = shlex.split(pane["command"][2])[3:]
             build_parser().parse_args(args)
@@ -114,6 +120,22 @@ class ManifestCommandsRun(unittest.TestCase):
         proc = self.run_cmd(self.pane_command("manage"), self.repo, stdin="q\n", HERDR_PLUGIN_ENTRYPOINT_ID="manage")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("1) fablyn-orchestrator", proc.stdout)
+
+    def test_go_pane_runs_from_the_repo_cwd(self):
+        # design 22.2: `menu --go` lists the seats and closes on q, focusing nothing
+        proc = self.run_cmd(self.pane_command("go"), self.repo, stdin="q\n", HERDR_PLUGIN_ENTRYPOINT_ID="go")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("1) fablyn-orchestrator", proc.stdout)
+        self.assertIn("Go to (number, or q to quit): ", proc.stdout)
+        self.assertNotIn(["agent", "focus"], [argv[:2] for argv in read_log(self.env)])
+
+    def test_go_action_opens_the_popup_at_the_focused_panes_repo(self):
+        context = {"workspace_id": "w1", "focused_pane_id": "w1:p1", "focused_pane_cwd": self.repo}
+        proc = self.run_cmd(self.action_command("go"), ROOT, HERDR_PLUGIN_ACTION_ID="yarrasys.fleet.go",
+                            HERDR_PLUGIN_CONTEXT_JSON=json.dumps(context))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(["plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "go", "--cwd", self.repo],
+                      read_log(self.env))
 
     def test_relative_bin_path_does_not_work_from_the_repo_cwd(self):
         # Why the pane commands go through sh -c and $HERDR_PLUGIN_ROOT.

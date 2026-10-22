@@ -40,7 +40,8 @@ WATCH_POSITIONS = ("bottom",)        # design 19.1: the only position in 0.8.0
 WATCH_RATIO = 0.12                   # the strip's default share of the area it is split from
 WATCH_RATIO_RANGE = (0.1, 0.4)       # herdr clamps every split ratio to 0.1-0.9 (19.4)
 SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "from", "env", "kickoff",
-             "kickoff_text", "quit", "notes", "worktrees"}
+             "kickoff_text", "quit", "notes", "worktrees", "label"}
+LABEL_MAX = 40                       # design 22.1: the seat key `label`, shown on the pane's border
 
 
 class FleetError(Exception):
@@ -69,6 +70,7 @@ class Seat:
     index: int
     from_seat: Optional[str] = None  # chain mode: split from this earlier seat's pane (``from``)
     worktrees: List[str] = field(default_factory=list)  # path globs, ~ expanded (design 17.2)
+    label: Optional[str] = None  # the pane's border name instead of the seat name (design 22.1)
 
 
 @dataclass
@@ -292,6 +294,7 @@ def _parse_seat(raw: Dict, index: int, repo: str, base_cwd: str, direction: str,
         errors.append("%s: set kickoff or kickoff_text, not both" % where)
     quit_cmd = _opt_str(raw, "quit", where + ".quit", errors)
     notes = _opt_str(raw, "notes", where + ".notes", errors) or ""
+    label = _label(raw, where + ".label", errors)
     from_seat = _opt_str(raw, "from", where + ".from", errors)
     worktrees = _worktree_globs(raw.get("worktrees", []), where + ".worktrees", errors, warnings)
     if name is None or kind is None:
@@ -299,7 +302,28 @@ def _parse_seat(raw: Dict, index: int, repo: str, base_cwd: str, direction: str,
     return Seat(name=name, kind=kind, args=list(args), cwd=cwd, split=split,
                 ratio=seat_ratio if seat_ratio is not None else ratio, env=dict(env),
                 kickoff=kickoff, kickoff_text=kickoff_text, quit=quit_cmd, notes=notes, index=index,
-                from_seat=from_seat, worktrees=worktrees)
+                from_seat=from_seat, worktrees=worktrees, label=label)
+
+
+def _label(raw: Dict, where: str, errors: List[str]) -> Optional[str]:
+    """The seat key ``label`` (design 22.1): a non-empty single line of at most 40
+    characters, kept without surrounding blanks. It must not start with ``-``, which
+    ``herdr pane rename`` would read as an option."""
+    value = _opt_str(raw, "label", where, errors)
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        errors.append("%s: must not be empty" % where)
+    elif "\n" in text or "\r" in text:
+        errors.append("%s: must be a single line" % where)
+    elif len(text) > LABEL_MAX:
+        errors.append("%s: %d characters; at most %d" % (where, len(text), LABEL_MAX))
+    elif text.startswith("-"):
+        errors.append("%s: %r must not start with '-'" % (where, text))
+    else:
+        return text
+    return None
 
 
 def _worktree_globs(value: object, where: str, errors: List[str], warnings: List[str]) -> List[str]:

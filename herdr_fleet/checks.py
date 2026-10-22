@@ -1,7 +1,7 @@
 """Read-only inspection: drift (design 4.4), status (4.2, 16.3, 16.4, 16.7, 17.2,
 17.4, 18.6's watcher and queued lines, 19.1's watcher strip, 20.2's debt ages,
 20.5's ``blocked (4m)``, 20.8's queue ages) and doctor (4.7, 16.6, 17.3, 18.7's
-hooks line).
+hooks line, 22.1's pane names line).
 
 Nothing here changes herdr. ``collect_status`` may rewrite the state file
 when it prunes ids herdr no longer knows, which every command does, and records
@@ -19,7 +19,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from herdr_fleet import (MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, hooks, inbox, messages,
                          permissions, presence)
-from herdr_fleet import seen, watchpane
+from herdr_fleet import labels, seen, watchpane
 from herdr_fleet.context import Ctx
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import Herdr, HerdrError, describe
@@ -315,6 +315,7 @@ def run_doctor(ctx: Ctx) -> List[Check]:
         add((level, "integration %s" % row["kind"], row["line"] or row["status"]))
     _check_quit(ctx, fleet, add)
     _check_presence(ctx, fleet, add)
+    _check_pane_names(ctx, add)
     _check_permissions(ctx, fleet, add)
     if any(seat.kind == "claude" for seat in fleet.seats):  # design 18.7: the hooks are Claude Code's
         add(hooks.doctor_check(fleet.repo))
@@ -458,6 +459,21 @@ def _check_presence(ctx: Ctx, fleet: Fleet, add) -> None:
         live = {}
     for kind in presence.unchecked_kinds([live.get(seat.name) or seat.kind for seat in fleet.seats]):
         add(("info", "presence", "no prompt glyph for kind %s; its seats are not held while the owner types" % kind))
+
+
+def _check_pane_names(ctx: Ctx, add) -> None:
+    """Design 22.1: are the live seats' panes named as wanted? Read-only (``agent list``
+    and one ``pane get`` per live seat); ``status`` names them. Silent when herdr
+    cannot be asked (the ``herdr server`` line already says so)."""
+    try:
+        missing = labels.unnamed(ctx)
+    except HerdrError:
+        return
+    if missing:
+        add(("info", "pane names", "%d seat%s unnamed (%s); run herdr-fleet status"
+             % (len(missing), "" if len(missing) == 1 else "s", ", ".join(missing))))
+    else:
+        add(("ok", "pane names", "every live seat's pane is named"))
 
 
 def _check_quit(ctx: Ctx, fleet: Fleet, add) -> None:

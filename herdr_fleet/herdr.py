@@ -9,7 +9,9 @@ unparseable output and a missing binary.
 The client refuses, before spawning anything, the commands this plugin must
 never send (design section 7): bare ``herdr`` (it attaches the TUI),
 ``agent send-keys``, ``pane send-keys``, ``pane send-text`` and ``pane run``.
-Text reaches agents only through ``agent prompt``.
+Text reaches agents only through ``agent prompt``. The two display commands,
+``pane rename`` (a seat pane's border name, design 22.1) and ``agent focus``
+(``go``, 22.2), send nothing to the agent (invariant 20).
 """
 
 from __future__ import annotations
@@ -212,6 +214,12 @@ class Herdr:
     def agent_rename(self, target: str, name: str) -> Dict:
         return self.run("agent", "rename", target, name)
 
+    def agent_focus(self, target: str) -> Dict:
+        """Move the owner's UI focus to the pane of ``target`` (a live agent name or a pane
+        id). Only ``go`` and the popup's ``go`` run it (design 22.2, invariant 20); the
+        answer is opaque to the plugin."""
+        return self.run("agent", "focus", target)
+
     # -- panes and workspaces --------------------------------------------
 
     def pane_get(self, pane_id: str) -> Dict:
@@ -222,6 +230,18 @@ class Herdr:
         """The caller's pane as herdr sees it now (``pane current --current``). After a
         pane move the inherited HERDR_PANE_ID is stale but still resolves here."""
         result = self.run("pane", "current", "--current")
+        return dict(result.get("pane") or result)
+
+    def pane_rename(self, pane_id: str, name: str) -> Dict:
+        """Set a pane's display name, shown in its border (``pane rename PANE NAME``; design
+        22.1). Only a seat's pane, only to that seat's name or ``label`` (invariant 20)."""
+        result = self.run("pane", "rename", pane_id, name)
+        return dict(result.get("pane") or result)
+
+    def pane_clear_name(self, pane_id: str) -> Dict:
+        """Remove a pane's display name (``pane rename PANE --clear``): ``down`` does it for
+        a seat pane it leaves open at a shell prompt (design 22.1)."""
+        result = self.run("pane", "rename", pane_id, "--clear")
         return dict(result.get("pane") or result)
 
     def pane_list(self, workspace_id: str) -> List[Dict]:

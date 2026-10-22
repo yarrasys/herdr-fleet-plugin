@@ -15,14 +15,14 @@ import os
 import sys
 from typing import List, Mapping, Optional, Sequence, TextIO
 
-from herdr_fleet import PLUGIN_ROOT, __version__
+from herdr_fleet import PLUGIN_ROOT, __version__, labels
 from herdr_fleet.checks import collect_status, render_status, run_doctor
 from herdr_fleet.context import (EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, Ctx, OpError, Report,
                                  UsageError, preflight)
 from herdr_fleet.fleetfile import FleetError
 from herdr_fleet.herdr import Herdr, HerdrError, Runner, describe, find_binary
 from herdr_fleet.menu import run_menu, wait_for_enter
-from herdr_fleet.ops import op_down, op_install_cli, op_kickoff, op_restart, op_swap, op_ui, op_up
+from herdr_fleet.ops import op_down, op_go, op_install_cli, op_kickoff, op_restart, op_swap, op_ui, op_up
 from herdr_fleet.scaffold import available_examples, run_init
 from herdr_fleet.seats import Clock
 from herdr_fleet.state import StateError
@@ -228,6 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seat", metavar="NAME", help="only the worktrees matching this seat's globs")
     p.add_argument("--json", action="store_true", help="print one JSON object")
 
+    p = sub.add_parser("go", parents=[fleet], help="move the focus to a seat's pane (or a contact's)",
+                       description="Focus the pane of NAME, a seat, a contact or a live herdr agent name (as "
+                                   "`send` resolves it), with `herdr agent focus`. Writes nothing.")
+    p.add_argument("name", metavar="NAME", help="seat, contact or live agent name")
+
     p = sub.add_parser("tile", parents=[common],
                        help="re-tile the live seats in place ([layout] grid or chain); moves panes only")
     p.add_argument("--dry-run", action="store_true", help="print the pane moves and change nothing")
@@ -251,10 +256,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dir", metavar="DIR", help="target directory (default ~/.local/bin)")
     p.add_argument("--dev", action="store_true", help="symlink this checkout's bin/herdr-fleet instead (developers)")
 
-    p = sub.add_parser("ui", parents=[common], help="open the status overlay or manage popup (manifest actions)")
-    p.add_argument("entrypoint", choices=("status", "manage", "watch"))
+    p = sub.add_parser("ui", parents=[common],
+                       help="open the status overlay, the manage or go popup, or the watcher (manifest actions)")
+    p.add_argument("entrypoint", choices=("status", "manage", "watch", "go"))
 
-    sub.add_parser("menu", parents=[common], help="the numbered popup menu (manifest pane)")
+    p = sub.add_parser("menu", parents=[common], help="the numbered popup menu (manifest pane)")
+    p.add_argument("--go", action="store_true",
+                   help="only pick a seat or contact and move the focus to it (the `go` popup)")
     return parser
 
 
@@ -360,7 +368,11 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         op_ui(ctx, args.entrypoint)
         return EXIT_OK
     if command == "menu":
-        return run_menu(ctx, stdin)
+        return run_menu(ctx, stdin, go=args.go)
+    if command == "go":  # design 22.2: moves the owner's focus; writes nothing
+        code, line = op_go(ctx, args.name)
+        ctx.say(line)
+        return code
     note = _note(args)
     if command == "up":
         report = op_up(ctx, args.names, me=args.me, no_kickoff=args.no_kickoff, note=args.note, join=args.join,
@@ -407,6 +419,9 @@ def _finish(ctx: Ctx, report: Report, status_table: bool = False) -> int:
 
 def _status(ctx: Ctx, as_json: bool, hold: bool, stdin: TextIO, context: bool = False) -> int:
     data = collect_status(ctx, context=context)
+    # Design 22.1: name the live seats' panes; status prints nothing about it (failures go
+    # to stderr), so the table and the --json payload are unchanged.
+    labels.apply(ctx, {s["name"]: {"pane_id": s["pane_id"]} for s in data["seats"] if s["state"] != "absent"})
     hint = any(seat.worktrees for seat in ctx.fleet.seats)
     ctx.say(json.dumps(data, indent=2, ensure_ascii=False) if as_json
             else render_status(data, ctx.env.get("HOME"), worktrees_hint=hint))

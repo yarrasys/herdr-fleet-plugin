@@ -185,6 +185,8 @@ class StatusContext(LiveFleet):
         self.assertEqual(self.snapshot(), before)  # nothing under ~/.claude was written
 
     def test_context_adds_no_herdr_command(self):
+        self.run_cli("status")  # names the panes (design 22.1); the next status only reads them
+        os.remove(self.log_path)
         self.run_cli("status")
         plain = [c["argv"] for c in self.calls()]
         os.remove(self.log_path)

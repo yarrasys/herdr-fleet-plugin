@@ -21,7 +21,7 @@ acts, writes it back and appends one JSON line to the call log (env
   get`` keeps succeeding n times after a quit command, then the agent is
   gone), ``ignore_quit`` (names that never exit), ``linger_polls`` (n
   process-info answers that still show a non-shell process after exit),
-  ``prompt_errors`` ({name: code}), ``wait_status`` ({name: status}),
+  ``prompt_errors`` ({name: code}), ``rename_errors`` ({pane: code}), ``wait_status`` ({name: status}),
   ``wait_results`` ({name or pane: [outcome, ...]}: each ``agent wait`` consumes one
   of ``idle``, ``done``, ``working``, ``blocked``, ``timeout`` or ``not_found``; a state
   sets the agent's status and answers it when ``--until`` names it, else the wait
@@ -50,6 +50,16 @@ acts, writes it back and appends one JSON line to the call log (env
 - Focus and screens (design 21.2): panes and workspaces carry ``focused`` (false unless
   a test calls ``focus(world, pane)``, which makes that pane the owner's: focused in its
   tab, its tab the workspace's active tab, its workspace the only focused one).
+  ``agent focus TARGET`` (a name or a pane id; design 22.2) does the same through
+  ``focus`` and marks the agent seen (``done`` becomes ``idle``, as herdr clears the
+  done badge); its answer is the agent record.
+- Pane names (design 22.1): ``pane rename PANE LABEL...`` sets the pane's ``label`` (the
+  words joined by spaces), ``--clear`` removes it, and ``pane get``/``pane list`` records
+  carry ``label`` (null when unset). A plugin pane is named after its manifest title
+  (``Fleet watch``), as live. When the runner knows the fleet file (``Fake(...,
+  fleet=...)`` or ``FAKE_HERDR_FLEET``), every ``pane rename`` records whether the pane
+  then hosted a seat of the fleet (``seat``) and the name the fleet wants for it
+  (``wanted``: the seat's ``label`` key, else its name), judged here from the file.
   ``pane read PANE --lines N`` prints the last N lines of the pane's screen as plain
   text, as live herdr does even in JSON mode: ``world["screens"][pane]`` when a test set
   one (``type_in``, ``show_dialog``), else a rule, the empty prompt line of the pane's
@@ -254,6 +264,35 @@ def owner_typing(world: Dict, pane: str) -> bool:
     return bool(found) and found != PLACEHOLDERS.get(record["agent"]["agent"])
 
 
+# Plugin panes carry their manifest title as their name (live herdr 0.9.5).
+PLUGIN_TITLES = {"watch": "Fleet watch", "status": "Fleet status", "manage": "Fleet", "go": "Fleet: go"}
+
+
+def fleet_names(path: Optional[str]) -> Dict[str, str]:
+    """{seat name: wanted pane name} from a fleet file (``label`` when set, else the
+    name); {} when there is no readable file. Parsed here, not by the plugin."""
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        import tomllib as toml  # Python 3.11+
+    except ImportError:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from herdr_fleet._vendor import tomli as toml
+    try:
+        with open(path, "rb") as handle:
+            data = toml.load(handle)
+    except (OSError, ValueError):
+        return {}
+    names = {}
+    for seat in data.get("agents") or []:
+        if isinstance(seat, dict) and isinstance(seat.get("name"), str):
+            label = seat.get("label")
+            names[seat["name"]] = label.strip() if isinstance(label, str) and label.strip() else seat["name"]
+    return names
+
+
 LOCK = threading.Lock()  # one call at a time reads, changes and writes the world
 
 
@@ -261,11 +300,12 @@ class Fake:
     """Callable runner: ``Fake(world_path, log_path)([binary, *argv])``."""
 
     def __init__(self, world_path: str, log_path: str, caller: Optional[str] = None,
-                 inbox: Optional[str] = None):
+                 inbox: Optional[str] = None, fleet: Optional[str] = None):
         self.world_path = world_path
         self.log_path = log_path
         self.caller = caller  # the calling process's HERDR_PANE_ID, for `pane current --current`
         self.inbox = inbox    # the fleet's .herdr/inbox, read (never written) at every `agent prompt`
+        self.fleet = fleet    # the fleet file, read (never written) at every `pane rename`
 
     def __call__(self, argv: List[str]) -> Result:
         with LOCK:
@@ -278,7 +318,7 @@ class Fake:
         info: Dict = {}
         if self.caller:
             world["caller"] = self.caller
-        code, out, err = Sim(world, info, self.inbox).handle(args)
+        code, out, err = Sim(world, info, self.inbox, self.fleet).handle(args)
         with open(self.world_path, "w", encoding="utf-8") as handle:
             json.dump(world, handle)
         with open(self.log_path, "a", encoding="utf-8") as handle:
@@ -343,11 +383,12 @@ def refusal_queued(inbox: Optional[str]) -> Tuple[List[str], List[str]]:
 
 
 class Sim:
-    def __init__(self, world: Dict, info: Dict, inbox: Optional[str] = None):
+    def __init__(self, world: Dict, info: Dict, inbox: Optional[str] = None, fleet: Optional[str] = None):
         self.w = world
         self.info = info
         self.b = world.get("behaviors", {})
         self.inbox = inbox
+        self.fleet = fleet
 
     # -- helpers -----------------------------------------------------------
 
@@ -361,7 +402,7 @@ class Sim:
                "revision": 1, "scroll": {"max_offset_from_bottom": 0, "offset_from_bottom": 0,
                                          "viewport_rows": 40},
                "tab_id": p["tab_id"], "terminal_id": "term_" + pid, "terminal_title": "",
-               "workspace_id": p["workspace_id"]}
+               "workspace_id": p["workspace_id"], "label": p.get("label")}
         if p["agent"]:  # live herdr: pane records carry the kind and state, never the name
             rec["agent"] = p["agent"]["agent"]
             rec["agent_status"] = p["agent"]["agent_status"]
@@ -402,6 +443,8 @@ class Sim:
         if not args:
             self.info["bare"] = True
             return 99, "", "fake herdr: bare herdr would attach the TUI\n"
+        if args[:2] == ["pane", "rename"]:  # recorded before any canned answer, for the safety check
+            self._rename_facts(args[2:])
         canned = self._canned(args)
         if canned is not None:
             return canned
@@ -562,7 +605,55 @@ class Sim:
         self.w["panes"][pid]["agent"]["name"] = name
         return _ok({"agent": self._agent_record(pid), "type": "agent_info"}, "cli:agent:rename")
 
+    def _agent_focus(self, args: List[str]) -> Result:
+        """``agent focus TARGET`` (design 22.2): the owner's focus moves to the agent's pane
+        (``focus``) and the agent is marked seen (``done`` becomes ``idle``)."""
+        pid = self._resolve(args[0]) if args else None
+        self.info["target"] = args[0] if args else None
+        if pid is None:
+            return _err("agent_not_found", "no agent for %s" % (args[0] if args else ""))
+        self.info["pane"] = pid
+        focus(self.w, pid)
+        agent = self.w["panes"][pid]["agent"]
+        if agent["agent_status"] == "done":
+            agent["agent_status"] = "idle"
+        return _ok({"agent": self._agent_record(pid), "type": "agent_info"}, "cli:agent:focus")
+
     # -- panes --------------------------------------------------------------------
+
+    def _rename_facts(self, args: List[str]) -> None:
+        """What the safety check needs about a ``pane rename``: the pane, the name asked for
+        (or ``clear``), whether the pane then hosted a seat of the fleet (``seat``), the
+        name the fleet wants for it (``wanted``), and whether it hosted an agent or a plugin."""
+        pos, opts, _ = _opts(args, ())
+        pid = pos[0] if pos else None
+        p = self.w["panes"].get(pid) or {}
+        agent = p.get("agent") or {}
+        names = fleet_names(self.fleet)
+        seat = agent.get("name") if agent.get("name") in names else None
+        clear = "--clear" in opts
+        self.info.update(pane=pid, clear=clear, label=None if clear else " ".join(pos[1:]), seat=seat,
+                         wanted=names.get(seat) if seat else None, has_agent=bool(agent),
+                         plugin=bool(p.get("plugin")), fleet_known=bool(names))
+
+    def _pane_rename(self, args: List[str]) -> Result:
+        """``pane rename PANE [LABEL]... [--clear]`` (design 22.1): the words are joined and
+        become the pane's ``label``; ``--clear`` removes it. ``rename_errors`` ({pane:
+        code}) makes it fail for a pane."""
+        pos, opts, _ = _opts(args, ())
+        if not pos:
+            return 2, "", "error: the following required arguments were not provided: <PANE_ID>\n"
+        pid, clear = pos[0], "--clear" in opts
+        if not clear and len(pos) < 2:
+            return 2, "", "error: give a LABEL or --clear\n"
+        if pid not in self.w["panes"]:
+            return _err("pane_not_found", "pane %s not found" % pid)
+        error = self.b.get("rename_errors", {}).get(pid)
+        if error:
+            return _err(error, "pane rename %s for %s" % (error, pid))
+        p = self.w["panes"][pid]
+        p["label"] = None if clear else " ".join(pos[1:])
+        return _ok({"pane": self._pane_record(pid), "type": "pane_info"}, "cli:pane:rename")
 
     def _pane_get(self, args: List[str]) -> Result:
         pid = args[0]
@@ -760,11 +851,11 @@ class Sim:
         record = self.w["panes"][pid]
         if target is not None:
             record["tab_id"] = self.w["panes"][target]["tab_id"]
-        record.update(plugin=entrypoint, split=split,
+        record.update(plugin=entrypoint, split=split, label=PLUGIN_TITLES.get(entrypoint, entrypoint),
                       env=dict(item.split("=", 1) for item in opts.get("--env", [])))
         focus = "--no-focus" not in opts
         self.info.update(plugin_pane=pid, focus=focus)
-        pane = dict(self._pane_record(pid), label=entrypoint, focused=focus)
+        pane = dict(self._pane_record(pid), focused=focus)
         plugin = (opts.get("--plugin") or [""])[0]
         return _ok({"plugin_pane": {"entrypoint": entrypoint, "pane": pane, "plugin_id": plugin},
                     "type": "plugin_pane_opened"}, "cli:plugin:pane:open")
@@ -893,8 +984,8 @@ def main() -> int:
     import fcntl  # several fake processes at once (a watcher's threads) take turns with the world
     with open(world + ".lock", "a") as guard:
         fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
-        code, out, err = Fake(world, log, os.environ.get("HERDR_PANE_ID"),
-                              os.environ.get("FAKE_HERDR_INBOX"))([sys.argv[0]] + sys.argv[1:])
+        code, out, err = Fake(world, log, os.environ.get("HERDR_PANE_ID"), os.environ.get("FAKE_HERDR_INBOX"),
+                              os.environ.get("FAKE_HERDR_FLEET"))([sys.argv[0]] + sys.argv[1:])
     sys.stdout.write(out)
     sys.stderr.write(err)
     return code

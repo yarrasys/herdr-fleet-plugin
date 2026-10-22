@@ -303,7 +303,8 @@ class FleetOption(LiveFleet):
         with open(self.world_path, "w") as handle:
             json.dump(self.world, handle)
         out, err = io.StringIO(), io.StringIO()
-        code = main(list(argv), env=self.env, runner=fake_herdr.Fake(self.world_path, self.log_path, CALLER_PANE),
+        code = main(list(argv), env=self.env, runner=fake_herdr.Fake(self.world_path, self.log_path, CALLER_PANE,
+                                                                   fleet=self.fleet_path),
                     clock=self.clock, stdout=out, stderr=err, cwd=self.elsewhere)
         return code, out.getvalue(), err.getvalue()
 

@@ -1,6 +1,8 @@
 """Operations that change the fleet: up (design 4.1, with the watcher strip of
 section 19), restart (4.3), swap (4.4), kickoff (4.5) and down (4.6), plus
-``ui`` and ``install-cli``.
+``go`` (22.2), ``ui`` and ``install-cli``. Each of up, restart, swap and kickoff
+ends by naming the seats' panes (``labels.apply``, design 22.1); ``down`` clears
+the name of a seat pane it leaves open at a shell prompt.
 
 Each operation returns a ``Report``; ``cli`` prints it and maps it to an exit
 code. Text reaches agents only through ``seats.safe_prompt``; agents start
@@ -15,16 +17,16 @@ from __future__ import annotations
 
 import os
 import shlex
-from typing import Callable, Dict, List, Optional, Sequence, TextIO
+from typing import Callable, Dict, List, Optional, Sequence, Set, TextIO, Tuple
 
-from herdr_fleet import PLUGIN_ID, inbox, presence, watchpane
+from herdr_fleet import PLUGIN_ID, inbox, labels, presence, watchpane
 from herdr_fleet.bringup import (claim_seat, ensure_seat, follow_pane, label_for, label_of, require_caller_context,
                                 resolve_target, send_kickoffs, start_claimed, start_seat)
 from herdr_fleet.checks import drift_reasons, is_adopted
-from herdr_fleet.context import Ctx, Report, UsageError
+from herdr_fleet.context import EXIT_OK, EXIT_PARTIAL, Ctx, Report, UsageError
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import HerdrError, describe, has_agent, pane_move_argv, render_cmd, start_argv
-from herdr_fleet.messages import drop_queued
+from herdr_fleet.messages import OWNER, drop_queued, resolve_targets
 from herdr_fleet.placement import Target, existing_panes, place_chain, place_grid
 from herdr_fleet.seats import (QUIT_CONFIG_HINT, SETTLED, at_shell_prompt, describe_foreground,
                                live_by_name, quit_agent, quit_command)
@@ -126,6 +128,7 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
             or any(c.state in ("live", "adopted") for c in claims.values())
         strip.open_after(live, placed, target, up)
     ctx.save()
+    labels.apply(ctx, None, report)  # design 22.1: every live seat, adopted and --me seats included
     return report
 
 
@@ -304,7 +307,9 @@ def _quit_live(ctx: Ctx, seat: Seat, agent: Dict, report: Report, then: str = ""
 
 
 def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_ms: Optional[int] = None,
-               reason: str = "restart", drop_inbox: bool = False) -> Report:
+               reason: str = "restart", drop_inbox: bool = False, name_panes: bool = True) -> Report:
+    """Design 4.3. ``name_panes=False`` leaves the pane names to the caller (``swap``
+    names them once, at its end)."""
     report = Report(reason)
     seats = select_seats(ctx.fleet, names, required=True)
     refuse_unknown_kinds(ctx)
@@ -343,6 +348,8 @@ def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_
     if to_brief:
         send_kickoffs(ctx, to_brief, reason, note, label_for(ctx, target), report)
     ctx.save()
+    if name_panes:
+        labels.apply(ctx, None, report)
     return report
 
 
@@ -372,7 +379,8 @@ def op_swap(ctx: Ctx, names: Sequence[str], note: Optional[str] = None,
         else:
             report.add(seat.name, "unchanged", "matches the fleet file")
     if changed and not ctx.dry_run:
-        report.extend(op_restart(ctx, changed, note, wait_ms, reason="swap"))
+        report.extend(op_restart(ctx, changed, note, wait_ms, reason="swap", name_panes=False))
+    labels.apply(ctx, None, report)
     return report
 
 
@@ -387,6 +395,7 @@ def op_kickoff(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, drop_
     if drop_inbox:
         drop_inboxes(ctx, seats, report)
     send_kickoffs(ctx, seats, "kickoff", note, label_for(ctx, None), report)
+    labels.apply(ctx, None, report)
     return report
 
 
@@ -396,6 +405,7 @@ def op_down(ctx: Ctx, names: Sequence[str], wait_ms: Optional[int] = None, close
     seats = select_seats(ctx.fleet, names)
     prune(ctx)
     live = live_by_name(ctx.herdr)
+    left: List[str] = []  # panes whose agent quit: open at a shell prompt (design 22.1)
     for seat in seats:
         agent = live.get(seat.name)
         if agent is None:
@@ -410,19 +420,27 @@ def op_down(ctx: Ctx, names: Sequence[str], wait_ms: Optional[int] = None, close
         pane = _quit_live(ctx, seat, agent, report)
         if pane and not ctx.dry_run and ctx.state.pane_of(seat.name) != pane:
             follow_pane(ctx, seat.name, pane)
+        if pane and not ctx.dry_run:
+            left.append(pane)
     ctx.save()
+    closed: Set[str] = set()
     if close_panes:
-        _close_panes(ctx, seats, report)
+        closed = _close_panes(ctx, seats, report)
         if not names:  # design 19.1: after the seats; `down NAME...` never touches the strip
             watchpane.close_strip(ctx, report)
+    for pane in left:  # design 22.1: an empty shell is not labelled as a seat
+        if pane not in closed:
+            labels.clear(ctx, pane, report)
     if close_workspace:
         _close_workspace(ctx, report)
     ctx.save()
     return report
 
 
-def _close_panes(ctx: Ctx, seats: Sequence[Seat], report: Report) -> None:
-    """Close panes herdr-fleet created, and only once they are back at a shell."""
+def _close_panes(ctx: Ctx, seats: Sequence[Seat], report: Report) -> Set[str]:
+    """Close panes herdr-fleet created, and only once they are back at a shell. Returns
+    the panes closed."""
+    closed: Set[str] = set()
     live = live_by_name(ctx.herdr)
     for seat in seats:
         entry = ctx.state.entry(seat.name) or {}
@@ -449,7 +467,9 @@ def _close_panes(ctx: Ctx, seats: Sequence[Seat], report: Report) -> None:
             continue
         ctx.state.drop(seat.name)
         ctx.save()
+        closed.add(str(pane))
         report.add(seat.name, "pane closed", pane)
+    return closed
 
 
 def _close_workspace(ctx: Ctx, report: Report) -> None:
@@ -475,6 +495,33 @@ def _close_workspace(ctx: Ctx, report: Report) -> None:
     prune_state(state, ctx.herdr)
     ctx.save()
     report.add("workspace", "closed", workspace)
+
+
+# -- go ------------------------------------------------------------------------------------
+
+
+def op_go(ctx: Ctx, name: str) -> Tuple[int, str]:
+    """Design 22.2: focus the pane of NAME, resolved as a ``send`` target (a seat, a contact
+    or a live herdr agent name), with ``agent focus``. Returns (exit code, line):
+    ``focused fablyn-orchestrator (w1H:p5, working)``; an absent seat or a contact that
+    cannot be reached is exit 3 and nothing is focused; an unknown name is a usage error.
+    Writes nothing: no ``state_seen``, no log entry, no file. The pane and state in the
+    line come from ``agent get``, read just before the focus."""
+    if name == OWNER:
+        raise UsageError("owner is not a pane; nothing to focus")
+    target = resolve_targets(ctx, [name], ctx.herdr.agent_list())[0]
+    if target.problem or not target.herdr:
+        state, _, why = (target.problem or "absent").partition(": ")
+        return EXIT_PARTIAL, "%s is %s%s; nothing to focus" % (name, state, " (%s)" % why if why else "")
+    try:
+        agent = ctx.herdr.agent_get(target.herdr)
+    except HerdrError as exc:
+        if "not_found" in exc.code:
+            return EXIT_PARTIAL, "%s is absent; nothing to focus" % name
+        raise
+    ctx.herdr.agent_focus(target.herdr)
+    return EXIT_OK, "focused %s (%s, %s)" % (name, agent.get("pane_id") or target.herdr,
+                                             agent.get("agent_status") or "unknown")
 
 
 # -- ui and install-cli ------------------------------------------------------------------

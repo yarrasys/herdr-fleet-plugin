@@ -42,6 +42,12 @@ WATCH_CALLS = (["agent", "wait"], ["agent", "get"], ["agent", "list"], ["agent",
 # Design 19.3: only `up` (also from the popup menu) and `ui` open plugin panes; only `up` resizes.
 PLUGIN_PANE_COMMANDS = ("up", "ui", "menu")
 RESIZE_COMMANDS = ("up", "menu")
+# Design 22.1 and invariant 20: pane names are kept by these commands (the popup runs the
+# lifecycle ones), cleared only by `down` (also from the popup); 22.2: only `go` and the
+# popup move the owner's focus.
+RENAME_COMMANDS = ("up", "restart", "swap", "kickoff", "tile", "status", "down", "menu")
+CLEAR_COMMANDS = ("down", "menu")
+FOCUS_COMMANDS = ("go", "menu")
 
 THREE_SEATS = """
 workspace = "fablyn"
@@ -82,7 +88,8 @@ def install_fake_herdr(directory: str, cwd: str) -> Dict[str, str]:
     return {"PATH": bindir + os.pathsep + os.environ.get("PATH", ""), "HOME": directory,  # never the real ~/.claude
             "HERDR_ENV": "1", "HERDR_BIN_PATH": herdr, "HERDR_PANE_ID": CALLER_PANE,
             "HERDR_WORKSPACE_ID": CALLER_WS, "FAKE_HERDR_WORLD": os.path.join(directory, "world.json"),
-            "FAKE_HERDR_LOG": os.path.join(directory, "calls.jsonl")}
+            "FAKE_HERDR_LOG": os.path.join(directory, "calls.jsonl"),
+            "FAKE_HERDR_FLEET": os.path.join(cwd, ".herdr", "fleet.toml")}
 
 
 def read_log(env: Dict[str, str]) -> List[List[str]]:
@@ -178,7 +185,7 @@ class FleetCase(unittest.TestCase):
         with open(self.log_path, "a", encoding="utf-8") as handle:  # marks which command made the calls below
             handle.write(json.dumps({"command": list(argv)}) + "\n")
         runner = fake_herdr.Fake(self.world_path, self.log_path, env.get("HERDR_PANE_ID"),
-                                 os.path.join(self.repo, ".herdr", "inbox"))
+                                 os.path.join(self.repo, ".herdr", "inbox"), fleet_file(argv, env, self.repo))
         code = main(list(argv), env=env, runner=runner, clock=self.clock,
                     stdout=out, stderr=err, stdin=io.StringIO(stdin), cwd=cwd or self.repo)
         with open(self.world_path, "r", encoding="utf-8") as handle:
@@ -215,7 +222,10 @@ class FleetCase(unittest.TestCase):
         `agent get`), `watch` only its five commands and never an endless wait
         (invariants 12, 13), and `hooks` runs no herdr command at all. Design 19.3:
         `plugin pane open` comes from `up` or `ui` only, and a watcher pane is never
-        prompted, started into or sent anything."""
+        prompted, started into or sent anything. Invariant 20 (design 22): `pane rename`
+        names only a pane hosting one of the fleet's seats, only to that seat's wanted
+        name (its `label`, else its name), and `--clear` comes from `down` alone, for a
+        pane hosting no agent; `agent focus` comes from `go` or the popup only."""
         caller = self.env.get("HERDR_PANE_ID")
         command: List[str] = []
         strips = set()
@@ -246,6 +256,10 @@ class FleetCase(unittest.TestCase):
                     strips.add(info["plugin_pane"])
             if argv[:2] == ["pane", "resize"]:
                 self.assertIn(command[0], RESIZE_COMMANDS, "%s resized a pane: %s" % (command[:1], argv))
+            if argv[:2] == ["pane", "rename"]:
+                self.assert_rename(command, argv, info)
+            if argv[:2] == ["agent", "focus"]:
+                self.assertIn(command[0], FOCUS_COMMANDS, "%s moved the owner's focus: %s" % (command[:1], argv))
             if argv[:2] == ["agent", "prompt"] or argv[:2] == ["agent", "rename"]:
                 self.assertNotIn(argv[2], strips, "a watcher pane was addressed as an agent: %s" % argv)
             if argv[:2] == ["agent", "start"] and "--pane" in argv:
@@ -269,6 +283,32 @@ class FleetCase(unittest.TestCase):
                 self.assertFalse(info.get("had_agent"), "closed a pane hosting an agent: %s" % argv)
             if argv[:2] == ["workspace", "close"] and call["exit"] == 0:
                 self.assertTrue(info.get("created"), "closed a workspace herdr-fleet did not create")
+
+    def assert_rename(self, command: List[str], argv: List[str], info: Dict) -> None:
+        """Invariant 20: a `pane rename` names a pane hosting a seat of the fleet, to that
+        seat's wanted name (as the fake judged both from the fleet file); `--clear` only
+        from `down` (or the popup, whose `down` runs it) and only for a pane with no agent."""
+        self.assertIn(command[0], RENAME_COMMANDS, "%s renamed a pane: %s" % (command[:1], argv))
+        self.assertFalse(info.get("plugin"), "a plugin pane was renamed: %s" % argv)
+        if info.get("clear"):
+            self.assertIn(command[0], CLEAR_COMMANDS, "%s cleared a pane name: %s" % (command[:1], argv))
+            self.assertFalse(info.get("has_agent"), "cleared the name of a pane hosting an agent: %s" % argv)
+            return
+        self.assertTrue(info.get("fleet_known"), "pane rename without a readable fleet file: %s" % argv)
+        self.assertTrue(info.get("seat"), "renamed a pane that hosts no seat of the fleet: %s" % argv)
+        self.assertEqual(info.get("label"), info.get("wanted"),
+                         "renamed %s's pane to a name that is not its wanted name: %s" % (info.get("seat"), argv))
+
+
+def fleet_file(argv, env: Dict[str, str], repo: str) -> str:
+    """The fleet file a command uses, for the fake's `pane rename` record: `--fleet PATH`
+    (or `--file PATH` where it is the alias), else HERDR_FLEET_FILE, else the repo's."""
+    argv = list(argv)
+    options = ("--fleet",) if argv[:1] in (["send"], ["state"]) else ("--fleet", "--file")
+    for index, item in enumerate(argv[:-1]):
+        if item in options:
+            return argv[index + 1]
+    return env.get("HERDR_FLEET_FILE") or os.path.join(repo, ".herdr", "fleet.toml")
 
 
 def typed_ahead_allowed(command: List[str], argv: List[str], info: Dict) -> bool:  # noqa: ARG001

@@ -14,8 +14,10 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
   that sends nothing while the owner is typing in a seat's pane.
 - ``herdr``: the only module that executes the herdr binary.
 - ``fleetfile`` / ``state``: the two files on disk; ``kickoff``: templates.
-- ``context``: per-invocation context and preconditions; ``menu``: the popup;
-  ``notify``: ``herdr notification show``.
+- ``context``: per-invocation context and preconditions; ``menu``: the popups
+  (``manage`` and ``go``); ``notify``: ``herdr notification show``.
+- ``labels``: the seats' pane names (``pane rename``), kept by up, restart, swap,
+  kickoff, tile and status, cleared by down.
 - ``inbox``: the mailboxes under ``.herdr/inbox`` (ids, message files, batches,
   moves between ``new/`` and ``cur/``, ttl); ``messages``: ``send``, ``ack``, the
   message log, owed replies and the delivery engine; ``mailroom``: ``deliver``
@@ -34,7 +36,7 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 
 import os
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
