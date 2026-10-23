@@ -12,6 +12,9 @@ returned, exits at once, so the focus lands on the seat and not on the popup. An
 absent seat prints its line and waits for Enter. ``menu --go`` lists the seats as
 above, then the contacts as ``c1``, ``c2``, reads one answer, focuses it and exits;
 ``q`` or Enter closes with nothing done, and an absent seat says so and asks again.
+
+A popup never presses a key in an agent's pane (design 23.7, invariant 21): its
+restart, swap and down report an exit confirmation for the owner to answer.
 """
 
 from __future__ import annotations
@@ -79,6 +82,7 @@ def _pick_action(ctx: Ctx, stdin: TextIO) -> Optional[str]:
 
 
 def run_menu(ctx: Ctx, stdin: TextIO, go: bool = False) -> int:
+    ctx.keys_allowed = False  # design 23.7, invariant 21: a popup never presses a key in an agent's pane
     if go:
         return run_go(ctx, stdin)
     names = _pick_seats(ctx, stdin)

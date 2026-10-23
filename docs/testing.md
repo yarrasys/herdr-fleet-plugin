@@ -29,6 +29,8 @@ The suite takes a few seconds. Nothing in it talks to a real herdr: `HERDR_BIN_P
 
 - pane names and focus (design 22): `pane rename PANE LABEL...` sets the pane's `label` (the words joined), `--clear` removes it, and `pane get`/`pane list` records carry `label` (null when unset); a plugin pane is named after its manifest title (`Fleet watch`), as live; `rename_errors` ({pane: code}) makes a rename fail. At every `pane rename` the log records the pane, the name asked for or `clear`, whether the pane then hosted a seat of the fleet (`seat`) and the name the fleet wants for it (`wanted`: the seat's `label`, else its name), judged by the fake from the fleet file (passed by `tests/support.py`, or `FAKE_HERDR_FLEET` for the program), and whether it hosted an agent or was a plugin pane. `agent focus TARGET` (a name or a pane id) moves the owner's focus there through `fake_herdr.focus` and marks the agent seen (`done` becomes `idle`);
 
+- keys and screens (design 23.7, 23.9): `agent read TARGET --lines N` prints the last N lines of the agent's pane screen, as `pane read` does. `agent send-keys TARGET KEY...` is simulated (it is no longer in the fake's forbidden list; `pane send-keys`, `pane send-text` and `pane run` still are): the log records the keys and, before any canned answer, the agent's name, kind and state and whether its screen then showed Claude Code's exit confirmation with `Exit and stop tasks` highlighted (`exit_dialog`, judged by the fake). An `enter` on that screen ends the agent and puts the pane at a shell; a `ctrl+c` to a `working` agent sets the next state of `interrupt_results` ({name: [state, ...]}, `done` by default, `absent` ending the agent), and with `restore_prompt_on_interrupt` (true, or a list of names; design 23.11) puts the agent's last prompt back into its prompt line, as Claude Code does when interrupted while thinking; a `ctrl+u` empties the scripted prompt line (`fake_herdr.clear_prompt`). `agent read` records `input_text` (the prompt line it returned holds text) and every `agent prompt` records `input_held` (the target's prompt line held text, or none was on screen, whatever the focus; `fake_herdr.input_held`). `fake_herdr.EXIT_DIALOG` is the confirmation as a 16-line read shows it; `show_exit_dialog(world, pane)` puts it (or another screen) on a pane and makes the agent `blocked`, as herdr reports it, and `exit_dialog_on_quit(world, name[, screen])` (behaviour `dialog_on_quit`) makes the quit command show it instead of quitting. `agent get` records the agent's name and pane, so the harness knows each seat's state at its last read;
+
 - at every `agent prompt` the log also records the target's name and, read from the fleet's `.herdr/inbox` (passed to the in-process runner by `tests/support.py`, or `FAKE_HERDR_INBOX` for the program), the mailboxes and short ids that held a message queued on refusal (`queued_by: refusal` in `new/`) at that moment (design 20.8). Nothing the fake answers changes: its response shapes stay those of herdr 0.9.5.
 
 Most tests call `herdr_fleet.cli.main` in-process with the fake as the runner and an instant clock, so 250 ms polls and 10 s or 20 s timeouts cost nothing. `tests/test_cli_subprocess.py` runs `bin/herdr-fleet` as a real process with the fake installed as an executable on `HERDR_BIN_PATH`, exactly as herdr would. `tests/test_manifest.py` checks `herdr-plugin.toml` and runs its commands the way herdr does: actions from the plugin root with an action's context JSON, pane entrypoints through `sh -c` from the repo directory that `ui` passes as `--cwd`.
@@ -39,13 +41,15 @@ Like live herdr 0.9.4, the fake's `pane get` and `pane list` records never carry
 
 `tests/support.py` checks every test's call log in `tearDown` against design section 7, so every scenario is also a safety test:
 
-- the log never contains bare `herdr`, `agent send-keys`, `pane send-keys`, `pane send-text` or `pane run`;
+- the log never contains bare `herdr`, `pane send-keys`, `pane send-text` or `pane run`;
+- `agent send-keys` (invariant 21, design 23.7) only as one `enter` from `restart`, `swap` or `down`, to an agent whose screen then showed the highlighted exit confirmation, right after an `agent read` of it, at most once per command per agent; or from `interrupt`, to a seat that was `working` at its last `agent get` and whose screen the command read (`agent read`), pressing exactly the kind's keys (the fleet file's `[interrupt]` entry, else the plugin config's, else the harness's own copy of the defaults: one `ctrl+c` for claude, two for agy), never two `ctrl+c` to a Claude seat; one `ctrl+u` alone, from `interrupt` only, right after an `agent read` of that seat that showed text on its prompt line (design 23.11), at most once per command; only `enter`, `esc`, `ctrl+c` and `ctrl+u`; and never from `watch`, `menu`, `deliver`, any other command or a dry run (`support.KeysCheck`);
+- `agent read` came only from `peek`, `interrupt` and the quit of `restart`, `swap`, `down` or the popup, and `peek` ran nothing but `agent list`, `herdr --version`, `pane current` and `agent read`;
 - every `agent prompt` went to an agent that was `idle` or `done` at that moment (never `blocked` or `unknown`; `working` only as below);
 - every `agent start` targeted a pane at a bare shell prompt and never the caller's pane;
 - every `pane close` closed a pane herdr-fleet created and that hosted no agent; every `workspace close` closed a workspace herdr-fleet created;
 - an `inbox` command ran nothing but the caller lookup (`pane current`, `agent get`), and nothing at all with `--as` (design 18.5);
 - kickoffs prompted only idle or done agents (invariant 11); a working one may be reached only by `send --now` and `deliver NAME --now` (design 21.1, `support.typed_ahead_allowed`): not by a plain `send`, the flush before it, `deliver` or `watch`, whatever the mailbox holds;
-- no `agent prompt` reached a pane that was, at that call, the owner's pane with text on its prompt line or no prompt line on screen (`owner_typing` in the fake's log; invariant 19);
+- no `agent prompt` reached a pane that was, at that call, the owner's pane with text on its prompt line or no prompt line on screen (`owner_typing` in the fake's log; invariant 19), nor, since 23.11, any pane whose prompt line held text or was not on screen, focused or not (`input_held`);
 - `watch` ran nothing but `agent wait`, `agent get`, `agent list`, `agent prompt`, `notification show`, the presence guard's `pane get`, `workspace list` and `pane read`, and the preflight's `herdr --version`, and every `agent wait` carried `--timeout` (invariants 12 and 13);
 - `inbox --hook` ran nothing but `agent get` (invariant 14), and `hooks` ran no herdr command at all;
 - `plugin pane open` came only from `up` (also through the popup menu) or `ui`, `pane resize` only from `up`, and a pane opened as a plugin pane was never prompted, renamed or started into (design 19.3);
@@ -708,6 +712,89 @@ $H down --close-panes --close-workspace --fleet "$F"                            
 | 10 | everything closes; remove `$W` |
 
 The hold lasts as long as the owner's focus and text do (design 21.2): leaving the pane with text still in its box ends it, and the next delivery would merge with that text. Step 5 therefore clears the line before leaving.
+
+Version 0.12.0 (design 23), `tests/test_section23.py` (78 tests: 65 for 23.1 to 23.7, 13 for 23.11):
+
+- 23.1: the note first and the outcome last for one sender, several (in the order of their oldest message, `and`, then commas), `--as` (`inbox --as NAME --read`), a dry run (nothing moves), no note without mail or with only expired mail; `; lands at its next idle, or now with --now` on a plain send queued to a working seat (and its dry run), and not on an FYI, `--queue` or `--when-ready` send;
+- 23.2: `inbox --wait` returning at once, waiting on the fake clock (one look per second, no herdr command after the caller lookup), `--timeout` (`nothing arrived in 10m`, `30 s`, exit 3), FYIs counting, a message past its ttl not ending the wait (and expired on the read), `--as`, `--json`, `--full`, the usage errors (`--count`, `--history`, `--redeliver`, `--hook`, `--timeout` alone, a negative timeout), and the lock shared with the watcher (a message the watcher took first is not read again, and the wait goes on), the roster sentence;
+- 23.3: a named agent, an unnamed one that a contact matches (sends, reads its inbox, acks and interrupts as the contact), an unnamed one with no match and one that two contacts match (usage errors, nothing sent or written), a shell pane and outside herdr (`owner`), each command that resolves the caller (`send`, `ack`, `inbox`, `interrupt`), `--as` still working, and `log` and `go` unaffected;
+- 23.4: `ack #id --reason` by a third party (the entry, the line, `log --owed` empty, the `acked by` log line), the refusal without `--reason` (exit 2, nothing written), the debtor with a reason and a dry run, `--reason` with names, `--all`, `--older-than` or a blank text, the `status` hints `(ack NAME, or ack #id)` and `(ack NAME)`, `log --owed` unchanged, the roster sentence;
+- 23.5: `blocked: a dialog is open` in `send`, `send --now`, `deliver`, `restart`, `down`, `swap`, `kickoff` and `--when-ready` lines, and the bare state in `status`;
+- 23.6: `peek` of a seat (exactly what `agent read --lines 30` printed, nothing written), `--lines`, a contact (by its pane), a live agent, an absent seat and contact (exit 3), an unknown name, `owner` and `--lines 0` (exit 2);
+- 23.7: the exit confirmation answered by `restart`, `down` and `swap` (one `enter`, right after `agent read --lines 16`, after 3 s, nothing logged), another dialog and the exit dialog with `Stay` highlighted (no key, `the pane shows a dialog: "…"; answer it by hand`), no dialog (today's line), a kind without an entry (no look at 3 s, one read for the report), a dry run, the popup (no key), a failed Enter, an Enter that did not end the agent, and the pure `shows_exit_dialog` and `dialog_first_line`; `interrupt` for a working Claude seat (one `ctrl+c`, the wait, the log entry and line, no debt), agy (two, 300 ms apart), codex (refused, then configured), the plugin config and the fleet file's precedence, the whitelist (errors for a bad key, two `ctrl+c` for claude, an empty or non-list entry; a bad config entry left out with a doctor warning), idle, done, unknown, blocked and absent refused, a dialog on screen at the read before the keys refused, still working and gone after the keys, `--wait`, contacts, other agents, `owner` and unknown names (exit 2), the caller's own seat, the owner typing, and no manifest action or popup entry;
+- 23.11: the guard on a pane nobody is in with text in its input (one `pane read` when the line is empty; `pane get` only when it holds text), the wording by focus (`owner typing in …`, `text in its input (…); press Ctrl-U there to clear it`, `a dialog or a menu is on screen in …`), `send` queueing and `--now` refusing, `deliver` and `kickoff` holding, `restart` and `down` refused with `refused - text in its input (…); press Ctrl-U there to clear it` and quitting once the line is clear, the watcher holding and delivering after the line was cleared; `interrupt` clearing a restored prompt with one `ctrl+u` between two reads (the log's `keys` gaining `ctrl+u`, the next send landing alone), nothing more without a restored prompt, the still-held line when the key changes nothing or fails, no cleanup while still working or for a kind without a glyph; the harness failing a `ctrl+u` without a read showing text, before any read, twice, or from another command, and a prompt to an unfocused pane holding text;
+- the client (`agent_send_keys` accepts `enter`, `esc`, `ctrl+c` and `ctrl+u` only, refuses an option-like target, and `run`/`text` still refuse `agent send-keys` and the pane forms; `agent_read` is plain text) and the harness failing each forbidden shape above.
+
+The 628 tests of 0.11.0 pass, with the lines 0.12.0 rewords: `blocked: a dialog is open` in queue and refusal lines, the `; lands at …` ending, the inbox note first instead of the `you have N waiting` last line, and a shell pane instead of an unnamed agent for the `owner` sender. Four tests of section 21 now assert 23.11's guard instead of 21.2's: an unfocused pane is one `pane read` (not one `pane get`), text left in a pane the owner is not in holds (`text in its input …`) instead of passing, a focused pane in an unfocused workspace or background tab holds with that wording, and the watcher's hold outlasts the owner leaving the pane until the line is cleared.
+
+## Live smoke test for 0.12.0 (to run by hand)
+
+Not run yet. For the designer or the owner, inside herdr, with `HERDR_FLEET_BIN` exported and a one-seat Haiku scratch fleet as for 0.10.0 (seat `n12-a`, no watcher strip). Two live reproductions of design 23: the exit confirmation that `/exit` shows while a background task runs, and one Ctrl-C to a working seat. Check `herdr agent get n12-a` before each step that sends anything: never send a prompt or a key to it while it is `blocked`, except the one Enter herdr-fleet presses itself in step 3. Run the steps from a plain shell pane or a pane whose agent has a herdr name: since 0.12.0 a pane with an unnamed agent that no contact matches is a usage error for `interrupt`, `send`, `ack` and `inbox` (design 23.3; add `--as owner` there).
+
+```bash
+cd /Users/nabsha/work/yarrasys/projects/herdr-fleet-plugin
+export HERDR_FLEET_BIN="$PWD/bin/herdr-fleet"
+W=$(mktemp -d /tmp/fleet-0120.XXXXXX); mkdir -p "$W/.herdr"; F="$W/.herdr/fleet.toml"
+cat > "$F" <<FLEET
+workspace = "fleet-0120"
+cwd = "$PWD"
+watch = false
+
+[[agents]]
+name = "n12-a"
+kind = "claude"
+args = ["--model", "claude-haiku-5-5"]
+env = { HERDR_FLEET_BIN = "$HERDR_FLEET_BIN" }
+kickoff_text = "[from herdr-fleet] 0.12.0 smoke test ({reason}). You are {name}. Reply READY, then wait. Run no tools unless a message asks you to."
+FLEET
+H="python3 bin/herdr-fleet"
+$H up --fleet "$F"
+# A: the exit confirmation
+$H send --as owner n12-a "Start the shell command 'sleep 900' as a background task (run_in_background), then reply STARTED and stop." --fleet "$F"   # 1
+$H peek n12-a --lines 8 --fleet "$F"                                                   # 2 once it replied STARTED
+$H down n12-a --fleet "$F"                                                             # 3
+pgrep -fl "sleep 900"; herdr agent get n12-a                                           # 4
+$H up --fleet "$F"                                                                     # 5 a fresh n12-a
+# B: one Ctrl-C to a working seat
+$H send --as owner n12-a "Run the shell command 'sleep 60' in the foreground (not in the background), then reply DONE." --fleet "$F"   # 6
+herdr agent get n12-a                                                                  # 7 wait until it says working
+$H interrupt n12-a --fleet "$F"; echo "exit $?"                                        # 8
+$H peek n12-a --lines 12 --fleet "$F"; herdr agent get n12-a                           # 9
+$H log --last 2 --fleet "$F"                                                           # 10
+$H interrupt n12-a --fleet "$F"; echo "exit $?"                                        # 11 now idle or done
+$H down --close-panes --close-workspace --fleet "$F"                                   # 12
+```
+
+| Step | Expected |
+| --- | --- |
+| 2 | the seat's last lines, as the screen shows them; nothing is written under `$W/.herdr` by `peek` |
+| 3 | after about 3 s herdr reported the seat `blocked` with the dialog of design 23 on screen; then `n12-a: quit - answered its exit confirmation (exit and stop tasks)`, within a few seconds |
+| 4 | no `sleep 900` left (the dialog's first choice stops the tasks); `agent get` answers `agent_not_found` |
+| 8 | `interrupted n12-a (done)` (or `(idle)`), exit 0, within seconds |
+| 9 | the screen shows `Interrupted · What should Claude do instead?` and the prompt line; `agent get` still finds n12-a: one Ctrl-C does not quit Claude Code |
+| 10 | the last line reads `… <you>  interrupt → n12-a (done)`: your pane's agent name, or `owner` from a plain shell pane |
+| 11 | `nothing to interrupt: n12-a is idle` (or `done`), exit 3, and no key reaches the seat |
+| 12 | everything closes; remove `$W` |
+
+C, the interrupt that leaves its prompt behind (design 23.11), on the same scratch fleet before step 12: send a prompt and interrupt it within 3 s, while the seat is still thinking, then look at its input and try to quit it.
+
+```bash
+$H up --fleet "$F"
+$H send --as owner n12-a "Using the Bash tool, run: sleep 60, then reply DONE." --fleet "$F"; sleep 2   # 13
+$H interrupt n12-a --fleet "$F"; echo "exit $?"                                        # 14
+herdr agent read n12-a --lines 12                                                      # 15
+$H send --as owner n12-a "reply PONG" --fleet "$F"                                    # 16
+```
+
+| Step | Expected |
+| --- | --- |
+| 14 | `interrupted n12-a (done); cleared the interrupted prompt from its input` (exit 0) when Claude Code put the prompt back; plain `interrupted n12-a (done)` when the Ctrl-C landed during the tool call |
+| 15 | the prompt line between the two rules is a bare `❯` |
+| 16 | `sent to n12-a (idle), …`: the seat answers PONG alone, with nothing of the earlier prompt in front |
+
+To see the guard itself: type some text into n12-a's input by hand, click back into your own pane, and run `$H send --as owner n12-a "reply PONG"` and `$H down n12-a`: the first prints `queued in herdr-fleet for n12-a (idle, text in its input (P); press Ctrl-U there to clear it) …`, the second `n12-a: refused - text in its input (P); press Ctrl-U there to clear it` (exit 3), and nothing reaches the seat. Press Ctrl-U in its pane, and both go through.
+
+Also worth one look, on the same scratch fleet: repeat 1 and 2, then run `down` from the **Fleet: manage** popup instead of step 3. The popup presses nothing: after 20 s it reports `n12-a: failed - did not exit within 20000 ms after /exit; the pane shows a dialog: "…"; answer it by hand`, and the owner answers the dialog in the pane.
 
 ## Live smoke test for 0.11.0 (to run by hand)
 

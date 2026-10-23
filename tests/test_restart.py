@@ -239,7 +239,7 @@ class Kickoff(LiveFleet):
         code, out, _ = self.run_cli("kickoff", "fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer")
         self.assertEqual(code, 3)
         self.assertEqual(self.argvs("agent", "prompt"), [])
-        for state in ("working", "blocked", "unknown"):
+        for state in ("working", "blocked: a dialog is open", "unknown"):  # design 23.5
             self.assertIn("is %s; nothing sent" % state, out)
 
     def test_clears_blocked_at_startup(self):

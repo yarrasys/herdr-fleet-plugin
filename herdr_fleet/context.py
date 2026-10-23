@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, TextIO
 
 from herdr_fleet import MIN_HERDR_VERSION, PLUGIN_ID
-from herdr_fleet.fleetfile import Fleet, FleetError, find_fleet_file, load_fleet, load_toml
+from herdr_fleet.fleetfile import Fleet, FleetError, find_fleet_file, load_fleet, load_toml, parse_interrupt
 from herdr_fleet.herdr import Herdr, HerdrError
 from herdr_fleet.notify import notify
 from herdr_fleet.seats import DEFAULT_QUIT_TIMEOUT_MS, Clock
@@ -49,6 +49,8 @@ class PluginConfig:
     quit_timeout_ms: Optional[int] = None
     path: Optional[str] = None
     error: Optional[str] = None
+    interrupt: Dict[str, List[str]] = field(default_factory=dict)  # [interrupt] keys per kind (design 23.7)
+    problems: List[str] = field(default_factory=list)  # entries left out, e.g. an [interrupt] key not allowed
 
 
 @dataclass
@@ -175,6 +177,7 @@ class Ctx:
         self._fleet: Optional[Fleet] = None
         self._state: Optional[State] = None
         self._config: Optional[PluginConfig] = None
+        self.keys_allowed = True  # design 23.7: a popup (the `manage` menu) never presses a key
 
     # -- output ------------------------------------------------------------
 
@@ -278,7 +281,9 @@ def resolve_caller(ctx: Ctx) -> None:
 def load_config(env: Mapping[str, str], herdr: Herdr) -> PluginConfig:
     """Read ``config.toml`` from the plugin config dir: ``[quit]`` per-kind
     commands and ``quit_timeout_ms`` (under ``[quit]``, as design section 12
-    says, or at the top level)."""
+    says, or at the top level), and ``[interrupt]`` keys per kind (design 23.7;
+    an entry with a key outside the whitelist is left out and named in
+    ``problems``)."""
     folder = env.get("HERDR_PLUGIN_CONFIG_DIR")
     if not folder:
         try:
@@ -301,4 +306,6 @@ def load_config(env: Mapping[str, str], herdr: Herdr) -> PluginConfig:
     timeout = (quit_table if isinstance(quit_table, dict) else {}).get("quit_timeout_ms", data.get("quit_timeout_ms"))
     if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0:
         config.quit_timeout_ms = timeout
+    if "interrupt" in data:
+        config.interrupt = parse_interrupt(data["interrupt"], config.problems, "%s: [interrupt]" % path)
     return config

@@ -17,12 +17,19 @@
   design 16.12) and only then report blocked. Nothing is sent meanwhile.
 - ``quit_agent``: the per-kind quit command through ``safe_prompt`` (so the
   presence guard runs first), then poll until the agent is gone and the shell is
-  back, or give up without retrying.
+  back, or give up without retrying. When the agent is still there
+  ``EXIT_DIALOG_AFTER_S`` later, its screen is read once (``agent read``) and the
+  kind's exit confirmation (``EXIT_DIALOGS``), with the exit choice highlighted,
+  gets one Enter (design 23.7, invariant 21); any other screen gets no key.
+- ``interrupt_agent``: the kind's interrupt keys (``INTERRUPT_KEYS``, overridable
+  per kind by ``[interrupt]``), 300 ms apart, then ``agent wait`` until idle or
+  done (design 23.7). ``interrupt`` is its only caller.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import time
 from dataclasses import dataclass, field
@@ -62,6 +69,37 @@ PROMPT_GLYPHS: Dict[str, Tuple[str, ...]] = {
 PROMPT_PLACEHOLDERS: Dict[str, Tuple[str, ...]] = {
     "codex": ("Ask Codex to do anything",),
 }
+
+# Design 23.7: the exit confirmation a kind may show after its quit command, which the
+# plugin answers with one Enter (invariant 21). ``signature``: lines that must all be on
+# screen; ``choice``: the exit option, which must be the highlighted one (a line whose
+# first non-blank character is the highlight mark and which contains it); ``answer``:
+# how the report names the choice. A kind without an entry is never answered.
+HIGHLIGHT = "\u276f"   # `❯`, the mark on Claude Code's highlighted option
+
+
+@dataclass(frozen=True)
+class ExitDialog:
+    signature: Tuple[str, ...]
+    choice: str
+    answer: str
+
+
+EXIT_DIALOGS: Dict[str, ExitDialog] = {
+    "claude": ExitDialog(("Background work is running", "Exit and stop tasks"), "Exit and stop tasks",
+                         "exit and stop tasks"),
+}
+EXIT_DIALOG_AFTER_S = 3.0   # design 23.7 `exit_dialog_after`: how long after the quit command to look
+EXIT_DIALOG_LINES = 16      # `agent read NAME --lines 16`
+
+# Design 23.7: the keys `interrupt NAME` presses in a working seat, per kind, 300 ms apart.
+# Claude Code quits on a second Ctrl-C, so a Claude seat gets exactly one. `[interrupt]` in
+# the fleet file, then in the plugin config, overrides a kind, with the keys of
+# `fleetfile.INTERRUPT_ALLOWED` only (`fleetfile.interrupt_problems` checks both tables).
+INTERRUPT_KEYS: Dict[str, Tuple[str, ...]] = {"claude": ("ctrl+c",), "agy": ("ctrl+c", "ctrl+c")}
+INTERRUPT_GAP_S = 0.3
+DEFAULT_INTERRUPT_WAIT_MS = 10000
+BLOCKED_WORDS = "blocked: a dialog is open"  # design 23.5: refusal and queue lines that name `blocked`
 
 QUIT_CONFIG_HINT = ('set `quit = "..."` on the seat in .herdr/fleet.toml, or add the kind under '
                     '[quit] in $HERDR_PLUGIN_CONFIG_DIR/config.toml')
@@ -136,6 +174,22 @@ def contains_in_order(haystack: Sequence[str], needle: Sequence[str]) -> bool:
     return any(list(haystack[i:i + width]) == needle for i in range(len(haystack) - width + 1))
 
 
+def state_words(state: str) -> str:
+    """A state as a refusal or queue line names it (design 23.5): ``blocked`` reads
+    ``blocked: a dialog is open``; ``status`` keeps the bare word in its STATE column."""
+    return BLOCKED_WORDS if state == "blocked" else state
+
+
+def interrupt_keys(live_kind: str, fleet_keys: Mapping[str, Sequence[str]],
+                   config_keys: Mapping[str, Sequence[str]]) -> Optional[Tuple[str, ...]]:
+    """The fleet file's ``[interrupt]`` entry for the kind, then the plugin config's, then
+    INTERRUPT_KEYS; None when the kind has none (design 23.7)."""
+    for table in (fleet_keys, config_keys, INTERRUPT_KEYS):
+        if live_kind in table:
+            return tuple(table[live_kind])
+    return None
+
+
 def quit_command(seat: Seat, live_kind: str, config_quit: Mapping[str, str]) -> Optional[str]:
     """Seat override (when the live kind is the seat's kind), then config, then defaults."""
     if seat.quit and live_kind == seat.kind:
@@ -184,7 +238,7 @@ def safe_prompt(herdr: Herdr, target: str, text: str, allow: Sequence[str] = SET
         return Outcome(False, "absent", "no live agent %s (%s)" % (target, describe(exc)))
     status = str(agent.get("agent_status") or "unknown")
     if status not in allow:
-        return Outcome(False, status, "agent %s is %s; nothing sent" % (target, status), agent)
+        return Outcome(False, status, "agent %s is %s; nothing sent" % (target, state_words(status)), agent)
     try:
         held = presence.typing_at(herdr, agent)
     except HerdrError as exc:  # cannot tell whether the owner is typing: send nothing
@@ -253,14 +307,26 @@ def _await_ready(herdr: Herdr, clock: Clock, seat: Seat, pane: str, deadline: fl
 
 
 def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str,
-               timeout_ms: int) -> Outcome:
+               timeout_ms: int, answer_exit: bool = True) -> Outcome:
     """Quit one agent (design section 6). status: quit | refused | failed. A seat whose
-    pane the owner is typing in is refused like a blocked one (design 21.2)."""
+    pane the owner is typing in is refused like a blocked one (design 21.2).
+
+    Design 23.7: when the agent is still there EXIT_DIALOG_AFTER_S after the quit command,
+    its screen is read once (``agent read``); if it shows the kind's exit confirmation with
+    the exit choice highlighted, and ``answer_exit`` (never from a popup), one ``enter``
+    answers it and the poll goes on. Any other screen gets no key. On timeout the screen
+    is read again for the report: a numbered choice on screen means a dialog the owner
+    answers by hand."""
     sent = safe_prompt(herdr, target, quit_cmd)
     if not sent.ok:
         status = "refused" if sent.status in ("blocked", "unknown", "working", "typing") else "failed"
         return Outcome(False, status, sent.detail, sent.agent)
-    deadline = clock.monotonic() + timeout_ms / 1000.0
+    kind = str(sent.agent.get("agent") or "")
+    dialog = EXIT_DIALOGS.get(kind)
+    started = clock.monotonic()
+    deadline = started + timeout_ms / 1000.0
+    looked = dialog is None or not answer_exit  # nothing to answer, so nothing to look for at 3 s
+    answered = False
     while True:
         clock.sleep(POLL_S)
         try:
@@ -271,12 +337,107 @@ def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str
         if gone:
             try:
                 if at_shell_prompt(herdr.process_info(pane)):
+                    if answered:
+                        return Outcome(True, "quit", "answered its exit confirmation (%s)" % dialog.answer)
                     return Outcome(True, "quit", "quit with %s" % quit_cmd)
             except HerdrError:
                 pass
+        elif not looked and clock.monotonic() - started >= EXIT_DIALOG_AFTER_S:
+            looked = True
+            try:
+                screen = herdr.agent_read(target, EXIT_DIALOG_LINES)
+            except HerdrError:
+                screen = ""
+            if shows_exit_dialog(kind, screen):
+                try:
+                    herdr.agent_send_keys(target, ["enter"])
+                    answered = True
+                except HerdrError as exc:
+                    return Outcome(False, "failed", "its exit confirmation is on screen, but the Enter failed: "
+                                   "%s; answer it by hand" % describe(exc))
         if clock.monotonic() >= deadline:
-            return Outcome(False, "failed",
-                           "agent %s did not exit within %d ms after %s; not retried, no keys sent, "
-                           "seat left alone" % (target, timeout_ms, quit_cmd))
+            return Outcome(False, "failed", _no_exit(herdr, target, quit_cmd, timeout_ms, gone, answered))
 
 
+def shows_exit_dialog(kind: str, screen: str) -> bool:
+    """Design 23.7: the kind's exit confirmation is on screen (every signature line) with
+    its exit choice highlighted (a line whose first non-blank character is the highlight
+    mark and which contains the choice). Pure."""
+    dialog = EXIT_DIALOGS.get(kind)
+    if dialog is None or not all(line in screen for line in dialog.signature):
+        return False
+    return any(_bare(line).startswith(HIGHLIGHT) and dialog.choice in line for line in screen.splitlines())
+
+
+BOX = "\u2502\u2503"                               # box-drawing verticals around a dialog's lines
+RULE_CHARS = set("\u2500\u2501\u2550\u256d\u256e\u2570\u256f\u250c\u2510\u2514\u2518 ")
+CHOICE_RE = re.compile("^" + HIGHLIGHT + r"\s*\d+[.)]\s")  # `❯ 1. Exit and stop tasks`
+
+
+def _bare(line: str) -> str:
+    return line.strip().strip(BOX).strip()
+
+
+def dialog_first_line(screen: str) -> Optional[str]:
+    """When a numbered choice is highlighted on screen (``❯ 1. …``; the empty prompt line
+    ``❯`` is not one), the dialog's first non-blank line: the first after the last rule
+    above the choice, else the first of the screen. None when no choice is on screen."""
+    lines = [_bare(line) for line in screen.splitlines()]
+    choice = next((i for i, line in enumerate(lines) if CHOICE_RE.match(line)), None)
+    if choice is None:
+        return None
+    start = 0
+    for index in range(choice - 1, -1, -1):
+        if len(lines[index]) >= 3 and set(lines[index]) <= RULE_CHARS:
+            start = index + 1
+            break
+    first = next((line for line in lines[start:choice + 1] if line), lines[choice])
+    return first if len(first) <= 80 else first[:79] + "\u2026"
+
+
+def _no_exit(herdr: Herdr, target: str, quit_cmd: str, timeout_ms: int, gone: bool, answered: bool) -> str:
+    """The failure detail of a quit that timed out (design 23.7)."""
+    if answered:
+        return ("did not exit within %d ms after %s, though its exit confirmation was answered once; "
+                "not retried, no more keys sent, seat left alone" % (timeout_ms, quit_cmd))
+    first = None
+    if not gone:
+        try:
+            first = dialog_first_line(herdr.agent_read(target, EXIT_DIALOG_LINES))
+        except HerdrError:
+            first = None
+    if first is not None:
+        return ("did not exit within %d ms after %s; the pane shows a dialog: \"%s\"; answer it by hand"
+                % (timeout_ms, quit_cmd, first))
+    return ("agent %s did not exit within %d ms after %s; not retried, no keys sent, seat left alone"
+            % (target, timeout_ms, quit_cmd))
+
+
+def interrupt_agent(herdr: Herdr, clock: Clock, target: str, keys: Sequence[str], wait_ms: int) -> Outcome:
+    """Design 23.7: press ``keys`` in a working agent's pane, INTERRUPT_GAP_S apart, then
+    ``agent wait --until idle --until done`` for up to ``wait_ms``. The caller has just
+    read the agent ``working``. status: idle | done (interrupted), working | blocked |
+    unknown (still so at the deadline), absent (the agent is gone) or failed (a key did not
+    go: ``detail`` says how many did). ``agent`` carries ``sent``, the keys that went."""
+    sent: List[str] = []
+    for index, key in enumerate(keys):
+        if index:
+            clock.sleep(INTERRUPT_GAP_S)
+        try:
+            herdr.agent_send_keys(target, [key])
+        except HerdrError as exc:
+            return Outcome(False, "failed", describe(exc), {"sent": sent})
+        sent.append(key)
+    try:
+        agent = herdr.agent_wait(target, SETTLED, wait_ms)
+        status = str(agent.get("agent_status") or "unknown")
+    except HerdrError as exc:
+        if "not_found" in exc.code:
+            return Outcome(False, "absent", "the agent is gone", {"sent": sent})
+        try:
+            status = str(herdr.agent_get(target).get("agent_status") or "unknown")
+        except HerdrError as again:  # the keys went: report what can be said, never raise past the log
+            if "not_found" in again.code:
+                return Outcome(False, "absent", "the agent is gone", {"sent": sent})
+            status = "unknown"
+    return Outcome(status in SETTLED, status, status, {"sent": sent})

@@ -20,7 +20,8 @@ from herdr_fleet import inbox, messages
 from herdr_fleet.context import UsageError
 from herdr_fleet.inbox import CUR, NEW, Message
 from herdr_fleet.kickoff import DEFAULT_TEMPLATE, compose
-from herdr_fleet.messages import FYI_PLACE, place
+from herdr_fleet.messages import FYI_PLACE, LANDS, place
+from herdr_fleet.seats import state_words
 from test_units import fleet, seat
 
 SHORT = r"#[0-9a-f]{6}"
@@ -235,12 +236,14 @@ class SendTable(LiveFleet):
                         self.assertEqual(box(self.repo, "fablyn-dev", CUR), [entry["id"]])
                     elif outcome == "queued":
                         self.assertEqual((code, prompted, entry["delivery"]), (0, 0, "queued"), out + err)
-                        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(%s%s\) #%s, "
-                                                      r"position 1 of 1$" % (state, fyi, entry["id"][-6:]))
+                        lands = LANDS if state == "working" and not flag else ""  # design 23.1
+                        self.assertEqual(out.strip(), "queued in herdr-fleet for fablyn-dev (%s%s) #%s, position 1 of "
+                                                      "1%s" % (state_words(state), ", " + FYI_PLACE if fyi else "",
+                                                               entry["id"][-6:], lands))
                         self.assertEqual(box(self.repo, "fablyn-dev", NEW), [entry["id"]])
                     else:
                         self.assertEqual((code, prompted, entry["delivery"]), (1, 0, "refused"), out + err)
-                        self.assertEqual(out.strip(), "refused fablyn-dev (%s): nothing sent" % state)
+                        self.assertEqual(out.strip(), "refused fablyn-dev (%s): nothing sent" % state_words(state))
                         self.assertEqual(box(self.repo, "fablyn-dev", CUR), [entry["id"]])
                         self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
 
@@ -321,7 +324,8 @@ class FlushBeforeSend(LiveFleet):
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "fablyn-dev", "second")  # design 21.1: queued, nothing flushed
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 2 of 2$" % SHORT)
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 2 of 2; "
+                                      r"lands at its next idle, or now with --now$" % SHORT)
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
         code, out, _ = self.run_cli("send", "--now", "fablyn-dev", "third")
         self.assertEqual(code, 0)
@@ -336,7 +340,8 @@ class FlushBeforeSend(LiveFleet):
                                  "stderr": {"error": {"code": "agent_blocked", "message": "blocked"}}}]
         code, out, _ = self.run_cli("send", "fablyn-dev", "second")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(blocked\) %s, position 2 of 2$" % SHORT)
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(blocked: a dialog is open\) %s, "
+                                      r"position 2 of 2$" % SHORT)
         self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 2)
         self.assertEqual([e["kind"] for e in log_entries(self.repo)], ["send", "send"])
 
@@ -549,7 +554,7 @@ class Deliver(LiveFleet):
         self.status_of("w2:p3", "blocked")
         code, out, _ = self.run_cli("deliver", "fablyn-reviewer", "fablyn-orchestrator")
         self.assertEqual(code, 0)
-        self.assertEqual(out.splitlines()[0], "fablyn-reviewer: blocked, 1 left queued")
+        self.assertEqual(out.splitlines()[0], "fablyn-reviewer: blocked: a dialog is open, 1 left queued")
         self.assertRegex(out.splitlines()[1], r"^delivered 1 to fablyn-orchestrator")  # named: FYIs too
         self.assertEqual(self.prompts_to("fablyn-reviewer"), [])
         code, out, _ = self.run_cli("deliver", "fablyn-orchestrator")

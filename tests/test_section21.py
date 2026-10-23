@@ -27,6 +27,7 @@ SHORT = r"#[0-9a-f]{6}"
 WORKING = re.escape(place("working"))
 WAIT = ["--until", "idle", "--until", "done", "--timeout", "30000"]
 TYPING = "owner typing in w2:p2"
+IN_INPUT = "text in its input (w2:p2); press Ctrl-U there to clear it"  # design 23.11: a pane not the owner's
 
 # Screen tails as `herdr pane read PANE --lines 12` printed them live (herdr 0.9.5, 21 Oct 2026).
 CLAUDE_EMPTY = ("⏺ Done. The file is saved.\n\n" + "─" * 80 + "\n❯ \n" + "─" * 80 +
@@ -100,24 +101,25 @@ class Guard(LiveFleet):
         answer = presence.typing(self.client(), pane, kind)
         return answer, [c["argv"][:2] for c in self.calls()[before:]]
 
-    def test_not_focused_is_one_pane_get(self):
+    def test_not_focused_is_one_pane_read_and_text_there_holds_too(self):  # design 23.11
+        self.assertEqual(self.guard(), (None, [["pane", "read"]]))
         fake_herdr.type_in(self.world, "w2:p2", "half typed")  # text left in a pane the owner is not in
-        self.assertEqual(self.guard(), (None, [["pane", "get"]]))
+        self.assertEqual(self.guard(), (IN_INPUT, [["pane", "read"], ["pane", "get"]]))
 
     def test_focused_in_an_unfocused_workspace_or_a_background_tab_is_not_the_owners(self):
         fake_herdr.focus(self.world, "w2:p2")
         fake_herdr.type_in(self.world, "w2:p2", "half typed")
         fake_herdr.unfocus(self.world)  # the owner is in another app, or herdr's UI is detached
-        self.assertEqual(self.guard(), (None, [["pane", "get"], ["workspace", "list"]]))
+        self.assertEqual(self.guard(), (IN_INPUT, [["pane", "read"], ["pane", "get"], ["workspace", "list"]]))
         fake_herdr.focus(self.world, "w2:p2")
         self.world["workspaces"]["w2"]["active_tab_id"] = "w2:t9"  # the owner switched to another tab
-        self.assertEqual(self.guard()[0], None)
+        self.assertEqual(self.guard()[0], IN_INPUT)
 
     def test_focused_and_empty_passes_after_reading_twelve_lines(self):
         fake_herdr.focus(self.world, "w2:p2")
         answer, calls = self.guard()
         self.assertIsNone(answer)
-        self.assertEqual(calls, [["pane", "get"], ["workspace", "list"], ["pane", "read"]])
+        self.assertEqual(calls, [["pane", "read"]])  # design 23.11: the focus chain only words a hold
         (read,) = self.argvs("pane", "read")
         self.assertEqual(read, ["pane", "read", "w2:p2", "--lines", "12"])
 
@@ -335,11 +337,13 @@ class OwnerTyping(LiveFleet):
         kinds = [c["argv"][:2] for c in self.calls()]
         self.assertLess(kinds.index(["pane", "read"]), kinds.index(["agent", "prompt"]))
 
-    def test_text_left_in_a_pane_the_owner_left_does_not_hold(self):
+    def test_text_left_in_a_pane_the_owner_left_holds_too(self):  # design 23.11 (21.2 let it merge)
         fake_herdr.focus(self.world, "w2:p1")  # the owner clicked into the orchestrator's pane
         code, out, _ = self.run_cli("send", "fablyn-dev", "ping")
-        self.assertRegex(out.strip(), r"^sent to fablyn-dev \(idle\), \d+ B$")
-        self.assertEqual(self.argvs("pane", "read"), [])  # one `pane get`, nothing read
+        self.assertEqual(code, 0)
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(idle, %s\) %s, position 1 of 1$"
+                         % (re.escape(IN_INPUT), SHORT))
+        self.assertEqual(self.prompts_to("fablyn-dev"), [])
 
 
 class KickoffAfterStart(FleetCase):
@@ -414,14 +418,23 @@ class WatcherHold(WatchCase):
         self.assertEqual(len(self.argvs("pane", "read", "w2:p2")), 1 + 3 + 1)
         self.assertEqual([e["via"] for e in log_entries(self.repo)], ["watch"])
 
-    def test_a_pane_the_owner_left_costs_one_call_and_is_delivered(self):
-        self.at_hold(2, lambda w: fake_herdr.focus(w, "w2:p1"))
+    def test_a_pane_the_owner_left_still_holds_until_its_text_is_cleared(self):  # design 23.11
+        def change(n):
+            if n == 2:
+                self.edit_world(lambda w: fake_herdr.focus(w, "w2:p1"))  # the text stays behind
+            if n == 4:
+                self.edit_world(lambda w: fake_herdr.type_in(w, "w2:p2", ""))
+        self.clock = HoldClock(change)
         self.behave(wait_results={"fablyn-dev": ["idle"]})
         code, out, _ = self.watch(cycles=1)
-        self.assertIn("delivered 1 to fablyn-dev", events(out))
-        gets = [c["argv"] for c in self.calls() if c["argv"][:2] in (["pane", "get"], ["pane", "read"])]
-        # delivery (get, read), look 1 (get, read), look 2 (get: not focused), delivery (get)
-        self.assertEqual([a[:2] for a in gets], [["pane", "get"], ["pane", "read"]] * 2 + [["pane", "get"]] * 2)
+        self.assertEqual(events(out)[1:], ["waiting on fablyn-dev (1 queued)", "fablyn-dev idle; delivering 1",
+                                           "fablyn-dev idle; %s, holding 1" % TYPING,
+                                           "delivered 1 to fablyn-dev", "stopped"])
+        self.assertEqual(self.clock.holds, 4)
+        looks = [c["argv"][:2] for c in self.calls() if c["argv"][:2] in (["pane", "get"], ["pane", "read"])]
+        # the delivery and looks 1, 2 (focused: read, get), looks 3 (not focused: read, get), look 4 and the
+        # delivery after it (read only: the line is empty)
+        self.assertEqual(looks, [["pane", "read"], ["pane", "get"]] * 4 + [["pane", "read"]] * 2)
 
     def test_the_seat_going_working_during_a_hold_goes_back_to_waiting(self):
         def change(world):
@@ -524,7 +537,8 @@ class WorkingSeats(LiveFleet):
                                 {"prefix": ["agent", "get", "fablyn-dev"], "stdout": working, "times": 1}]
         code, out, _ = self.run_cli("send", "fablyn-dev", "ping")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 1 of 1$" % SHORT)
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 1 of 1; lands "
+                                      r"at its next idle, or now with --now$" % SHORT)
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
 

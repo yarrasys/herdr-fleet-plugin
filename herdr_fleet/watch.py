@@ -56,7 +56,7 @@ from herdr_fleet.herdr import HerdrError, describe
 from herdr_fleet.inbox import NEW, Message
 from herdr_fleet.mailroom import candidates, deliver_one, expire_all, herdr_target
 from herdr_fleet.messages import OWNER, Drop, agent_state, notify_owner, prompt_mailbox, since_label
-from herdr_fleet.seats import SETTLED
+from herdr_fleet.seats import SETTLED, state_words
 from herdr_fleet.state import ensure_gitignore, mark_notified, now_iso
 
 LOCK_NAME = "watch.lock"
@@ -428,7 +428,7 @@ class Watcher:
             state = agent_state(self.ctx, target)
             self.observe(name, state)
             if state not in SETTLED:  # working, blocked or unknown: wait again
-                self.say("%s %s; still waiting" % (name, state))
+                self.say("%s %s; still waiting" % (name, state_words(state)))
                 if state == "absent":
                     return
                 continue
@@ -454,7 +454,7 @@ class Watcher:
             if state == "absent":  # gone: the next pass notes it, its kickoff carries the queue
                 return False
             if state not in SETTLED:
-                self.say("%s %s; waiting" % (name, state))
+                self.say("%s %s; waiting" % (name, state_words(state)))
                 return True
             again = self.deliver(name, target)
             if again is None or again.status != "typing":
@@ -547,7 +547,7 @@ class Watcher:
             self.say("prompted %s with a pointer: %s" % (
                 name, inbox.pointer_text(drop.waiting, drop.size, prefix=False)))
         elif drop.status == "refused":
-            self.say("%s %s; still waiting" % (name, drop.state))
+            self.say("%s %s; still waiting" % (name, state_words(drop.state)))
         elif drop.status == "typing":  # the hold says it (design 21.2)
             return
         elif drop.status == "failed":

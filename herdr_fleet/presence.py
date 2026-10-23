@@ -1,16 +1,23 @@
-"""The presence guard (design 21.2, invariant 19): before any text goes to a seat,
-is the owner typing there?
+"""The presence guard (design 21.2 as 23.11 amends it, invariant 19): before any text
+goes to a seat, does its input already hold text?
 
-1. ``owner_pane``: is the target the pane the owner's keystrokes go to? ``pane get``
-   says whether the pane is ``focused``; only then ``workspace list`` says whether its
-   workspace is the focused one and that workspace's active tab is the pane's tab.
-2. ``prompt_line`` (pure): the agent's prompt line among the last lines of the
+1. ``prompt_line`` (pure): the agent's prompt line among the last lines of the
    screen, the last line whose first non-blank character is one of the kind's
    glyphs (``seats.PROMPT_GLYPHS``), as the text after the glyph.
-3. ``typing``: the whole guard. ``None`` when text may go (not the owner's pane, an
-   empty prompt line or the kind's placeholder, or a kind with no glyph entry, which
-   cannot be checked); otherwise the detail ``owner typing in w1:p2``. No prompt line
-   on screen (a dialog, a picker, a menu) counts as typing.
+2. ``typing``: the whole guard. It reads ``pane read TARGET --lines 12`` for every
+   target pane, focused or not (23.11: text left in an unfocused seat's input merges
+   with the next paste too). ``None`` when text may go (an empty prompt line or the
+   kind's placeholder, or a kind with no glyph entry, which cannot be checked);
+   otherwise the detail. No prompt line on screen (a dialog, a picker, a menu) holds
+   the text as well.
+3. ``owner_pane`` only words the detail, and only once the line holds text: is the
+   target the pane the owner's keystrokes go to? ``pane get`` says whether the pane is
+   ``focused``; only then ``workspace list`` says whether its workspace is the focused
+   one and that workspace's active tab is the pane's tab. The owner's pane reads
+   ``owner typing in w1:p2``; any other ``text in its input (w1:p2); press Ctrl-U
+   there to clear it``, or, with no prompt line or a highlighted numbered option
+   (``❯ 1. Yes``) where the line would be, ``a dialog or a menu is on screen in w1:p2;
+   answer or close it there``.
 
 The screen lines are read for the prompt line alone and discarded: nothing is kept,
 logged or decided from them besides this one answer.
@@ -18,11 +25,16 @@ logged or decided from them besides this one answer.
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from herdr_fleet.herdr import Herdr, HerdrError
 
 SCREEN_LINES = 12  # design 21.2: `pane read TARGET --lines 12`
+OWNER_TYPING = "owner typing in %s"                                   # the owner's pane (21.2)
+IN_INPUT = "text in its input (%s); press Ctrl-U there to clear it"   # any other pane (23.11)
+DIALOG = "a dialog or a menu is on screen in %s; answer or close it there"  # no prompt line, or `❯ 1. Yes`
+CHOICE_RE = re.compile(r"^\d+[.)]\s")  # a highlighted numbered option read as a prompt line: `❯ 1. Yes`
 BORDERS = "\u2502\u2503"  # box-drawing verticals some builds draw around the input line
 
 
@@ -65,6 +77,13 @@ def prompt_line(text: str, kind: str) -> Optional[str]:
     return found
 
 
+def holds_text(line: Optional[str], kind: str) -> bool:
+    """A prompt line is on screen and holds text that is not the kind's placeholder: what
+    ``interrupt`` clears with one Ctrl-U (design 23.11). Unlike ``is_typed``, no prompt
+    line at all is not text (it may be a dialog, which a key could answer)."""
+    return line is not None and is_typed(line, kind)
+
+
 def is_typed(line: Optional[str], kind: str) -> bool:
     """A prompt line holds the owner's text: anything but empty or the kind's placeholder.
     No prompt line at all (None) counts too: the agent shows something else to answer."""
@@ -88,14 +107,18 @@ def owner_pane(herdr: Herdr, pane_id: str) -> bool:
 
 def typing(herdr: Herdr, pane_id: str, kind: str) -> Optional[str]:
     """The guard: None when text may go to ``pane_id`` (whose live agent is of ``kind``),
-    else ``owner typing in <pane>``. Raises HerdrError when herdr cannot answer."""
+    else the detail (``owner typing in <pane>`` in the owner's pane, ``text in its input
+    (<pane>); press Ctrl-U there to clear it`` elsewhere). The prompt line is read first,
+    focused or not (design 23.11); the focus chain is asked only when it holds text.
+    Raises HerdrError when herdr cannot answer."""
     if not pane_id or not checkable(kind):
         return None
-    if not owner_pane(herdr, pane_id):
+    line = prompt_line(herdr.pane_read(pane_id, SCREEN_LINES), kind)
+    if not is_typed(line, kind):
         return None
-    if is_typed(prompt_line(herdr.pane_read(pane_id, SCREEN_LINES), kind), kind):
-        return "owner typing in %s" % pane_id
-    return None
+    if owner_pane(herdr, pane_id):
+        return OWNER_TYPING % pane_id
+    return (DIALOG if line is None or CHOICE_RE.match(line) else IN_INPUT) % pane_id
 
 
 def typing_at(herdr: Herdr, agent: Dict) -> Optional[str]:

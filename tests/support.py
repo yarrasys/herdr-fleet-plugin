@@ -48,6 +48,16 @@ RESIZE_COMMANDS = ("up", "menu")
 RENAME_COMMANDS = ("up", "restart", "swap", "kickoff", "tile", "status", "down", "menu")
 CLEAR_COMMANDS = ("down", "menu")
 FOCUS_COMMANDS = ("go", "menu")
+# Design 23.7 and invariant 21: keys reach an agent only as one `enter` on the exit
+# confirmation from restart, swap or down, and as the kind's interrupt keys from `interrupt`;
+# never from watch, the popup, deliver or a dry run. `agent read` comes only from `peek`,
+# `interrupt` and the quit of restart, swap, down (and the popup's, which reads but never presses).
+KEYS = ("enter", "esc", "ctrl+c", "ctrl+u")  # ctrl+u: interrupt's cleanup only (design 23.11)
+ENTER_COMMANDS = ("restart", "swap", "down")
+NO_KEYS_COMMANDS = ("watch", "menu", "deliver")
+INTERRUPT_DEFAULTS = {"claude": ["ctrl+c"], "agy": ["ctrl+c", "ctrl+c"]}  # the harness's own copy
+READ_COMMANDS = ("peek", "restart", "swap", "down", "menu", "interrupt")
+PEEK_CALLS = (["agent", "list"], ["--version"], ["pane", "current"], ["agent", "read"])
 
 THREE_SEATS = """
 workspace = "fablyn"
@@ -225,7 +235,12 @@ class FleetCase(unittest.TestCase):
         prompted, started into or sent anything. Invariant 20 (design 22): `pane rename`
         names only a pane hosting one of the fleet's seats, only to that seat's wanted
         name (its `label`, else its name), and `--clear` comes from `down` alone, for a
-        pane hosting no agent; `agent focus` comes from `go` or the popup only."""
+        pane hosting no agent; `agent focus` comes from `go` or the popup only.
+        Invariant 21 (design 23.7): `agent send-keys` only as one `enter` from `restart`,
+        `swap` or `down`, to an agent whose screen then showed the highlighted exit
+        confirmation, right after an `agent read` of it, once per command per agent; or as
+        the kind's interrupt keys from `interrupt`, to a seat `working` at its last `agent
+        get`; never from `watch`, the popup, `deliver` or a dry run."""
         caller = self.env.get("HERDR_PANE_ID")
         command: List[str] = []
         strips = set()
@@ -233,12 +248,28 @@ class FleetCase(unittest.TestCase):
         if os.path.exists(self.log_path):
             with open(self.log_path, "r", encoding="utf-8") as handle:
                 entries = [json.loads(line) for line in handle if line.strip()]
+        keys = KeysCheck(self, command)
+        previous: Optional[List[str]] = None
         for call in entries:
             if "command" in call:
+                keys.finish()
                 command = call["command"]
+                keys = KeysCheck(self, command)
+                previous = None
                 continue
             argv, info = call["argv"], call["info"]
             self.assertTrue(argv, "bare herdr was run")
+            if argv[:2] == ["agent", "get"] and info.get("name"):
+                keys.seen(str(info["name"]), info.get("status"))
+            if argv[:2] == ["agent", "send-keys"]:
+                keys.check(argv, info, previous, call["exit"])
+            if argv[:2] == ["agent", "read"]:
+                self.assertIn(command[:1] and command[0], READ_COMMANDS, "%s read a screen: %s" % (command[:1], argv))
+                keys.read.add(argv[2])
+                keys.text[argv[2]] = bool(info.get("input_text"))
+            if command[:1] == ["peek"]:
+                self.assertIn(argv[:2] if argv[:1] != ["--version"] else argv[:1], PEEK_CALLS, "peek ran %s" % argv)
+            previous = argv
             if command[:1] == ["inbox"]:
                 self.assertIn(argv[:2], INBOX_CALLS, "inbox ran more than the caller lookup: %s" % argv)
                 self.assertNotIn("--as", command, "inbox --as ran a herdr command: %s" % argv)
@@ -265,11 +296,14 @@ class FleetCase(unittest.TestCase):
             if argv[:2] == ["agent", "start"] and "--pane" in argv:
                 self.assertNotIn(argv[argv.index("--pane") + 1], strips, "agent started into a watcher pane")
             self.assertNotIn(tuple(argv[:2]), fake_herdr.FORBIDDEN, "forbidden command: %s" % argv)
-            self.assertFalse(any(a in ("send-keys", "send-text") for a in argv[:2]), argv)
+            if argv[:2] != ["agent", "send-keys"]:  # the one key command, checked by KeysCheck
+                self.assertFalse(any(a in ("send-keys", "send-text") for a in argv[:2]), argv)
             self.assertNotEqual(argv[:2], ["pane", "run"], argv)
             if argv[:2] == ["agent", "prompt"]:
                 self.assertFalse(info.get("owner_typing"), "%s prompted the pane the owner is typing in: %s"
                                  % (command[:1], argv))
+                self.assertFalse(info.get("input_held"), "%s prompted a pane whose input held text or showed no "
+                                 "prompt line (design 23.11): %s" % (command[:1], argv))
                 allowed = ("idle", "done", None) + (("working",) if typed_ahead_allowed(command, argv, info) else ())
                 self.assertIn(info.get("target_status"), allowed,
                               "%s prompted an agent in state %s: %s" % (command[:1], info.get("target_status"), argv))
@@ -283,6 +317,19 @@ class FleetCase(unittest.TestCase):
                 self.assertFalse(info.get("had_agent"), "closed a pane hosting an agent: %s" % argv)
             if argv[:2] == ["workspace", "close"] and call["exit"] == 0:
                 self.assertTrue(info.get("created"), "closed a workspace herdr-fleet did not create")
+        keys.finish()
+
+    def interrupt_keys(self, command: List[str], kind: str) -> Optional[List[str]]:
+        """The keys `interrupt` may press for ``kind``: the fleet file's ``[interrupt]``
+        entry, else the plugin config's, else the harness's own copy of the defaults (the
+        tables are read here with the fake's TOML reader, not the plugin's)."""
+        fleet = fake_herdr.interrupt_table(fleet_file(command, self.env, self.repo))
+        folder = self.env.get("HERDR_PLUGIN_CONFIG_DIR") or self.world.get("config_dir")
+        config = fake_herdr.interrupt_table(os.path.join(folder, "config.toml")) if folder else {}
+        for table in (fleet, config, INTERRUPT_DEFAULTS):
+            if kind in table:
+                return list(table[kind])
+        return None
 
     def assert_rename(self, command: List[str], argv: List[str], info: Dict) -> None:
         """Invariant 20: a `pane rename` names a pane hosting a seat of the fleet, to that
@@ -298,6 +345,74 @@ class FleetCase(unittest.TestCase):
         self.assertTrue(info.get("seat"), "renamed a pane that hosts no seat of the fleet: %s" % argv)
         self.assertEqual(info.get("label"), info.get("wanted"),
                          "renamed %s's pane to a name that is not its wanted name: %s" % (info.get("seat"), argv))
+
+
+class KeysCheck:
+    """Invariant 21 for one command's calls (design 23.7, 23.9)."""
+
+    def __init__(self, case: "FleetCase", command: List[str]):
+        self.case = case
+        self.command = list(command)
+        self.status: Dict[str, Optional[str]] = {}   # agent name -> state at its last `agent get`
+        self.read: set = set()                       # targets this command read the screen of
+        self.text: Dict[str, bool] = {}              # target -> its last `agent read` showed text in the input
+        self.cleared: Dict[str, int] = {}            # interrupt: ctrl+u per target (design 23.11)
+        self.enters: Dict[str, int] = {}
+        self.pressed: Dict[str, Dict] = {}           # interrupt: name -> {kind, keys, failed}
+
+    def seen(self, name: str, status: Optional[str]) -> None:
+        self.status[name] = status
+
+    def check(self, argv: List[str], info: Dict, previous: Optional[List[str]], code: int) -> None:
+        case, command = self.case, self.command
+        what = command[:1] and command[0]
+        case.assertNotIn(what, NO_KEYS_COMMANDS, "%s sent keys: %s" % (command[:1], argv))
+        case.assertNotIn("--dry-run", command, "a dry run sent keys: %s" % argv)
+        sent = info.get("keys") or argv[3:]
+        case.assertTrue(sent, "send-keys without a key: %s" % argv)
+        for key in sent:
+            case.assertIn(key, KEYS, "a key outside enter, esc, ctrl+c: %s" % argv)
+        name = str(info.get("name") or info.get("target") or "")
+        if what in ENTER_COMMANDS:
+            case.assertEqual(sent, ["enter"], "%s pressed %s: %s" % (what, sent, argv))
+            case.assertTrue(info.get("exit_dialog"), "enter without the highlighted exit confirmation on screen: %s"
+                            % argv)
+            case.assertEqual((previous or [])[:3], ["agent", "read", argv[2]],
+                             "enter not right after an `agent read` of %s: %s" % (argv[2], argv))
+            self.enters[name] = self.enters.get(name, 0) + 1
+            case.assertEqual(self.enters[name], 1, "a second enter for %s in one command" % name)
+            return
+        case.assertEqual(what, "interrupt", "%s sent keys: %s" % (command[:1], argv))
+        if "ctrl+u" in sent:  # design 23.11: one, alone, right after a read that showed text in the input
+            case.assertEqual(sent, ["ctrl+u"], "ctrl+u with other keys: %s" % argv)
+            case.assertTrue(self.text.get(argv[2]), "ctrl+u without an agent read showing text in %s's input"
+                            % argv[2])
+            self.cleared[name] = self.cleared.get(name, 0) + 1
+            case.assertEqual(self.cleared[name], 1, "a second ctrl+u for %s in one command" % name)
+            return
+        record = self.pressed.setdefault(name, {"kind": info.get("kind"), "keys": [], "failed": False})
+        if not record["keys"]:
+            case.assertEqual(self.status.get(name), "working",
+                             "interrupt pressed keys in %s, which was %s at its last agent get"
+                             % (name, self.status.get(name)))
+            case.assertIn(argv[2], self.read, "interrupt pressed keys in %s without reading its screen" % name)
+        if code == 0:
+            record["keys"].extend(sent)
+        else:
+            record["failed"] = True
+
+    def finish(self) -> None:
+        for name, record in self.pressed.items():
+            expected = self.case.interrupt_keys(self.command, str(record["kind"]))
+            self.case.assertIsNotNone(expected, "interrupt pressed keys for kind %s, which has none" % record["kind"])
+            if record["failed"]:
+                self.case.assertEqual(record["keys"], expected[:len(record["keys"])], name)
+            else:
+                self.case.assertEqual(record["keys"], expected, "interrupt pressed %s in %s, not the kind's %s"
+                                      % (record["keys"], name, expected))
+            if record["kind"] == "claude":
+                self.case.assertLessEqual(record["keys"].count("ctrl+c"), 1, "two ctrl+c to a Claude seat")
+        self.pressed = {}
 
 
 def fleet_file(argv, env: Dict[str, str], repo: str) -> str:

@@ -1,8 +1,9 @@
 """Operations that change the fleet: up (design 4.1, with the watcher strip of
 section 19), restart (4.3), swap (4.4), kickoff (4.5) and down (4.6), plus
-``go`` (22.2), ``ui`` and ``install-cli``. Each of up, restart, swap and kickoff
-ends by naming the seats' panes (``labels.apply``, design 22.1); ``down`` clears
-the name of a seat pane it leaves open at a shell prompt.
+``go`` (22.2), ``peek`` (23.6), ``interrupt`` (23.7), ``ui`` and ``install-cli``.
+Each of up, restart, swap and kickoff ends by naming the seats' panes
+(``labels.apply``, design 22.1); ``down`` clears the name of a seat pane it
+leaves open at a shell prompt.
 
 Each operation returns a ``Report``; ``cli`` prints it and maps it to an exit
 code. Text reaches agents only through ``seats.safe_prompt``; agents start
@@ -23,13 +24,14 @@ from herdr_fleet import PLUGIN_ID, inbox, labels, presence, watchpane
 from herdr_fleet.bringup import (claim_seat, ensure_seat, follow_pane, label_for, label_of, require_caller_context,
                                 resolve_target, send_kickoffs, start_claimed, start_seat)
 from herdr_fleet.checks import drift_reasons, is_adopted
-from herdr_fleet.context import EXIT_OK, EXIT_PARTIAL, Ctx, Report, UsageError
+from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, Report, UsageError
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import HerdrError, describe, has_agent, pane_move_argv, render_cmd, start_argv
-from herdr_fleet.messages import OWNER, drop_queued, resolve_targets
+from herdr_fleet.messages import OWNER, drop_queued, interrupt_entry, record, resolve_sender, resolve_targets
 from herdr_fleet.placement import Target, existing_panes, place_chain, place_grid
-from herdr_fleet.seats import (QUIT_CONFIG_HINT, SETTLED, at_shell_prompt, describe_foreground,
-                               live_by_name, quit_agent, quit_command)
+from herdr_fleet.seats import (DEFAULT_INTERRUPT_WAIT_MS, EXIT_DIALOG_LINES, QUIT_CONFIG_HINT, SETTLED,
+                               at_shell_prompt, describe_foreground, dialog_first_line, interrupt_agent,
+                               interrupt_keys, live_by_name, quit_agent, quit_command, state_words)
 from herdr_fleet.state import pane_moved, prune_state
 
 WAIT_UNTIL = ("idle", "done", "blocked")
@@ -270,7 +272,7 @@ def settle(ctx: Ctx, seat: Seat, agent: Dict, wait_ms: Optional[int], report: Re
         status = str(agent.get("agent_status") or "unknown")
     if status in ("blocked", "unknown"):
         report.add(seat.name, "refused", "agent is %s; herdr-fleet never prompts, quits or restarts a %s agent"
-                   % (status, status), "partial")
+                   % (state_words(status), status), "partial")
         return None
     if status == "working":
         report.add(seat.name, "refused", "agent is working; pass --wait MS to let it settle first", "partial")
@@ -298,7 +300,8 @@ def _quit_live(ctx: Ctx, seat: Seat, agent: Dict, report: Report, then: str = ""
                    % (seat.name, live_kind, agent.get("agent_status"), pane, seat.name,
                       shlex.quote(command), then))
         return pane
-    outcome = quit_agent(ctx.herdr, ctx.clock, seat.name, pane, command, ctx.quit_timeout_ms())
+    outcome = quit_agent(ctx.herdr, ctx.clock, seat.name, pane, command, ctx.quit_timeout_ms(),
+                         answer_exit=ctx.keys_allowed)  # design 23.7: never from a popup
     if not outcome.ok:
         report.add(seat.name, outcome.status, outcome.detail, "partial" if outcome.status == "refused" else "fail")
         return None
@@ -522,6 +525,140 @@ def op_go(ctx: Ctx, name: str) -> Tuple[int, str]:
     ctx.herdr.agent_focus(target.herdr)
     return EXIT_OK, "focused %s (%s, %s)" % (name, agent.get("pane_id") or target.herdr,
                                              agent.get("agent_status") or "unknown")
+
+
+# -- peek and interrupt --------------------------------------------------------------------
+
+PEEK_LINES = 30  # design 23.6
+
+
+def op_peek(ctx: Ctx, name: str, lines: int = PEEK_LINES) -> Tuple[int, str]:
+    """Design 23.6: the last ``lines`` screen lines of a seat, a contact or a live agent
+    (resolved as ``send`` resolves a target), through ``agent read``, and nothing else:
+    nothing is logged, recorded or moved. Returns (exit code, text): an absent seat or a
+    contact that cannot be reached is exit 3; an unknown name or ``owner`` a usage error."""
+    if lines < 1:
+        raise UsageError("--lines takes a number of lines, 1 or more")
+    if name == OWNER:
+        raise UsageError("owner is not a pane; nothing to read")
+    target = resolve_targets(ctx, [name], ctx.herdr.agent_list())[0]
+    if target.problem or not target.herdr:
+        state, _, why = (target.problem or "absent").partition(": ")
+        return EXIT_PARTIAL, "%s is %s%s; nothing to read" % (name, state, " (%s)" % why if why else "")
+    try:
+        text = ctx.herdr.agent_read(target.herdr, lines)
+    except HerdrError as exc:
+        if "not_found" in exc.code:
+            return EXIT_PARTIAL, "%s is absent; nothing to read" % name
+        raise
+    return EXIT_OK, text.rstrip("\n")
+
+
+def op_interrupt(ctx: Ctx, name: str, wait_ms: Optional[int] = None, as_name: Optional[str] = None) -> Tuple[int, str]:
+    """Design 23.7: press the kind's interrupt keys (``seats.INTERRUPT_KEYS``, else
+    ``[interrupt]`` in the fleet file, then the plugin config) in a seat of this fleet that
+    is ``working`` right now, then wait up to ``wait_ms`` for it to be idle or done. Every
+    other state is refused (exit 3), and so are the caller's own seat, a kind without keys,
+    a seat whose pane the owner is typing in (the presence guard of 21.2) and, from the
+    screen read just before the keys (``agent read``, invariant 21), a seat showing a
+    highlighted numbered choice: a dialog appearing before herdr reports it ``blocked``,
+    which a key could answer. Contacts and other agents are a usage error. Design 23.11:
+    after a successful interrupt the prompt line is read again, and when Claude Code put
+    the interrupted prompt back into it, one ``ctrl+u`` clears it (exit 3 when text still
+    remains). Logged as an ``interrupt`` entry. CLI only: no manifest action, no popup,
+    never the watcher. Returns (exit code, line)."""
+    wait_ms = DEFAULT_INTERRUPT_WAIT_MS if wait_ms is None else wait_ms
+    if wait_ms <= 0:
+        raise UsageError("--wait takes milliseconds, more than 0")
+    fleet = ctx.fleet
+    seat = fleet.seat(name)
+    if seat is None:
+        if name == OWNER:
+            what = "owner is not a seat"
+        elif fleet.contact(name) is not None:
+            what = "%s is a contact" % name
+        else:
+            what = "%s is not a seat of %s" % (name, fleet.path)
+        raise UsageError("interrupt is for this fleet's seats (%s)" % what)
+    caller = resolve_sender(ctx, as_name)
+    try:
+        agent = ctx.herdr.agent_get(name)
+    except HerdrError as exc:
+        if "not_found" in exc.code:
+            return EXIT_PARTIAL, "nothing to interrupt: %s is absent" % name
+        raise
+    status = str(agent.get("agent_status") or "unknown")
+    pane = str(agent.get("pane_id") or "")
+    if pane and pane == ctx.invocation.pane_id:
+        return EXIT_PARTIAL, "refused %s: it is the caller's own agent; interrupt it yourself" % name
+    if status != "working":
+        why = " (a dialog is open)" if status == "blocked" else ""
+        return EXIT_PARTIAL, "nothing to interrupt: %s is %s%s" % (name, status, why)
+    kind = str(agent.get("agent") or seat.kind)
+    keys = interrupt_keys(kind, fleet.interrupt, ctx.config.interrupt)
+    if not keys:
+        return EXIT_PARTIAL, 'no interrupt keys known for %s; set [interrupt] %s = ["ctrl+c"]' % (kind, kind)
+    try:
+        held = presence.typing_at(ctx.herdr, agent)
+    except HerdrError as exc:
+        return EXIT_FAIL, "failed %s: presence check: %s; no keys sent" % (name, describe(exc))
+    if held:
+        return EXIT_PARTIAL, "refused %s: %s; no keys sent" % (name, held)
+    try:
+        dialog = dialog_first_line(ctx.herdr.agent_read(name, EXIT_DIALOG_LINES))
+    except HerdrError as exc:
+        if "not_found" in exc.code:
+            return EXIT_PARTIAL, "nothing to interrupt: %s is absent" % name
+        return EXIT_FAIL, "failed %s: reading its screen: %s; no keys sent" % (name, describe(exc))
+    if dialog is not None:  # a key could answer it: never another agent's prompt
+        return EXIT_PARTIAL, "refused %s: a dialog is on screen (\"%s\"); no keys sent" % (name, dialog)
+    outcome = interrupt_agent(ctx.herdr, ctx.clock, name, keys, wait_ms)
+    sent = list(outcome.agent.get("sent") or [])
+    cleanup = _clear_input(ctx, name, kind) if outcome.ok else None
+    if cleanup and cleanup != "untouched":
+        sent.append("ctrl+u")
+    if sent:
+        record(ctx, interrupt_entry(caller, name, sent, "failed" if outcome.status == "failed" else outcome.status))
+    if outcome.status == "failed":
+        return EXIT_FAIL, "failed %s: %s; %d of %d keys sent" % (name, outcome.detail, len(sent), len(keys))
+    if outcome.ok:
+        line = "interrupted %s (%s)" % (name, outcome.status)
+        if cleanup == "cleared":
+            return EXIT_OK, line + "; cleared the interrupted prompt from its input"
+        if cleanup in ("held", "untouched"):
+            return EXIT_PARTIAL, line + "; its input still holds text; press Ctrl-U there before sending it anything"
+        return EXIT_OK, line
+    after = "%s s" % format(wait_ms / 1000.0, "g")
+    if outcome.status == "working":
+        return EXIT_PARTIAL, "%s still working after %s; nothing more sent" % (name, after)
+    if outcome.status == "absent":
+        return EXIT_PARTIAL, "%s is absent after the keys; nothing more sent" % name
+    return EXIT_PARTIAL, "%s is %s after %s; nothing more sent" % (name, state_words(outcome.status), after)
+
+
+def _input_line(ctx: Ctx, name: str, kind: str) -> Optional[str]:
+    """The seat's prompt line (``agent read NAME --lines 12``), or None when none is on
+    screen or herdr cannot say."""
+    try:
+        return presence.prompt_line(ctx.herdr.agent_read(name, presence.SCREEN_LINES), kind)
+    except HerdrError:
+        return None
+
+
+def _clear_input(ctx: Ctx, name: str, kind: str) -> Optional[str]:
+    """Design 23.11: after an interrupt Claude Code may put the interrupted prompt back into
+    the input line, where the next paste would join it. Read the line; when it holds text,
+    press ``ctrl+u`` once (the only place that key is sent) and read again. Returns None
+    (nothing to clear, or a kind whose line cannot be read), ``cleared``, ``held`` (text is
+    still there after the key) or ``untouched`` (the key itself failed)."""
+    if not presence.checkable(kind) or not presence.holds_text(_input_line(ctx, name, kind), kind):
+        return None
+    try:
+        ctx.herdr.agent_send_keys(name, ["ctrl+u"])
+    except HerdrError:
+        return "untouched"
+    after = _input_line(ctx, name, kind)
+    return "cleared" if after is not None and not presence.holds_text(after, kind) else "held"
 
 
 # -- ui and install-cli ------------------------------------------------------------------

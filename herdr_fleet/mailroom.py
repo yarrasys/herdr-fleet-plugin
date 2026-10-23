@@ -8,8 +8,9 @@
   guard, 21.2). ``owner`` gets a notification.
 - ``inbox`` is the pull side: the caller's own mailbox, listed with positions,
   read (printed, long bodies cut at ``inbox_print_max`` unless ``--full``, and
-  moved to ``cur/``), counted, or replayed (``--history``: ``cur/`` files and
-  log-only sends merged);
+  moved to ``cur/``), waited for (``--wait``: a filesystem poll every second
+  until something arrives, then ``--read``; design 23.2), counted, or replayed
+  (``--history``: ``cur/`` files and log-only sends merged);
   ``--redeliver`` moves a message from ``cur/`` back to ``new/``. It runs no
   herdr command except the caller lookup, and none with ``--as``.
 - ``inbox --hook stop|prompt`` (design 18.7) is the same pull from inside a
@@ -31,13 +32,13 @@ from typing import Dict, List, Optional, Sequence, TextIO, Tuple
 
 from herdr_fleet import contacts as contact_mod
 from herdr_fleet import crossfleet, inbox, seen
-from herdr_fleet.context import EXIT_FAIL, EXIT_OK, Ctx, UsageError, resolve_caller
+from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, resolve_caller
 from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
 from herdr_fleet.messages import (HOLD, OWNER, Drop, agent_state, caller_record, compose_prompt, delivered_entry,
                                   dry_hold, expire_due, first_line, notify_owner, place, prompt_mailbox, queued_in,
                                   read, record, settle, since_label)
-from herdr_fleet.seats import SEND_ALLOWED, SETTLED
+from herdr_fleet.seats import SEND_ALLOWED, SETTLED, state_words
 
 # -- deliver ---------------------------------------------------------------------------------
 
@@ -144,7 +145,7 @@ def deliver_one(ctx: Ctx, name: str, agents: Sequence[Dict], waiting: List[Messa
         observed[name] = "absent" if problem else state
     ahead = state == "working" and now
     if problem or (state not in SETTLED and not ahead):
-        return "%s: %s, %d left queued" % (name, state, count), EXIT_OK, None
+        return "%s: %s, %d left queued" % (name, state_words(state), count), EXIT_OK, None
     if ctx.dry_run:
         hold = dry_hold(ctx, target)  # design 21.2: the guard only reads
         if hold:
@@ -175,7 +176,7 @@ def _line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
     if drop.status == "empty":
         return "nothing queued for %s" % name, EXIT_OK
     if drop.status == "refused":
-        return "%s: %s, %d left queued" % (name, drop.state, len(drop.waiting)), EXIT_OK
+        return "%s: %s, %d left queued" % (name, state_words(drop.state), len(drop.waiting)), EXIT_OK
     if drop.status == "typing":  # design 21.2: `X: owner typing in w1:p2, 3 left queued`
         return "%s: %s, %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_OK
     return "failed %s: %s; %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_FAIL
@@ -208,13 +209,25 @@ def tags(message: Message) -> str:
     return "".join(p + "  " for p in parts)
 
 
+WAIT_POLL_S = 1.0  # design 23.2: `inbox --wait` looks at the mailbox directory every second
+
+
 def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, count: bool = False,
              history: Optional[str] = None, redeliver: Optional[str] = None, as_json: bool = False,
-             full: bool = False) -> int:
-    """Design 18.5 item 4 and 20.1, 20.3, 20.4: the caller's own mailbox."""
+             full: bool = False, wait: bool = False, timeout_ms: Optional[int] = None) -> int:
+    """Design 18.5 item 4 and 20.1, 20.3, 20.4, 23.2: the caller's own mailbox. ``wait``
+    blocks until the mailbox holds a message not past its ttl (FYIs count), then reads it
+    as ``--read`` does; with ``timeout_ms`` it gives up after that long (exit 3)."""
     repo = ctx.fleet.repo
+    if timeout_ms is not None and not wait:
+        raise UsageError("--timeout goes with --wait")
+    if wait and (count or history is not None or redeliver):
+        raise UsageError("--wait reads what arrives; it takes neither --count, --history nor --redeliver")
+    if timeout_ms is not None and timeout_ms < 0:
+        raise UsageError("--timeout takes milliseconds, 0 or more")
     if history is not None and not NAME_RE.match(history):
         raise UsageError("--history %r is not a name" % history)
+    read_all = read_all or wait
     if full and not (read_all or history is not None):
         raise UsageError("--full goes with --read or --history")
     limit = None if full else ctx.fleet.inbox_print_max
@@ -223,16 +236,14 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
     caller = lookup_caller(ctx, as_name)
     if history is not None:
         return _history(ctx, caller, history, as_json, limit)
-    if not inbox.has_queued(repo, caller):
-        messages: List[Message] = []
-    else:
-        with inbox.locked(repo, caller):
-            expire_due(ctx, caller)
-            messages = queued_in(ctx, caller)
-            if read_all and messages:
-                for message in messages:
-                    inbox.move(repo, message, CUR)
-                    record(ctx, delivered_entry(message, "inbox"))
+    deadline = None if timeout_ms is None else ctx.clock.monotonic() + timeout_ms / 1000.0
+    while True:
+        if wait and not _await_mail(ctx, caller, deadline):
+            ctx.say("nothing arrived in %s" % wait_label(timeout_ms or 0))
+            return EXIT_PARTIAL
+        messages = _take(ctx, caller, read_all)
+        if messages or not wait:  # empty after the wait: the watcher took it first; wait on
+            break
     if count:
         ctx.say(json.dumps({"name": caller, "count": len(messages)}) if as_json else str(len(messages)))
     elif as_json:
@@ -247,6 +258,46 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
             ctx.say("%d. #%s  %s  %s  %s%s" % (index, message.short, since_label(message.time), message.sender,
                                               tags(message), first_line(message.body)))
     return EXIT_OK
+
+
+def _take(ctx: Ctx, name: str, read_all: bool) -> List[Message]:
+    """The mailbox's queued messages after expiring what is past its ttl, under the mailbox
+    lock; with ``read_all`` they move to ``cur/``, each logged ``delivered`` via ``inbox``."""
+    repo = ctx.fleet.repo
+    if not inbox.has_queued(repo, name):
+        return []
+    with inbox.locked(repo, name):
+        expire_due(ctx, name)
+        messages = queued_in(ctx, name)
+        if read_all:
+            for message in messages:
+                inbox.move(repo, message, CUR)
+                record(ctx, delivered_entry(message, "inbox"))
+    return messages
+
+
+def _await_mail(ctx: Ctx, name: str, deadline: Optional[float]) -> bool:
+    """Design 23.2: look at the mailbox every WAIT_POLL_S (files only; no herdr command)
+    until it holds a message not past its ttl; False when the ``deadline`` (of the fake
+    or real clock) passed first. Without one it waits until the agent's own tool timeout
+    ends the command. The read that follows takes the mailbox lock, as the watcher does,
+    so a message the watcher delivered meanwhile is not read twice: the wait goes on."""
+    repo = ctx.fleet.repo
+    while True:
+        if inbox.has_queued(repo, name):
+            now = inbox.now_utc()
+            if any(not inbox.is_due(m, now) for m in inbox.read_box(repo, name, NEW)):
+                return True
+        if deadline is not None and ctx.clock.monotonic() >= deadline:
+            return False
+        ctx.clock.sleep(WAIT_POLL_S if deadline is None else
+                        max(0.0, min(WAIT_POLL_S, deadline - ctx.clock.monotonic())))
+
+
+def wait_label(ms: int) -> str:
+    """``10m`` for 600000 (the age format of design 20.2), ``45 s`` under a minute."""
+    seconds = ms / 1000.0
+    return inbox.age_label(seconds) if seconds >= 60 else "%s s" % format(seconds, "g")
 
 
 def _as_dict(message: Message, body: bool = False) -> Dict:

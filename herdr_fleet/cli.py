@@ -22,7 +22,8 @@ from herdr_fleet.context import (EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, C
 from herdr_fleet.fleetfile import FleetError
 from herdr_fleet.herdr import Herdr, HerdrError, Runner, describe, find_binary
 from herdr_fleet.menu import run_menu, wait_for_enter
-from herdr_fleet.ops import op_down, op_go, op_install_cli, op_kickoff, op_restart, op_swap, op_ui, op_up
+from herdr_fleet.ops import (PEEK_LINES, op_down, op_go, op_install_cli, op_interrupt, op_kickoff, op_peek,
+                             op_restart, op_swap, op_ui, op_up)
 from herdr_fleet.scaffold import available_examples, run_init
 from herdr_fleet.seats import Clock
 from herdr_fleet.state import StateError
@@ -117,7 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="seat, contact, owner or live agent names, then the text; with --file every item is a "
                         "target, and with --all a single item is the text. Options may go anywhere.")
     p.add_argument("--file", dest="message_file", metavar="PATH", help="read the text from this UTF-8 file")
-    p.add_argument("--as", dest="as_name", metavar="NAME", help="sender name (default: your pane's agent, or owner)")
+    p.add_argument("--as", dest="as_name", metavar="NAME",
+                   help="sender name (default: your pane's agent, or the contact it matches; owner from a shell)")
     p.add_argument("--when-ready", dest="when_ready", metavar="MS", type=int,
                    help="wait up to MS ms for each target to be idle or done; refuse it if not")
     p.add_argument("--all", dest="all_seats", action="store_true", help="every live seat except the sender")
@@ -152,10 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with names: type the whole queue ahead to a seat that is working")
     p.add_argument("--dry-run", action="store_true", help="say what would be delivered and send nothing")
 
-    p = sub.add_parser("inbox", parents=[fleet], help="your own queued messages: list, read, count, history",
+    p = sub.add_parser("inbox", parents=[fleet], help="your own queued messages: list, read, wait, count, history",
                        description="Your mailbox (.herdr/inbox/<you>): by default list what is queued. Runs no "
                                    "herdr command except finding who you are, and none with --as.")
-    p.add_argument("--as", dest="as_name", metavar="NAME", help="whose mailbox (default: your pane's agent, or owner)")
+    p.add_argument("--as", dest="as_name", metavar="NAME",
+                   help="whose mailbox (default: your pane's agent, or the contact it matches; owner from a shell)")
     action = p.add_mutually_exclusive_group()
     action.add_argument("--read", action="store_true", help="print every queued message in full and mark it read")
     action.add_argument("--count", action="store_true", help="print the number of queued messages only")
@@ -165,6 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--hook", choices=("stop", "prompt"),
                         help="run as a Claude Code hook (installed by `hooks install`): reads the hook JSON on "
                              "stdin, prints hookSpecificOutput or nothing, always exits 0")
+    p.add_argument("--wait", action="store_true",
+                   help="wait until a message arrives (FYIs count), then read it as --read does; costs nothing "
+                        "while it waits (it looks at the mailbox's files every second)")
+    p.add_argument("--timeout", metavar="MS", type=int,
+                   help="with --wait: give up after MS milliseconds (`nothing arrived in 10m`, exit 3)")
     p.add_argument("--full", action="store_true",
                    help="with --read or --history: print long messages in full (default: up to inbox_print_max "
                         "bytes, then the first lines and the file's path)")
@@ -195,13 +203,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("ack", parents=[fleet], help="settle replies you owe by hand; sends nothing",
                        description="Log an acknowledgement for each NAME whose message you owe a reply, so it "
-                                   "stops awaiting. Writes .herdr/messages.jsonl only; nothing is sent.")
+                                   "stops awaiting; `ack #id --reason TEXT` closes the debt of that message "
+                                   "whoever owes it. Writes .herdr/messages.jsonl only; nothing is sent.")
     p.add_argument("names", nargs="*", metavar="NAME", help="who you owe a reply (seat, contact, owner, ...)")
     p.add_argument("--all", dest="all_owed", action="store_true", help="every message you currently owe")
     p.add_argument("--older-than", dest="older_than", metavar="DURATION",
                    help="every message you owe that was delivered more than DURATION ago (30m, 2h, 1d); "
                         "names and ids restrict it")
-    p.add_argument("--as", dest="as_name", metavar="NAME", help="who you are (default: your pane's agent, or owner)")
+    p.add_argument("--reason", metavar="TEXT",
+                   help="with message ids only: close each one's debt whoever owes it (logged with you as `by`)")
+    p.add_argument("--as", dest="as_name", metavar="NAME",
+                   help="who you are (default: your pane's agent, or the contact it matches; owner from a shell)")
     p.add_argument("--dry-run", action="store_true", help="list what would be acknowledged and write nothing")
 
     p = sub.add_parser("log", parents=[common], help="show the message log (.herdr/messages.jsonl)")
@@ -232,6 +244,26 @@ def build_parser() -> argparse.ArgumentParser:
                        description="Focus the pane of NAME, a seat, a contact or a live herdr agent name (as "
                                    "`send` resolves it), with `herdr agent focus`. Writes nothing.")
     p.add_argument("name", metavar="NAME", help="seat, contact or live agent name")
+
+    p = sub.add_parser("peek", parents=[fleet], help="print the last screen lines of a seat, contact or agent",
+                       description="Print the last N screen lines of NAME (a seat, a contact or a live herdr agent, "
+                                   "resolved as `send` resolves it) with `herdr agent read`, and nothing else. "
+                                   "Read-only: nothing is logged or moved.")
+    p.add_argument("name", metavar="NAME", help="seat, contact or live agent name")
+    p.add_argument("--lines", metavar="N", type=int, default=PEEK_LINES,
+                   help="how many lines (default %d)" % PEEK_LINES)
+
+    p = sub.add_parser("interrupt", parents=[fleet], help="stop a working seat's turn with its kind's keys",
+                       description="For a seat of this fleet that is working: press its kind's interrupt keys "
+                                   "(claude: one ctrl+c; agy: ctrl+c twice; [interrupt] in the fleet file or the "
+                                   "plugin config overrides a kind, with ctrl+c, esc and enter only), then wait "
+                                   "for it to be idle or done. Any other state is refused. Logged in "
+                                   ".herdr/messages.jsonl.")
+    p.add_argument("name", metavar="NAME", help="a seat of this fleet")
+    p.add_argument("--wait", metavar="MS", type=int,
+                   help="how long to wait for idle or done after the keys (default 10000)")
+    p.add_argument("--as", dest="as_name", metavar="NAME",
+                   help="who you are, for the log (default: your pane's agent, or the contact it matches)")
 
     p = sub.add_parser("tile", parents=[common],
                        help="re-tile the live seats in place ([layout] grid or chain); moves panes only")
@@ -341,14 +373,15 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     if command == "worktrees":  # git only; no herdr command
         return op_worktrees(ctx, args.seat, args.json)
     if command == "ack":  # appends to the message log; herdr only to learn who you are (without --as)
-        return op_ack(ctx, args.names, args.all_owed, args.as_name, args.older_than)
+        return op_ack(ctx, args.names, args.all_owed, args.as_name, args.older_than, args.reason)
     if command == "inbox":  # your mailbox; herdr only to learn who you are (without --as)
         if args.hook:  # a Claude Code hook: silent on every error (design 18.7)
-            if args.as_name or args.json or args.full:
-                raise UsageError("--hook takes neither --as, --json nor --full: the seat is the hook's own pane")
+            if args.as_name or args.json or args.full or args.wait or args.timeout is not None:
+                raise UsageError("--hook takes neither --as, --json, --full nor --wait: the seat is the hook's own "
+                                 "pane")
             return op_inbox_hook(ctx, args.hook, stdin)
         return op_inbox(ctx, args.as_name, args.read, args.count, args.history, args.redeliver, args.json,
-                        args.full)
+                        args.full, args.wait, args.timeout)
     if command == "hooks":  # edits .claude/settings.local.json only; no herdr command
         return op_hooks(ctx, args.remove)
     if command == "watch":  # the caller's pane plays no part: no caller lookup
@@ -371,6 +404,14 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         return run_menu(ctx, stdin, go=args.go)
     if command == "go":  # design 22.2: moves the owner's focus; writes nothing
         code, line = op_go(ctx, args.name)
+        ctx.say(line)
+        return code
+    if command == "peek":  # design 23.6: prints what `agent read` printed; writes nothing
+        code, text = op_peek(ctx, args.name, args.lines)
+        ctx.say(text)
+        return code
+    if command == "interrupt":  # design 23.7: the CLI is its only entry (no action, no popup)
+        code, line = op_interrupt(ctx, args.name, args.wait, args.as_name)
         ctx.say(line)
         return code
     note = _note(args)

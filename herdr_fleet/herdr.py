@@ -9,9 +9,12 @@ unparseable output and a missing binary.
 The client refuses, before spawning anything, the commands this plugin must
 never send (design section 7): bare ``herdr`` (it attaches the TUI),
 ``agent send-keys``, ``pane send-keys``, ``pane send-text`` and ``pane run``.
-Text reaches agents only through ``agent prompt``. The two display commands,
-``pane rename`` (a seat pane's border name, design 22.1) and ``agent focus``
-(``go``, 22.2), send nothing to the agent (invariant 20).
+Text reaches agents only through ``agent prompt``. The one exception is
+``agent_send_keys`` (design 23.7, invariants 1 and 21): the only way
+``agent send-keys`` is ever run, and only with the keys in ``SENDABLE_KEYS``;
+``run`` and ``text`` keep refusing it. The two display commands, ``pane
+rename`` (a seat pane's border name, design 22.1) and ``agent focus`` (``go``,
+22.2), send nothing to the agent (invariant 20).
 """
 
 from __future__ import annotations
@@ -31,6 +34,11 @@ FORBIDDEN = (
     ("pane", "send-text"),
     ("pane", "run"),
 )
+SEND_KEYS = ("agent", "send-keys")  # accepted only from ``Herdr.agent_send_keys`` (design 23.7)
+# Design 23.7 and 23.11: the only keys the plugin may ever press in an agent's pane. `esc` is
+# herdr's canonical Escape name; Enter answers the exit confirmation; Ctrl-C interrupts a
+# turn; Ctrl-U clears the prompt an interrupt put back into the input (`interrupt` only).
+SENDABLE_KEYS = ("enter", "esc", "ctrl+c", "ctrl+u")
 
 
 class HerdrError(Exception):
@@ -105,13 +113,15 @@ class Herdr:
 
     # -- transport -------------------------------------------------------
 
-    def _exec(self, argv: Sequence[str]) -> Tuple[int, str, str]:
+    def _exec(self, argv: Sequence[str], keys: bool = False) -> Tuple[int, str, str]:
         argv = [str(a) for a in argv]
         if not argv:
             raise HerdrError("forbidden_command", "refusing to run bare herdr (it attaches the TUI)")
-        if tuple(argv[:2]) in FORBIDDEN:
+        if tuple(argv[:2]) in FORBIDDEN and not (keys and tuple(argv[:2]) == SEND_KEYS):
             raise HerdrError(
                 "forbidden_command",
+                "herdr-fleet runs `herdr agent send-keys` only through Herdr.agent_send_keys (design 23.7)"
+                if tuple(argv[:2]) == SEND_KEYS else
                 "herdr-fleet never runs `herdr %s`; text reaches agents only through `agent prompt`"
                 % " ".join(argv[:2]),
                 argv,
@@ -123,7 +133,10 @@ class Herdr:
 
     def run(self, *argv: str) -> Dict:
         """Run a JSON command; return its ``result`` dict or raise HerdrError."""
-        code, out, err = self._exec(argv)
+        return self._json(argv, self._exec(argv))
+
+    def _json(self, argv: Sequence[str], answer: Tuple[int, str, str]) -> Dict:
+        code, out, err = answer
         if code != 0:
             raise _error_from(code, out, err, argv)
         try:
@@ -210,6 +223,27 @@ class Herdr:
             argv += ["--until", status]
         argv += ["--timeout", str(int(timeout_ms))]
         return dict(self.run(*argv).get("agent") or {})
+
+    def agent_read(self, target: str, lines: int) -> str:
+        """The last ``lines`` screen lines of an agent (``agent read TARGET --lines N``), plain
+        text like ``pane read``. ``quit_agent`` reads the exit confirmation with it (design
+        23.7) and ``peek`` prints it (23.6)."""
+        return self.text("agent", "read", target, "--lines", str(int(lines)))
+
+    def agent_send_keys(self, target: str, keys: Sequence[str]) -> Dict:
+        """Press ``keys`` in an agent's pane (``agent send-keys TARGET KEY...``): the only way
+        the plugin ever runs ``agent send-keys`` (design 23.7, invariants 1 and 21). Refuses,
+        before spawning anything, any key outside ``SENDABLE_KEYS`` and a target that would
+        read as an option. Its two callers decide when: one ``enter`` on the exit
+        confirmation the plugin's own quit provoked, and ``interrupt``'s keys (with one
+        ``ctrl+u`` after them when the interrupted prompt came back into the input, 23.11)."""
+        keys = [str(k) for k in keys]
+        target = str(target or "")
+        if not keys or any(k not in SENDABLE_KEYS for k in keys) or not target or target.startswith("-"):
+            raise HerdrError("forbidden_command", "herdr-fleet presses only %s, one agent at a time (asked: %s %s)"
+                             % (", ".join(SENDABLE_KEYS), target or "(no target)", " ".join(keys) or "(no keys)"))
+        argv = list(SEND_KEYS) + [target] + keys
+        return self._json(argv, self._exec(argv, keys=True))
 
     def agent_rename(self, target: str, name: str) -> Dict:
         return self.run("agent", "rename", target, name)

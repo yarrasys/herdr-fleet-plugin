@@ -137,7 +137,7 @@ class Waiters(WatchCase):
         self.behave(wait_results={"fablyn-dev": ["idle", "timeout"]}, status_after_wait={"fablyn-dev": ["blocked"]})
         code, out, _ = self.watch(cycles=3)
         self.assertEqual(code, 0)
-        self.assertIn("fablyn-dev blocked; still waiting", events(out))
+        self.assertIn("fablyn-dev blocked: a dialog is open; still waiting", events(out))  # design 23.5
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
         self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 1)
         self.assertEqual(len(self.argvs("agent", "wait", "fablyn-dev")), 4)  # idle, timeout, then one per pass

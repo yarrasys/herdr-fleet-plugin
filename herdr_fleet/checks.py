@@ -273,7 +273,7 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
             where = c["pane_id"] or "-"
             lines.append("  %s  %s  %s%s" % (c["name"], where, c["state"],
                                               "  (%s)" % c["note"] if c["note"] else ""))
-    lines.extend(messages.owed_lines(data.get("owed", [])))
+    lines.extend(messages.owed_lines(data.get("owed", []), hint=True))  # design 23.4: how to settle it
     queued = queued_line(data)
     watcher = data.get("watcher") or {}
     if queued or watchpane.shown(watcher):  # design 18.6 and 19.1: who delivers, then what waits
@@ -480,6 +480,8 @@ def _check_quit(ctx: Ctx, fleet: Fleet, add) -> None:
     config = ctx.config
     if config.error:
         add(("fail", "plugin config", config.error))
+    for problem in config.problems:  # design 23.7: an [interrupt] entry left out
+        add(("warn", "plugin config", problem))
     for seat in fleet.seats:
         command = quit_command(seat, seat.kind, config.quit)
         if command:

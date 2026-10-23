@@ -64,6 +64,22 @@ acts, writes it back and appends one JSON line to the call log (env
   text, as live herdr does even in JSON mode: ``world["screens"][pane]`` when a test set
   one (``type_in``, ``show_dialog``), else a rule, the empty prompt line of the pane's
   agent kind and a status line.
+- Keys and screens (design 23.7, 23.9): ``agent read TARGET --lines N`` prints the last N
+  lines of the agent's pane screen (as ``pane read``). ``agent send-keys TARGET KEY...``
+  records the keys, the agent's name, kind and state, and whether its screen then showed
+  the exit confirmation with the exit line highlighted (``exit_dialog``, judged here); an
+  ``enter`` on that screen removes the agent and puts the pane at a shell, and a ``ctrl+c``
+  to a ``working`` agent sets the next state of ``interrupt_results`` ({name: [state,
+  ...]}; ``done`` by default; ``absent`` removes the agent; with ``restore_prompt_on_interrupt``
+  (true, or a list of names) the agent's last prompt comes back into its prompt line, as
+  Claude Code does when interrupted while thinking, design 23.11), and ``ctrl+u`` empties
+  the scripted prompt line. ``agent read`` records ``input_text`` (the prompt line it
+  returned holds text) and every ``agent prompt`` ``input_held`` (the target's prompt line
+  held text, or none was on screen, whatever the focus). ``show_exit_dialog(world,
+  pane)`` puts the confirmation on screen (the agent ``blocked``, as herdr reports it);
+  ``dialog_on_quit`` ({name: screen}) makes the quit command show a screen instead of
+  quitting, ``exit_dialog_on_quit(world, name)`` the confirmation. Pane send-keys,
+  ``pane send-text`` and ``pane run`` stay forbidden.
 - The log records facts the safety tests assert on: the target's state (and name) at
   every ``agent prompt``, whether the target pane was then the owner's with text on its
   prompt line or no prompt line on screen (``owner_typing``, judged here with the fake's
@@ -90,7 +106,7 @@ from typing import Dict, List, Optional, Tuple
 KINDS = ["pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline", "omp", "mastracode",
          "opencode", "copilot", "kimi", "kiro", "droid", "amp", "grok", "hermes", "kilo", "qodercli",
          "qwen", "letta", "maki", "muse"]
-FORBIDDEN = (("agent", "send-keys"), ("pane", "send-keys"), ("pane", "send-text"), ("pane", "run"))
+FORBIDDEN = (("pane", "send-keys"), ("pane", "send-text"), ("pane", "run"))  # `agent send-keys`: design 23.7
 SHELL = {"name": "zsh", "argv0": "-zsh", "argv": ["-zsh"], "cmdline": "-zsh", "pid": 500}
 
 Result = Tuple[int, str, str]
@@ -225,6 +241,47 @@ def show_dialog(world: Dict, pane: str) -> None:
     world.setdefault("screens", {})[pane] = "\n".join(["\u23fa Bash(rm -rf build)", ""] + DIALOG) + "\n"
 
 
+# Design 23 facts: Claude Code's confirmation after `/exit` with background work open, as a
+# 16-line `agent read` shows it (the conversation above it, then the dialog under a rule).
+EXIT_DIALOG = "\n".join([
+    "\u23fa Started a background task: sleep 900",
+    "",
+    RULE,
+    "   Background work is running",
+    "   The following will stop when you exit:",
+    "",
+    "   shell \u00b7 sleep 900",
+    "",
+    "   \u276f 1. Exit and stop tasks",
+    "     2. Move to background and exit",
+    "     3. Stay",
+    "",
+    "   Enter to confirm \u00b7 Esc to cancel"]) + "\n"
+INTERRUPTED = "\u23bf  Interrupted \u00b7 What should Claude do instead?"
+
+
+def show_exit_dialog(world: Dict, pane: str, screen: Optional[str] = None) -> None:
+    """The exit confirmation (or ``screen``) is on the pane: herdr reports the agent blocked."""
+    world.setdefault("screens", {})[pane] = screen or EXIT_DIALOG
+    agent = world["panes"][pane].get("agent")
+    if agent:
+        agent["agent_status"] = "blocked"
+
+
+def exit_dialog_on_quit(world: Dict, name: str, screen: Optional[str] = None) -> None:
+    """The agent ``name`` answers its quit command with ``screen`` (default: the exit
+    confirmation) instead of quitting."""
+    world["behaviors"].setdefault("dialog_on_quit", {})[name] = screen or EXIT_DIALOG
+
+
+def shows_exit_dialog(screen: str) -> bool:
+    """The fake's own judgement (independent of the plugin's): the confirmation's lines are
+    on screen and the highlighted line is `Exit and stop tasks`."""
+    if "Background work is running" not in screen or "Exit and stop tasks" not in screen:
+        return False
+    return any(line.strip().startswith("\u276f") and "Exit and stop tasks" in line for line in screen.splitlines())
+
+
 def set_screen(world: Dict, pane: str, text: Optional[str]) -> None:
     """Script a screen verbatim (None: back to the default for the pane's agent)."""
     screens = world.setdefault("screens", {})
@@ -239,6 +296,35 @@ def screen_of(world: Dict, pane: str) -> str:
     return screens[pane] if pane in screens else default_screen(world, pane)
 
 
+def prompt_of(kind: str, text: str) -> Optional[str]:
+    """The text on the last prompt line of ``text`` for ``kind`` (this module's own glyph
+    table), or None when no line starts with the kind's glyph."""
+    found = None
+    for line in text.splitlines()[-12:]:
+        stripped = line.strip()
+        for glyph in GLYPHS.get(kind, ()):
+            if stripped.startswith(glyph):
+                found = stripped[len(glyph):].strip()
+                break
+    return found
+
+
+def line_holds_text(kind: str, line: Optional[str]) -> bool:
+    return bool(line) and line != PLACEHOLDERS.get(kind)
+
+
+def input_held(world: Dict, pane: str) -> bool:
+    """Design 23.11: does ``pane``'s prompt line hold text, or is no prompt line on screen,
+    whatever the focus? A kind this module has no glyph for cannot be judged (False), as
+    the plugin's guard passes such a kind."""
+    record = world["panes"].get(pane)
+    if not record or not record.get("agent") or not GLYPHS.get(record["agent"]["agent"]):
+        return False
+    kind = record["agent"]["agent"]
+    found = prompt_of(kind, screen_of(world, pane))
+    return found is None or line_holds_text(kind, found)
+
+
 def owner_typing(world: Dict, pane: str) -> bool:
     """Was ``pane`` the owner's pane (the focused chain) with text on its prompt line, or
     no prompt line on screen? Judged with this module's own table; a kind it does not
@@ -249,28 +335,32 @@ def owner_typing(world: Dict, pane: str) -> bool:
     ws = world["workspaces"].get(record["workspace_id"]) or {}
     if not ws.get("focused") or ws.get("active_tab_id") != record["tab_id"]:
         return False
-    glyphs = GLYPHS.get(record["agent"]["agent"])
-    if not glyphs:
-        return False
-    found = None
-    for line in screen_of(world, pane).splitlines()[-12:]:
-        stripped = line.strip()
-        for glyph in glyphs:
-            if stripped.startswith(glyph):
-                found = stripped[len(glyph):].strip()
-                break
-    if found is None:
-        return True
-    return bool(found) and found != PLACEHOLDERS.get(record["agent"]["agent"])
+    return input_held(world, pane)
+
+
+def clear_prompt(world: Dict, pane: str) -> None:
+    """Ctrl-U: the scripted screen's last prompt line loses its text (the glyph stays)."""
+    screens = world.get("screens") or {}
+    agent = world["panes"][pane].get("agent") or {}
+    glyphs = GLYPHS.get(agent.get("agent", ""), ())
+    if pane not in screens or not glyphs:
+        return
+    lines = screens[pane].split("\n")
+    for index in range(len(lines) - 1, -1, -1):
+        stripped = lines[index].strip()
+        glyph = next((g for g in glyphs if stripped.startswith(g)), None)
+        if glyph is not None:
+            lines[index] = lines[index][:len(lines[index]) - len(lines[index].lstrip())] + glyph
+            break
+    screens[pane] = "\n".join(lines)
 
 
 # Plugin panes carry their manifest title as their name (live herdr 0.9.5).
 PLUGIN_TITLES = {"watch": "Fleet watch", "status": "Fleet status", "manage": "Fleet", "go": "Fleet: go"}
 
 
-def fleet_names(path: Optional[str]) -> Dict[str, str]:
-    """{seat name: wanted pane name} from a fleet file (``label`` when set, else the
-    name); {} when there is no readable file. Parsed here, not by the plugin."""
+def read_toml(path: Optional[str]) -> Dict:
+    """A TOML file as a dict ({} when missing or unreadable), parsed here, not by the plugin."""
     if not path or not os.path.isfile(path):
         return {}
     try:
@@ -282,8 +372,22 @@ def fleet_names(path: Optional[str]) -> Dict[str, str]:
         from herdr_fleet._vendor import tomli as toml
     try:
         with open(path, "rb") as handle:
-            data = toml.load(handle)
+            return toml.load(handle)
     except (OSError, ValueError):
+        return {}
+
+
+def interrupt_table(path: Optional[str]) -> Dict[str, List[str]]:
+    """``[interrupt]`` of a fleet file or plugin config ({kind: keys}); {} without one."""
+    table = read_toml(path).get("interrupt")
+    return {str(k): list(v) for k, v in table.items() if isinstance(v, list)} if isinstance(table, dict) else {}
+
+
+def fleet_names(path: Optional[str]) -> Dict[str, str]:
+    """{seat name: wanted pane name} from a fleet file (``label`` when set, else the
+    name); {} when there is no readable file. Parsed here, not by the plugin."""
+    data = read_toml(path)
+    if not data:
         return {}
     names = {}
     for seat in data.get("agents") or []:
@@ -445,6 +549,8 @@ class Sim:
             return 99, "", "fake herdr: bare herdr would attach the TUI\n"
         if args[:2] == ["pane", "rename"]:  # recorded before any canned answer, for the safety check
             self._rename_facts(args[2:])
+        if args[:2] == ["agent", "send-keys"]:  # the same for keys (design 23.9)
+            self._keys_facts(args[2:])
         canned = self._canned(args)
         if canned is not None:
             return canned
@@ -505,6 +611,7 @@ class Sim:
                 del agent["unblock_after"]
                 agent["agent_status"] = "idle"
         self.info["status"] = agent["agent_status"]
+        self.info["name"], self.info["pane"] = agent.get("name"), pid
         return _ok({"agent": self._agent_record(pid), "type": "agent_info"}, "cli:agent:get")
 
     def _agent_start(self, args: List[str]) -> Result:
@@ -547,6 +654,7 @@ class Sim:
         self.info["target_status"] = status
         self.info["target_name"] = p["agent"].get("name")
         self.info["owner_typing"] = owner_typing(self.w, pid)
+        self.info["input_held"] = input_held(self.w, pid)  # design 23.11: whatever the focus
         if self.inbox:
             self.info["refusal_boxes"], self.info["refusal_ids"] = refusal_queued(self.inbox)
         if status == "blocked":
@@ -556,7 +664,10 @@ class Sim:
         error = self.b.get("prompt_errors", {}).get(name)
         if error:
             return _err(error, "prompt %s for %s" % (error, name))
-        if text in self.b.get("quit_texts", ["/exit", "/quit"]) and name not in self.b.get("ignore_quit", []):
+        dialog = self.b.get("dialog_on_quit", {}).get(name)
+        if text in self.b.get("quit_texts", ["/exit", "/quit"]) and dialog:
+            show_exit_dialog(self.w, pid, dialog)  # design 23: the confirmation instead of the exit
+        elif text in self.b.get("quit_texts", ["/exit", "/quit"]) and name not in self.b.get("ignore_quit", []):
             p["quitting"] = int(self.b.get("quit_polls", 1))
         return _ok({"agent": self._agent_record(pid), "type": "agent_info"}, "cli:agent:prompt")
 
@@ -593,6 +704,77 @@ class Sim:
         if after:
             agent["agent_status"] = after.pop(0)
         return _ok({"agent": record, "type": "agent_info"}, "cli:agent:wait")
+
+    def _agent_read(self, args: List[str]) -> Result:
+        """``agent read TARGET --lines N``: the agent's pane screen as plain text, like
+        ``pane read`` (design 23.6, 23.7)."""
+        pos, opts, _ = _opts(args, ("--lines", "--source", "--format"))
+        target = pos[0] if pos else ""
+        pid = self._resolve(target)
+        self.info["target"] = target
+        if pid is None:
+            return _err("agent_not_found", "no agent for %s" % target)
+        count = int((opts.get("--lines") or ["0"])[0] or 0)
+        agent = self.w["panes"][pid]["agent"]
+        lines = screen_of(self.w, pid).splitlines()
+        shown = lines[-count:] if count > 0 else lines
+        line = prompt_of(agent["agent"], "\n".join(shown))
+        self.info.update(pane=pid, lines=count, name=agent.get("name"),
+                         input_text=line_holds_text(agent["agent"], line))  # design 23.11, for ctrl+u
+        return 0, "\n".join(shown) + "\n", ""
+
+    def _agent_send_keys(self, args: List[str]) -> Result:
+        """``agent send-keys TARGET KEY...`` (design 23.7). The log records the keys and,
+        at that moment, the agent's name, kind and state and whether its screen showed the
+        exit confirmation with the exit line highlighted. ``enter`` on that screen ends the
+        agent (the pane is back at a shell); ``ctrl+c`` to a working agent sets the next
+        ``interrupt_results`` state (``done`` by default; ``absent`` ends the agent)."""
+        pos, _, _ = _opts(args, ())
+        target, keys = (pos[0] if pos else ""), pos[1:]
+        pid = self._resolve(target)
+        if pid is None:
+            return _err("agent_not_found", "no agent for %s" % target)
+        name = self.w["panes"][pid]["agent"].get("name") or pid
+        for key in keys:
+            agent = self.w["panes"][pid]["agent"]
+            if not agent:
+                break
+            if key == "enter" and shows_exit_dialog(screen_of(self.w, pid)):
+                set_screen(self.w, pid, None)
+                self._exit_agent(pid)
+            elif key == "ctrl+c" and agent["agent_status"] == "working":
+                script = self.b.get("interrupt_results", {}).get(name)
+                after = script.pop(0) if script else "done"
+                restore = self.b.get("restore_prompt_on_interrupt")
+                if after == "absent":
+                    set_screen(self.w, pid, None)
+                    self._exit_agent(pid)
+                elif restore is True or (isinstance(restore, list) and name in restore):
+                    agent["agent_status"] = after  # design 23.11: the interrupted prompt back in the line
+                    prompts = self.w["panes"][pid]["prompts"]
+                    last = " ".join((prompts[-1] if prompts else "the interrupted prompt").split())
+                    set_screen(self.w, pid, prompt_screen(agent["agent"], last))
+                else:
+                    agent["agent_status"] = after
+                    if agent["agent"] == "claude":
+                        set_screen(self.w, pid, INTERRUPTED + "\n" + prompt_screen("claude"))
+            elif key == "ctrl+u":
+                clear_prompt(self.w, pid)
+        return _ok({"type": "ok"}, "cli:agent:send-keys")
+
+    def _keys_facts(self, args: List[str]) -> None:
+        """What the safety check needs about an ``agent send-keys``, recorded before any
+        canned answer: the target, the keys, and the agent's name, kind and state and
+        whether its screen showed the highlighted exit confirmation at that moment."""
+        pos, _, _ = _opts(args, ())
+        target, keys = (pos[0] if pos else ""), pos[1:]
+        self.info.update(target=target, keys=keys)
+        pid = self._resolve(target)
+        if pid is None:
+            return
+        agent = self.w["panes"][pid]["agent"]
+        self.info.update(pane=pid, name=agent.get("name"), kind=agent["agent"], status=agent["agent_status"],
+                         exit_dialog=shows_exit_dialog(screen_of(self.w, pid)))
 
     def _agent_rename(self, args: List[str]) -> Result:
         pid = self._resolve(args[0])

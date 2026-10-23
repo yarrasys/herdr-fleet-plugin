@@ -195,7 +195,8 @@ class WhereItSits(LiveFleet):
         for text in ("a", "b"):
             self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", text)
         code, out, _ = self.run_cli("send", "--as", "fablyn-reviewer", "--urgent", "fablyn-dev", "c")
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(blocked\) %s, position 1 of 3$" % SHORT)
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(blocked: a dialog is open\) %s, "
+                                      r"position 1 of 3$" % SHORT)
         (urgent,) = [m for m in inbox.read_box(self.repo, "fablyn-dev", NEW) if m.urgent]
         with open(urgent.path) as handle:
             self.assertIn("\npriority: 1\n", handle.read())
@@ -212,7 +213,8 @@ class WhereItSits(LiveFleet):
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "--urgent", "fablyn-dev", "stop the deploy")  # design 21.1: queued
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 1 of 1$" % SHORT)
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 1 of 1; lands "
+                                      r"at its next idle, or now with --now$" % SHORT)
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
         code, out, _ = self.run_cli("send", "--now", "--urgent", "fablyn-dev", "stop it now")
         self.assertEqual(code, 0)
@@ -432,7 +434,7 @@ class DeliverDrains(LiveFleet):
         self.status_of("w2:p3", "blocked")
         self.run_cli("send", "--queue", "fablyn-reviewer", "three")
         code, out, _ = self.run_cli("deliver", "fablyn-reviewer", "--now")
-        self.assertEqual(out.strip(), "fablyn-reviewer: blocked, 1 left queued")  # never a blocked seat
+        self.assertEqual(out.strip(), "fablyn-reviewer: blocked: a dialog is open, 1 left queued")  # never blocked
         self.assertEqual(len(self.prompts_to("fablyn-reviewer")), 1)
 
 
@@ -642,13 +644,15 @@ class QueueAgesAndHint(LiveFleet):
             (line,) = [l for l in self.run_cli("status")[1].splitlines() if l.startswith("queued:")]
         self.assertEqual(line, "queued: fablyn-dev 2 (oldest 25m), owner 1")
 
-    def test_the_hint_names_the_senders_own_mailbox(self):
+    def test_the_hint_names_the_senders_own_mailbox(self):  # design 23.1: now a note, printed first
         self.run_cli("send", "--queue", "--as", "fablyn-dev", "fablyn-orchestrator", "for you")
         code, out, _ = self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "hi")
-        self.assertEqual(out.splitlines()[-1], "you have 1 waiting; herdr-fleet inbox --as fablyn-orchestrator --read")
+        self.assertRegex(out.splitlines()[0], r"^note: 1 unread from fablyn-dev \(#[0-9a-f]{6}, \d\d:\d\d\); read it "
+                                              r"before you go on: herdr-fleet inbox --as fablyn-orchestrator --read$")
         self.run_cli("send", "--queue", "--as", "fablyn-dev", "caller", "for the caller")
         code, out, _ = self.run_cli("send", "fablyn-dev", "hi")
-        self.assertEqual(out.splitlines()[-1], "you have 1 waiting; herdr-fleet inbox --read")
+        self.assertRegex(out.splitlines()[0], r"^note: 1 unread from fablyn-dev \(#[0-9a-f]{6}, \d\d:\d\d\); read it "
+                                              r"before you go on: herdr-fleet inbox --read$")
         self.run_cli("inbox", "--read")
         self.assertNotIn("waiting", self.run_cli("send", "fablyn-dev", "hi")[1])
 

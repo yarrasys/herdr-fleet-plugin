@@ -59,7 +59,7 @@ class Send(LiveFleet):
         code, out, _ = self.run_cli("send", "fablyn-dev", "when you are free")
         self.assertEqual(code, 0, out)
         self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) #[0-9a-f]{6}, "
-                                      r"position 1 of 1$")
+                                      r"position 1 of 1; lands at its next idle, or now with --now$")  # design 23.1
         self.assertEqual(self.prompts_to("fablyn-dev"), [])
         code, out, _ = self.run_cli("send", "--now", "fablyn-dev", "now please")
         self.assertEqual(code, 0, out)
@@ -75,7 +75,8 @@ class Send(LiveFleet):
         self.assertEqual(code, 0)
         entries = log_entries(self.repo)
         self.assertEqual(out.splitlines(), [  # design 20.3: the line names the place and the position
-            "queued in herdr-fleet for fablyn-dev (blocked) #%s, position 1 of 1" % entries[0]["id"][-6:],
+            "queued in herdr-fleet for fablyn-dev (blocked: a dialog is open) #%s, position 1 of 1"  # design 23.5
+            % entries[0]["id"][-6:],
             "queued in herdr-fleet for fablyn-reviewer (unknown) #%s, position 1 of 1" % entries[1]["id"][-6:],
             "queued in herdr-fleet for fablyn-orchestrator (absent) #%s, position 1 of 1" % entries[2]["id"][-6:]])
         self.assertEqual(self.argvs("agent", "prompt"), [])
@@ -91,7 +92,7 @@ class Send(LiveFleet):
 
     def test_sender_as_and_owner(self):
         self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "a")
-        self.world["panes"][CALLER_PANE]["agent"]["name"] = None   # an unnamed agent in your pane
+        self.world["panes"][CALLER_PANE]["agent"] = None           # a shell in your pane (design 23.3)
         self.run_cli("send", "fablyn-dev", "b")
         env = dict(self.env)
         del env["HERDR_PANE_ID"]                                   # not run from a pane at all

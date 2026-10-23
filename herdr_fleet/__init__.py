@@ -4,14 +4,16 @@ per-repository fleet file (``.herdr/fleet.toml``).
 Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 
 - ``cli``: argparse, dispatch, output, exit codes.
-- ``ops``: the operations (up, restart, swap, kickoff, down, ui, install-cli)
+- ``ops``: the operations (up, restart, swap, kickoff, down, go, peek, interrupt,
+  ui, install-cli)
   and their refusals; ``bringup``: workspace resolution, classifying and
   starting seats; ``placement``: where new panes go (chain or grid);
   ``layout``: the pure grid plan; ``tile``: re-tile live seats with pane moves;
   ``checks``: read-only drift, status, doctor.
 - ``seats``: the per-seat lifecycle against herdr (shell check, start with
-  retry, the only prompt path, the quit procedure); ``presence``: the guard
-  that sends nothing while the owner is typing in a seat's pane.
+  retry, the only prompt path, the quit procedure with its one Enter on the
+  exit confirmation, the interrupt keys); ``presence``: the guard that sends
+  nothing while the owner is typing in a seat's pane.
 - ``herdr``: the only module that executes the herdr binary.
 - ``fleetfile`` / ``state``: the two files on disk; ``kickoff``: templates.
 - ``context``: per-invocation context and preconditions; ``menu``: the popups
@@ -36,7 +38,7 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 
 import os
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

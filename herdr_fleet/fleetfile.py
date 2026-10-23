@@ -27,7 +27,7 @@ FLEET_NAME = "fleet.toml"
 DIRECTIONS = ("right", "down")
 
 TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "contacts", "quit_timeout_ms",
-            "restart_hint_tokens", "watch", "inbox_print_max"}
+            "restart_hint_tokens", "watch", "inbox_print_max", "interrupt"}
 CONTACT_KEYS = {"name", "match", "note"}
 MATCH_KEYS = {"cwd", "kind", "name"}
 LAYOUT_KEYS = {"mode", "columns", "direction", "ratio"}
@@ -42,6 +42,7 @@ WATCH_RATIO_RANGE = (0.1, 0.4)       # herdr clamps every split ratio to 0.1-0.9
 SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "from", "env", "kickoff",
              "kickoff_text", "quit", "notes", "worktrees", "label"}
 LABEL_MAX = 40                       # design 22.1: the seat key `label`, shown on the pane's border
+INTERRUPT_ALLOWED = ("ctrl+c", "esc", "enter")  # design 23.7: the keys an [interrupt] entry may name
 
 
 class FleetError(Exception):
@@ -106,6 +107,7 @@ class Fleet:
     watch_position: str = "bottom"             # [watch] position
     notify_blocked_after: Optional[int] = None  # [watch] notify_blocked_after in seconds (design 20.5)
     inbox_print_max: int = INBOX_PRINT_MAX     # design 20.4
+    interrupt: Dict[str, List[str]] = field(default_factory=dict)  # [interrupt] keys per kind (design 23.7)
 
     def contact(self, name: str) -> Optional[Contact]:
         for contact in self.contacts:
@@ -239,6 +241,7 @@ def load_fleet(path: str) -> Fleet:
         _grid_overrides(seats, raw_seats, direction, ratio, warnings)
     contacts = _parse_contacts(data.get("contacts", []), repo, [s.name for s in seats], errors, warnings)
     watch, watch_ratio, watch_position, blocked_after = _parse_watch(data.get("watch", True), errors, warnings)
+    interrupt = parse_interrupt(data.get("interrupt", {}), errors)
 
     if errors:
         raise FleetError(["%s: %s" % (path, e) for e in errors])
@@ -246,7 +249,8 @@ def load_fleet(path: str) -> Fleet:
                  kickoff=default_kickoff, direction=direction, ratio=ratio,
                  quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns,
                  contacts=contacts, restart_hint_tokens=hint_tokens, watch=watch, watch_ratio=watch_ratio,
-                 watch_position=watch_position, notify_blocked_after=blocked_after, inbox_print_max=print_max)
+                 watch_position=watch_position, notify_blocked_after=blocked_after, inbox_print_max=print_max,
+                 interrupt=interrupt)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
@@ -395,6 +399,38 @@ def _parse_watch(value: object, errors: List[str],
             errors.append("watch.notify_blocked_after: %r must be a duration such as \"3m\", \"2h\" or \"1d\""
                           % (value["notify_blocked_after"],))
     return True, float(ratio), str(position), blocked_after
+
+
+def interrupt_problems(kind: str, keys: object) -> List[str]:
+    """What is wrong with one ``[interrupt]`` entry (design 23.7): it must be a non-empty
+    list of keys from INTERRUPT_ALLOWED, and a Claude seat gets one ``ctrl+c`` at most,
+    since Claude Code quits on the second."""
+    if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
+        return ["%s: must be a non-empty list of keys (%s)" % (kind, ", ".join(INTERRUPT_ALLOWED))]
+    bad = [k for k in keys if k not in INTERRUPT_ALLOWED]
+    if bad:
+        return ["%s: %s not allowed; the keys are limited to %s" % (kind, ", ".join(repr(k) for k in bad),
+                                                                  ", ".join(INTERRUPT_ALLOWED))]
+    if kind == "claude" and keys.count("ctrl+c") > 1:
+        return ["%s: Claude Code quits on a second Ctrl-C, so a Claude seat gets one ctrl+c at most" % kind]
+    return []
+
+
+def parse_interrupt(value: object, errors: List[str], where: str = "interrupt") -> Dict[str, List[str]]:
+    """``[interrupt]`` (design 23.7): per kind, the keys ``interrupt NAME`` presses in a
+    working seat of that kind, overriding ``seats.INTERRUPT_KEYS``. Every problem is an
+    error; a valid entry is kept."""
+    if not isinstance(value, dict):
+        errors.append("%s: must be a table of kind = [keys]" % where)
+        return {}
+    keys: Dict[str, List[str]] = {}
+    for kind, entry in value.items():
+        problems = interrupt_problems(str(kind), entry)
+        if problems:
+            errors.extend("%s.%s" % (where, problem) for problem in problems)
+        else:
+            keys[str(kind)] = [str(k) for k in entry]
+    return keys
 
 
 def _parse_contacts(raw: object, repo: str, seat_names: List[str], errors: List[str],
