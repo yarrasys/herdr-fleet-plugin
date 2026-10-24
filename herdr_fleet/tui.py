@@ -107,7 +107,7 @@ class CursesScreen:
         for word in style.split():
             if word == "bold":
                 value |= curses.A_BOLD
-            elif word == "dim":
+            elif word in ("dim", "contact"):  # design 26.6: a contact's row is dim
                 value |= curses.A_DIM
             elif word == "reverse":
                 value |= curses.A_REVERSE

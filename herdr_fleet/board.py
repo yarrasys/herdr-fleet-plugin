@@ -58,6 +58,8 @@ DOT = " · "
 GLYPHS = {"working": "●", "idle": "○", "blocked": "◐", "done": "✓", "unknown": "?",
           "absent": DASH}
 STATE_STYLE = {"blocked": "red bold", "working": "green", "idle": "dim", "done": "dim"}
+CONTACT = "\u2194 "                 # design 26.6: a contact's name on the board and its page starts so
+CONTACT_STYLE = "contact"           # ... and its whole row is drawn dim
 PLAIN_WORDS = ("bold", "reverse")     # what is left of a style with colours off (design 24.3)
 
 
@@ -538,7 +540,7 @@ def cell_spans(cell: str, row: Row, width: int, colours: bool, selected: bool, l
     state_style = STATE_STYLE.get(row.state, "")
     spans: Line = []
     if cell == "name":
-        spans.append((cut(row.shown, room), ""))
+        spans.append((cut((CONTACT if row.contact else "") + row.shown, room), ""))
     elif cell == "state":
         spans.append((cut(state_text(row), room), state_style))
     elif cell == "doing":
@@ -561,6 +563,8 @@ def cell_spans(cell: str, row: Row, width: int, colours: bool, selected: bool, l
         spans.append((WARN if row.over else "", "yellow" if row.over else ""))
     used = sum(width_of(text) for text, _ in spans)
     spans.append((" " * max(0, width - used), ""))
+    if row.contact:  # design 26.6: the whole row of a contact is dim, its state colour included
+        spans = [(text, CONTACT_STYLE) for text, _ in spans]
     return [(text, style_of(style, colours, selected)) for text, style in spans if text]
 
 
@@ -1276,8 +1280,9 @@ class ContactPage(_Ringed):
     preselect = True
 
     def title(self) -> str:
+        """``↔ explain-channel · contact of this fleet · ○ idle 1m · w1C:pG`` (design 26.6)."""
         pane = self.row.pane if self.row is not None and self.row.pane else "no pane"
-        return DOT.join([self.name, self.state_part(), pane, "contact"])
+        return DOT.join([CONTACT + self.name, "contact of this fleet", self.state_part(), pane])
 
     def load(self, ctx, model: Board, cache: Cache, ws: WatcherState) -> None:
         previous = self.selected()
@@ -1372,7 +1377,8 @@ class FleetPage(View):
             workspace = load_state(fleet.repo).workspace_id or "not recorded"
         except Exception:  # noqa: BLE001 - an unreadable state file: say so
             workspace = "state file unreadable"
-        lines = ["fleet file  %s" % fleet.path, "workspace   %s (%s)" % (fleet.workspace or "(caller's)", workspace)]
+        lines = ["fleet file  %s" % fleet.path, "workspace   %s (%s)" % (fleet.workspace or "(caller's)", workspace),
+                 "layout      %s%s" % (fleet.mode, DOT + "top %s" % fleet.top if getattr(fleet, "top", None) else "")]
         watcher = "watcher     pid %s%s%s" % (ws.pid or "?", DOT + "up %s" % short_age(ws.watching)
                                               if ws.watching is not None else "",
                                               DOT + "lock .herdr/watch.lock since %s" % since_label(ws.since)
@@ -1450,10 +1456,9 @@ class BoardPage(View):
     def ensure(self) -> None:
         """The board starts with its first seat row selected (design 25.8), so Down then
         Enter opens the second seat; Up from there selects the header."""
-        if self.selection is None:
-            rows = visible(self.model, *self.size)
-            if rows:
-                self.selection = rows[0].name
+        rows = visible(self.model, *self.size)
+        if self.selection is None or (self.selection != HEADER and self.selection not in [r.name for r in rows]):
+            self.selection = rows[0].name if rows else None  # also when the selected seat left (26.6)
 
     def render(self, width: int, height: int, colours: bool) -> List[Line]:
         self.size = (width, height)

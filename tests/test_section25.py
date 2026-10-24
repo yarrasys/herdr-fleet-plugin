@@ -115,13 +115,13 @@ class Navigation(PageCase):
         self.page(["1", "left", "left", "right", "right", "right"])
         order = []
         for title in self.titles():
-            name = title.split(DOT, 1)[0]
+            name = title.split(DOT, 1)[0].replace("\u2194 ", "")
             if name != "fablyn" and (not order or order[-1] != name):
                 order.append(name)
         self.assertEqual(order, ["fablyn-orchestrator", WINNER, "fablyn-reviewer", WINNER, "fablyn-orchestrator",
                                  "fablyn-dev"])
-        self.assertEqual(self.draw_titled(WINNER + DOT)[0], "winner-chronicles \u00b7 \u25cb idle <1m \u00b7 w3:p4 "
-                                                            "\u00b7 contact")
+        self.assertEqual(self.draw_titled("\u2194 " + WINNER + DOT)[0], "\u2194 winner-chronicles \u00b7 contact of "
+                         "this fleet \u00b7 \u25cb idle <1m \u00b7 w3:p4")  # design 26.6
 
     def test_g_focuses_from_the_board_and_from_a_seat_page(self):
         self.page(["g", "2", "g", "esc", "g"])
@@ -335,9 +335,10 @@ class OtherPages(PageCase):
         page = self.draw_titled("fablyn" + DOT + "fleet")
         self.assertEqual(page[1], "fleet file  %s" % os.path.join(self.repo, ".herdr", "fleet.toml"))
         self.assertEqual(page[2], "workspace   fablyn (w2)")
-        self.assertRegex(page[3], r"^watcher     pid %d \u00b7 up <1m \u00b7 lock \.herdr/watch\.lock since %s$"
+        self.assertEqual(page[3], "layout      chain")  # design 26.7: mode, and `top` when set
+        self.assertRegex(page[4], r"^watcher     pid %d \u00b7 up <1m \u00b7 lock \.herdr/watch\.lock since %s$"
                          % (os.getpid(), HHMM))
-        self.assertEqual(page[4], "waiting on  nothing")  # waits time out at once on the fake
+        self.assertEqual(page[5], "waiting on  nothing")  # waits time out at once on the fake
         self.assertIn("awaiting: fablyn-dev owes fablyn-orchestrator for 50m", "\n".join(page))
         self.assertIn("queued: fablyn-dev 1", page)
         self.assertIn("drift, worktrees, hooks and doctor's checks: herdr-fleet status, herdr-fleet doctor", page)
@@ -381,8 +382,9 @@ class OtherPages(PageCase):
         sent = self.message("fablyn-dev", WINNER, "your 1.28 build is live", minutes=9)
         got = self.message(WINNER, "fablyn-dev", "thanks, verified", minutes=4)
         self.page(["down", "down", "down", "enter", "enter"], size=(162, 12))  # the newest message preselected
-        page = self.draw_titled(WINNER + DOT, last=False)
-        self.assertEqual(page[0], "winner-chronicles \u00b7 \u25cb idle <1m \u00b7 w3:p4 \u00b7 contact")
+        page = self.draw_titled("\u2194 " + WINNER + DOT, last=False)
+        self.assertEqual(page[0], "\u2194 winner-chronicles \u00b7 contact of this fleet \u00b7 \u25cb idle <1m "
+                                  "\u00b7 w3:p4")
         self.assertRegex(page[1], r'^messages  %s \u2192 fablyn-dev #%s sent  "thanks, verified"$'
                          % (HHMM, inbox.short_of(got)))
         self.assertRegex(page[2], r'^          %s \u2190 fablyn-dev #%s sent  "your 1\.28 build is live"$'

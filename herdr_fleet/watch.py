@@ -69,6 +69,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from herdr_fleet import board, inbox, presence, seen, tui
 from herdr_fleet.context import EXIT_OK, Ctx, OpError, UsageError
+from herdr_fleet.fleetfile import FleetError
 from herdr_fleet.herdr import HerdrError, describe
 from herdr_fleet.inbox import NEW, Message
 from herdr_fleet.mailroom import candidates, deliver_one, expire_all, herdr_target
@@ -201,6 +202,14 @@ def spawn(work: Callable[[], None]) -> Optional[threading.Thread]:
     thread = threading.Thread(target=work, name="herdr-fleet-waiter", daemon=True)
     thread.start()
     return thread
+
+
+def fleet_mtime(path: str) -> Optional[int]:
+    """The fleet file's modification time in ns, or None when it cannot be read."""
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
 
 
 def is_terminal(stream) -> bool:
@@ -780,6 +789,8 @@ class BoardView:
         self.state = board.WatcherState()
         self.root = board.BoardPage()
         self.stack: List[board.View] = [self.root]
+        self.fleet_mtime = fleet_mtime(watcher.ctx.fleet.path)  # design 26.6: the file as loaded
+        self.fleet_error = ""                                     # the last edit that did not parse
         self.problems = ""
         self.stale = True
         self.building = False
@@ -830,12 +841,42 @@ class BoardView:
             self.stale = True
             self.log_lines = None  # the log view reads the file again
 
+    def reread_fleet(self) -> None:
+        """Design 26.6: when the fleet file changed since it was loaded, read it again, so
+        contacts, labels, ``top`` and ``restart_hint_tokens`` follow an edit within a refresh.
+        A file that does not parse keeps the last good fleet; the error stays in the footer
+        (red) and is logged once, until an edit parses again. Waiters are left alone: a seat
+        no longer in the file keeps its waiter until it ends, and gets no new one (the pass
+        reads ``ctx.fleet`` for its candidates)."""
+        ctx = self.w.ctx
+        mtime = fleet_mtime(ctx.fleet.path)
+        if mtime is None or mtime == self.fleet_mtime:
+            return
+        self.fleet_mtime = mtime
+        try:
+            fleet = ctx.reload_fleet()
+        except FleetError as exc:
+            error = "fleet file does not parse; still using the last good one: %s" % "; ".join(exc.errors)
+            if error != self.fleet_error:
+                self.fleet_error = error  # the footer's line, in red, until an edit parses
+                self.w.say("fleet file %s does not parse; still using the last good one: %s"
+                           % (ctx.fleet.path, "; ".join(exc.errors)), error=True, shown=error)
+            return
+        if self.fleet_error:
+            self.fleet_error = ""
+            self.w.say("fleet file %s parses again; reloaded" % fleet.path)
+        else:
+            self.w.say("fleet file %s changed; reloaded" % fleet.path)
+        self.w.blocked_after = fleet.notify_blocked_after
+
     def refresh(self) -> None:
-        """Rebuild the model (design 24.2) and reload the open page (25.5). Lines said while
-        building (a warning) do not ask for another build."""
+        """Rebuild the model (design 24.2) and reload the open page (25.5), after reading
+        the fleet file again if it changed (26.6). Lines said while building (a warning) do
+        not ask for another build."""
         self.stale = False
         self.building = True
         try:
+            self.reread_fleet()
             self.state = self.w.snapshot()
             self.model = board.build(self.w.ctx, self.state)
             self.root.model = self.model
@@ -860,7 +901,8 @@ class BoardView:
             lines = board.render_log(self.log_lines, width, height, self.colours)
         else:
             view = self.top
-            view.footer = board.Footer(self.w.last_event, self.notice, self.w.trouble or self.problems)
+            view.footer = board.Footer(self.w.last_event, self.notice,
+                                       self.w.trouble or self.fleet_error or self.problems)
             lines = view.render(width, height, self.colours)
         if lines != self.drawn:
             self.screen.draw(lines)

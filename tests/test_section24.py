@@ -133,7 +133,7 @@ class Render(unittest.TestCase):
         self.assertEqual(len(shown), 8)
         self.assertEqual([line[:20].rstrip() for line in shown[1:6]],
                          ["fablyn-dev", "fablyn-reviewer", "fablyn-designer", "fablyn-orchestrator",
-                          "winner-chronicles"])
+                          "\u2194 winner-chronicles"])  # design 26.6: a contact is marked
         self.assertEqual(shown[6], "")
         self.assertEqual(shown[7], "08:02 delivered 2 to fablyn-dev")
         at6 = text(B.render(board_, 162, 6, True))  # no room: the contact is left out, and is not "more"
@@ -198,7 +198,7 @@ class Render(unittest.TestCase):
     def test_packed_rows_take_contacts_after_the_seats_when_they_fit(self):
         board_ = six(contacts=[B.Row("winner-chronicles", "winner-chronicles", "idle", 6, contact=True)])
         shown = text(B.render(board_, 162, 6, True))
-        self.assertTrue(shown[4].startswith("winner-chronicles   \u25cb idle"))
+        self.assertTrue(shown[4].startswith("\u2194 winner-chronicles \u25cb idle"))
         self.assertEqual(B.visible(board_, 162, 6)[-1].name, "winner-chronicles")
         self.assertNotIn("winner", "\n".join(text(B.render(board_, 162, 5, True))[1:]))  # no room left
 
@@ -531,7 +531,7 @@ class Build(BoardCase):
         self.assertEqual((contact.name, contact.state, contact.queued, contact.contact),
                          ("winner-chronicles", "working", 1, True))
         self.assertEqual(text(B.render(result, 162, 8, True))[4][:40].rstrip(),
-                         "winner-chronicles   \u25cf working <1m")
+                         "\u2194 winner-chronicles \u25cf working <1m")
         self.assertFalse(self.argvs("pane", "get"))  # a contact's title is not read
 
     def test_herdr_unreachable(self):

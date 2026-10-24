@@ -214,6 +214,16 @@ class Ctx:
                 self.warn(warning)
         return self._fleet
 
+    def reload_fleet(self) -> Fleet:
+        """Read the fleet file again, from the path already in use (design 26.6: the
+        watcher's board, when the file changed). On success the new fleet replaces the old
+        one and its warnings are said; a FleetError leaves the old fleet in place."""
+        fleet = load_fleet(self.fleet.path)
+        for warning in fleet.warnings:
+            self.warn(warning)
+        self._fleet = fleet
+        return fleet
+
     def _find_fleet(self) -> str:
         inv = self.invocation
         try:
