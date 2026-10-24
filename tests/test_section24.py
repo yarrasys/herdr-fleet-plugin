@@ -490,7 +490,7 @@ class Build(BoardCase):
         self.assertEqual((orch.tokens, orch.over), (450000, True))      # at the threshold: ⚠
         self.assertRegex(orch.context_at, r"^\d{4}-\d\d-\d\dT")
         self.assertEqual((dev.tokens, dev.over), (449999, False))
-        self.assertEqual((reviewer.tokens, reviewer.over), (None, False))  # a Codex seat: blank
+        self.assertEqual((reviewer.tokens, reviewer.over), (None, False))  # Codex session has no transcript fixture
         shown = text(B.render(result, 162, 6, True))
         self.assertTrue(shown[1].endswith("ctx 450k \u26a0"))
         self.assertTrue(shown[2].endswith("ctx 450k"))

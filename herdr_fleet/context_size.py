@@ -1,18 +1,13 @@
-"""Context size per seat for ``status --context`` (design 17.4), read-only.
+"""Read-only Claude and Codex context readings (design 17.4 and 29).
 
-For a live seat whose herdr record carries ``agent_session.source ==
-"herdr:claude"``, the Claude Code transcript is
-``<projects>/*/<session id>.jsonl``, where ``<projects>`` is
-``HERDR_FLEET_CLAUDE_PROJECTS`` (tests) or ``$HOME/.claude/projects``. The
-file is read backwards in 256 KiB chunks, up to 4 MiB, until the last
-``assistant`` line with ``message.usage`` is found. Context is
-``input_tokens + cache_creation_input_tokens + cache_read_input_tokens``.
+Provider resolution, discovery and reading are shared by status and the board.
+Read backwards in 256 KiB chunks, at most 4 MiB. Claude counts input plus
+cache creation/read; Codex uses last_token_usage.total_tokens and an optional
+reported window, never cumulative usage or an inferred model limit.
 
-Boundary (invariant 9): ``usage_record`` keeps only ``type``,
-``timestamp`` and the four usage integers of a line. Message text, tool
-calls and every other field are dropped as the line is parsed and are never
-logged, printed, stored or returned; neither is the transcript path or the
-session id. Nothing under ``~/.claude`` is ever written.
+Boundary (invariants 8 and 9): parsers retain only usage numbers, timestamp and
+type/source tags. No prompt, tool content, rate limits, path or session id is
+returned or logged. Nothing under either provider's source root is written.
 """
 
 from __future__ import annotations
@@ -22,12 +17,14 @@ import glob
 import json
 import os
 import re
-from typing import Dict, Mapping, Optional
+from typing import Callable, Dict, Mapping, Optional, Tuple
 
 CHUNK = 256 * 1024
 LIMIT = 4 * 1024 * 1024
 SOURCE = "claude-transcript"
 CLAUDE_SESSION = "herdr:claude"
+CODEX_SESSION = "herdr:codex"
+CODEX_SOURCE = "codex-transcript"
 USAGE_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 CONTEXT_FIELDS = USAGE_FIELDS[:3]
 RECORD_KEYS = ("type", "timestamp") + USAGE_FIELDS
@@ -43,24 +40,79 @@ def projects_dir(env: Mapping[str, str]) -> str:
     return os.path.join(home, ".claude", "projects")
 
 
-def session_id(agent: Optional[Mapping]) -> Optional[str]:
-    """The Claude Code session id from a herdr agent record, else None (other kinds,
-    no ``agent_session``, or a value that is not a plain id)."""
+def session_id(agent: Optional[Mapping], source: str = CLAUDE_SESSION) -> Optional[str]:
+    """A validated id for the requested source (Claude by default), else None."""
     session = (agent or {}).get("agent_session")
-    if not isinstance(session, dict) or session.get("source") != CLAUDE_SESSION:
+    if not isinstance(session, dict) or session.get("source") != source:
         return None
     value = session.get("value")
-    return value if isinstance(value, str) and SESSION_RE.match(value) else None
+    return value if isinstance(value, str) and SESSION_RE.fullmatch(value) else None
+
+
+def sessions_dir(env: Mapping[str, str]) -> str:
+    def expand(path: str) -> str:
+        home = env.get("HOME") or os.path.expanduser("~")
+        if path == "~":
+            return home
+        if path.startswith("~/"):
+            return os.path.join(home, path[2:])
+        return os.path.expanduser(path)
+
+    override = env.get("HERDR_FLEET_CODEX_SESSIONS")
+    if override:
+        return expand(override)
+    if env.get("CODEX_HOME"):
+        return os.path.join(expand(env["CODEX_HOME"]), "sessions")
+    return os.path.join(env.get("HOME") or os.path.expanduser("~"), ".codex", "sessions")
+
+
+def resolve(agent: Optional[Mapping], env: Mapping[str, str]) -> Optional[Tuple[str, str, str]]:
+    """Provider, absolute source root and validated id; never included in output."""
+    for provider, source in (("claude", CLAUDE_SESSION), ("codex", CODEX_SESSION)):
+        sid = session_id(agent, source)
+        if sid is not None:
+            root = projects_dir(env) if provider == "claude" else sessions_dir(env)
+            if "\0" in root:
+                return None
+            return provider, os.path.abspath(root), sid
+    return None
+
+
+def _newest(patterns) -> Optional[str]:
+    found = []
+    for pattern in patterns:
+        for path in glob.glob(pattern):
+            try:
+                if os.path.isfile(path):
+                    found.append((os.stat(path).st_mtime_ns, path))
+            except OSError:
+                continue  # a file can disappear during discovery
+    return max(found)[1] if found else None
 
 
 def find_transcript(projects: str, sid: str) -> Optional[str]:
     """``<projects>/*/<sid>.jsonl``; the newest when (unexpectedly) several match."""
-    if not SESSION_RE.match(sid):
+    if not SESSION_RE.fullmatch(sid):
         return None
-    found = [p for p in glob.glob(os.path.join(glob.escape(projects), "*", sid + ".jsonl")) if os.path.isfile(p)]
-    if not found:
+    return _newest([os.path.join(glob.escape(projects), "*", sid + ".jsonl")])
+
+
+def find_codex_transcript(root: str, sid: str) -> Optional[str]:
+    """Only this session's root-level or year/month/day rollout, newest match first."""
+    if not SESSION_RE.fullmatch(sid):
         return None
-    return max(found, key=lambda p: os.path.getmtime(p))
+    root = glob.escape(root)
+    name = "rollout-*-" + sid + ".jsonl"
+    return _newest([os.path.join(root, name), os.path.join(root, "[0-9]" * 4,
+                                                        "[0-9]" * 2, "[0-9]" * 2, name)])
+
+
+def find_source(provider: str, root: str, sid: str) -> Optional[str]:
+    if provider == "claude":
+        return find_transcript(root, sid)
+    if provider == "codex":
+        return find_codex_transcript(root, sid)
+    return None
 
 
 def usage_record(raw: bytes) -> Optional[Dict]:
@@ -90,33 +142,77 @@ def usage_record(raw: bytes) -> Optional[Dict]:
     return record
 
 
-def last_usage(path: str, chunk: int = CHUNK, limit: int = LIMIT) -> Optional[Dict]:
+def codex_usage_record(raw: bytes) -> Optional[Dict]:
+    """Whitelist the latest request's total and optional window from a Codex event."""
+    if b'"token_count"' not in raw:
+        return None
+    try:
+        line = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(line, dict) or line.get("type") != "event_msg":
+        return None
+    payload = line.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+        return None
+    info = payload.get("info")
+    usage = info.get("last_token_usage") if isinstance(info, dict) else None
+    tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+    if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0:
+        return None
+    timestamp = line.get("timestamp")
+    result = {"tokens": tokens, "at": timestamp if isinstance(timestamp, str) else None, "source": CODEX_SOURCE}
+    window = info.get("model_context_window")
+    if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+        result["window_tokens"] = window
+    return result
+
+
+def _last_record(path: str, parser: Callable, chunk: int, limit: int) -> Optional[Dict]:
     """The last usage record in a transcript, reading backwards from the end in
     ``chunk``-byte steps and at most ``limit`` bytes. A trailing partial line fails to
     parse and is skipped; the cut line at the start of each window is kept and
     completed by the next chunk, or dropped when the limit is reached."""
-    try:
-        handle = open(path, "rb")
-    except OSError:
+    if chunk <= 0 or limit <= 0:
         return None
-    with handle:
-        handle.seek(0, os.SEEK_END)
-        pos = handle.tell()
-        head = b""   # the start of a line whose beginning is still before ``pos``
-        read = 0
-        while pos > 0 and read < limit:
-            step = min(chunk, pos, limit - read)
-            pos -= step
-            handle.seek(pos)
-            data = handle.read(step)
-            read += len(data)
-            lines = (data + head).split(b"\n")
-            head = lines.pop(0) if pos > 0 else b""  # at the start of the file every line is whole
-            for raw in reversed(lines):
-                record = usage_record(raw)
-                if record is not None:
-                    return record
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            pos = handle.tell()
+            head = b""   # the start of a line whose beginning is still before ``pos``
+            read = 0
+            while pos > 0 and read < limit:
+                step = min(chunk, pos, limit - read)
+                pos -= step
+                handle.seek(pos)
+                data = handle.read(step)
+                read += step
+                lines = (data + head).split(b"\n")
+                head = lines.pop(0) if pos > 0 else b""
+                for raw in reversed(lines):
+                    record = parser(raw)
+                    if record is not None:
+                        return record
+    except (OSError, ValueError):
+        return None
     return None
+
+
+def last_usage(path: str, chunk: int = CHUNK, limit: int = LIMIT) -> Optional[Dict]:
+    return _last_record(path, usage_record, chunk, limit)
+
+
+def last_codex_usage(path: str, chunk: int = CHUNK, limit: int = LIMIT) -> Optional[Dict]:
+    return _last_record(path, codex_usage_record, chunk, limit)
+
+
+def read_context(provider: str, path: str) -> Optional[Dict]:
+    if provider == "codex":
+        return last_codex_usage(path)
+    if provider != "claude":
+        return None
+    record = last_usage(path)
+    return None if record is None else {"tokens": context_tokens(record), "at": record["timestamp"], "source": SOURCE}
 
 
 def context_tokens(record: Mapping) -> int:
@@ -131,27 +227,25 @@ def parse_time(text: Optional[str]) -> Optional[datetime.datetime]:
         return None
     year, month, day, hour, minute, second, fraction, zone = match.groups()
     micro = int((fraction or "0")[:6].ljust(6, "0"))
-    tz = datetime.timezone.utc
-    if zone and zone != "Z":
-        sign = 1 if zone[0] == "+" else -1
-        digits = zone[1:].replace(":", "")
-        tz = datetime.timezone(sign * datetime.timedelta(hours=int(digits[:2]), minutes=int(digits[2:])))
     try:
+        tz = datetime.timezone.utc
+        if zone and zone != "Z":
+            sign = 1 if zone[0] == "+" else -1
+            digits = zone[1:].replace(":", "")
+            tz = datetime.timezone(sign * datetime.timedelta(hours=int(digits[:2]), minutes=int(digits[2:])))
         return datetime.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), micro, tz)
     except ValueError:
         return None
 
 
 def seat_context(agent: Optional[Mapping], env: Mapping[str, str]) -> Optional[Dict]:
-    """``{"tokens", "at", "source"}`` for a live Claude Code seat, else None."""
-    sid = session_id(agent)
-    if sid is None:
+    """Usage/timestamp/source and an optional reported window, else None."""
+    resolved = resolve(agent, env)
+    if resolved is None:
         return None
-    path = find_transcript(projects_dir(env), sid)
-    record = last_usage(path) if path else None
-    if record is None:
-        return None
-    return {"tokens": context_tokens(record), "at": record["timestamp"], "source": SOURCE}
+    provider, root, sid = resolved
+    path = find_source(provider, root, sid)
+    return read_context(provider, path) if path else None
 
 
 def tokens_label(tokens: int) -> str:
@@ -178,10 +272,12 @@ def age_label(seconds: Optional[float]) -> str:
 
 
 def context_label(info: Optional[Mapping], now: Optional[datetime.datetime] = None) -> str:
-    """``183k (2 min)``; ``-`` without a reading."""
+    """``183k (2 min)`` or ``123k/200k (2 min)``; ``-`` without a reading."""
     if not info:
         return "-"
     label = tokens_label(int(info["tokens"]))
+    if info.get("window_tokens") is not None:
+        label += "/" + tokens_label(int(info["window_tokens"]))
     when = parse_time(info.get("at"))
     if when is None:
         return label

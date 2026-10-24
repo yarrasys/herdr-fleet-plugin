@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="print one JSON object")
     p.add_argument("--hold", action="store_true", help="wait for Enter before exiting (overlay pane)")
     p.add_argument("--context", action="store_true",
-                   help="add a CONTEXT column: each Claude seat's context size from its transcript (read-only)")
+                   help="add a CONTEXT column: Claude/Codex transcript usage and reported window when available (read-only source)")
 
     p = sub.add_parser("restart", parents=[common, notes, wait, drop],
                        help="quit idle seats and start them again in the same pane, then brief them")

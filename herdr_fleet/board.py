@@ -9,7 +9,7 @@
   every command that reads states does) for each state's age; the mailboxes
   (count, oldest age, the next message's id, sender and first line; the owner's
   mailbox too); ``messages.owed`` over the log, parsed again only when
-  ``.herdr/messages.jsonl`` changed; the Claude seats' context size from their
+  ``.herdr/messages.jsonl`` changed; Claude and Codex seats' context size from their
   transcripts (``context_size``, usage numbers only); for a ``blocked`` seat only,
   ``agent read NAME --lines 16`` and the first line of the dialog it shows
   (``seats.dialog_first_line``), kept in the model being built and nothing else
@@ -96,13 +96,14 @@ class Row:
     debt_id: str = ""               # its short id ("" for a message sent before ids)
     debt_age: Optional[float] = None
     debt_line: str = ""
-    tokens: Optional[int] = None    # context size (Claude seats with a transcript) ...
+    tokens: Optional[int] = None    # last reported context usage ...
     context_at: str = ""            # ... and the time of the call it was read from
     over: bool = False              # at or above restart_hint_tokens
     contact: bool = False
     kind: str = ""                  # the live agent's kind, else the fleet file's (design 25.2)
     pane: str = ""                  # the live agent's pane
     dialog: List[str] = field(default_factory=list)  # a blocked seat's dialog, up to four lines (25.2)
+    window_tokens: Optional[int] = None  # the same event's reported window, when available
 
 
 @dataclass
@@ -157,7 +158,7 @@ class Cache:
         self.owed_items: List[Dict] = []
         self.entries: List[Dict] = []          # the log, as last parsed (design 25: pages read it)
         self.unsettled_items: List[Dict] = []  # every request still awaiting an answer, oldest first
-        self.contexts: Dict[str, Tuple[Tuple, Optional[Dict]]] = {}
+        self.contexts: Dict[Tuple[str, str, str], Tuple[Tuple, Dict]] = {}
         self.first: Dict[str, Tuple[str, datetime.datetime]] = {}
 
     def owed(self, repo: str) -> List[Dict]:
@@ -175,20 +176,21 @@ class Cache:
         return self.owed_items
 
     def context(self, agent: Dict, env) -> Optional[Dict]:
-        """``context_size.seat_context`` for a live Claude seat, read again only when its
+        """``context_size.seat_context`` for a supported seat, read again only when its
         transcript changed, and looked for again only when it is gone (usage numbers and
         the timestamp only, invariant 9)."""
-        sid = context_size.session_id(agent)
-        if sid is None:
+        key = context_size.resolve(agent, env)
+        if key is None:
             return None
-        known = self.contexts.get(sid)
+        provider, root, sid = key
+        known = self.contexts.get(key)
         path = known[0][0] if known is not None else None
         try:  # the transcript found last time, while it is there; else look for it again
             info = os.stat(path) if path else None
         except OSError:
             info = None
         if info is None:
-            path = context_size.find_transcript(context_size.projects_dir(env), sid)
+            path = context_size.find_source(provider, root, sid)
             if path is None:
                 return None
             try:
@@ -198,9 +200,11 @@ class Cache:
         sig = (path, info.st_mtime_ns, info.st_size)
         if known is not None and known[0] == sig:
             return known[1]
-        record = context_size.last_usage(path)
-        value = None if record is None else {"tokens": context_size.context_tokens(record), "at": record["timestamp"]}
-        self.contexts[sid] = (sig, value)
+        value = context_size.read_context(provider, path)
+        if value is None:
+            self.contexts.pop(key, None)  # retry a transient failure even if file metadata stays unchanged
+        else:
+            self.contexts[key] = (sig, value)
         return value
 
     def since(self, name: str, state: str, now: datetime.datetime) -> datetime.datetime:
@@ -345,6 +349,7 @@ def build(ctx, watcher_state: Optional[WatcherState] = None) -> Board:
             reading = cache.context(agent, ctx.env)
             if reading is not None:
                 row.tokens, row.context_at = int(reading["tokens"]), str(reading.get("at") or "")
+                row.window_tokens = reading.get("window_tokens")
                 row.over = bool(threshold) and row.tokens >= int(threshold)
         rows.append(row)
     contact_rows: List[Row] = []
@@ -506,15 +511,18 @@ def debt_text(row: Row, width: int) -> str:
 def context_text(row: Row) -> str:
     if row.tokens is None:
         return ""
-    return "ctx %s" % context_size.tokens_label(row.tokens)
+    label = context_size.tokens_label(row.tokens)
+    if row.window_tokens is not None:
+        label += "/" + context_size.tokens_label(row.window_tokens)
+    return "ctx " + label
 
 
-def columns(width: int) -> List[Tuple[str, int]]:
+def columns(width: int, context_width: int = CONTEXT_W) -> List[Tuple[str, int]]:
     """The cells of a seat row and their widths at ``width`` columns (design 24.3)."""
     if width < FULL_FROM:
         name = max(4, min(NAME_W, width - STATE_W - COUNT_W))
         return [("name", name), ("state", STATE_W), ("count", max(1, width - name - STATE_W))]
-    rest = max(0, width - NAME_W - STATE_W - CONTEXT_W)
+    rest = max(0, width - NAME_W - STATE_W - context_width)
     if width >= DOING_FROM:
         cells, weights = ["doing", "queue", "debt"], RATIO
     elif width >= DEBT_FROM:
@@ -524,7 +532,7 @@ def columns(width: int) -> List[Tuple[str, int]]:
     total = sum(weights)
     sizes = [rest * w // total for w in weights]
     sizes[cells.index("queue")] += rest - sum(sizes)
-    return [("name", NAME_W), ("state", STATE_W)] + list(zip(cells, sizes)) + [("context", CONTEXT_W)]
+    return [("name", NAME_W), ("state", STATE_W)] + list(zip(cells, sizes)) + [("context", context_width)]
 
 
 def compact_columns(width: int) -> List[Tuple[str, int]]:
@@ -751,10 +759,11 @@ def render(board: Board, width: int, height: int, colours: bool) -> List[Line]:
     if width < 1 or height < 1:
         return []
     mode, rows, more = plan(board, width, height)
+    layout = columns(width, 16 if any(row.window_tokens is not None for row in rows) else CONTEXT_W)
     if mode == "single":
         if not rows:
             return [[(fit("%s: no seats" % board.fleet, width), "")]]
-        return [row_line(rows[0], width, colours, rows[0].name == board.selected)]  # no room for hints
+        return [row_line(rows[0], width, colours, rows[0].name == board.selected, layout)]  # no room for hints
     lines: List[Line] = [header_line(board, width, colours)]
     if mode == "packed":
         left_w = width // 2
@@ -770,7 +779,7 @@ def render(board: Board, width: int, height: int, colours: bool) -> List[Line]:
             lines.append(line)
     else:
         for row in rows:
-            lines.append(row_line(row, width, colours, row.name == board.selected))
+            lines.append(row_line(row, width, colours, row.name == board.selected, layout))
     while len(lines) < height - 1:
         lines.append(blank(width))
     lines.append(footer_line(board, width, more, colours))

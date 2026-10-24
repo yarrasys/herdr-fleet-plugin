@@ -172,7 +172,7 @@ class StatusContext(LiveFleet):
         rows = {l.split()[0]: l for l in lines[2:5]}
         self.assertIn("183k (0 min)", rows["sample-orchestrator"])
         self.assertIn("456k (0 min)", rows["sample-dev"])
-        self.assertRegex(rows["sample-reviewer"], r"\bidle\s+-\s")  # codex: not read in this version
+        self.assertRegex(rows["sample-reviewer"], r"\bidle\s+-\s")  # Codex session has no transcript fixture
         data = json.loads(self.run_cli("status", "--json", "--context")[1])
         contexts = [s["context"] for s in data["seats"]]
         self.assertEqual(contexts[0], {"tokens": 183007, "at": self.recent, "source": "claude-transcript"})

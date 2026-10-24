@@ -52,11 +52,16 @@ Tests are the executable coverage inventory. For the principal areas, start with
 | Watcher, hooks and presence | `test_watch.py`, `test_hooks.py`, `test_section21.py` |
 | Board, pages and file reload | `test_section24.py`, `test_section25.py`, `test_section26_6.py` |
 | Starter examples and combined seat/contact capacity | `test_section27.py` |
-| Git/context/permissions and command entrypoints | `test_worktrees.py`, `test_context.py`, `test_permissions.py`, `test_status_doctor.py`, `test_manifest.py`, `test_cli_subprocess.py` |
+| Claude/Codex transcript usage, windows and cache | `test_context.py`, `test_section29.py` |
+| Git/permissions and command entrypoints | `test_worktrees.py`, `test_permissions.py`, `test_status_doctor.py`, `test_manifest.py`, `test_cli_subprocess.py` |
 
 Section 27's regression enables the generated layout and top-level disabled watcher together, then loads the fleet without warnings. Its board cases use three seats plus five contacts at full, packed and narrow sizes, count hidden rows, preserve contact styling, map clicks to packed halves, open the contact page through the fake screen, and reach hidden contacts through page navigation.
 
-Historical release inventories, live observations and their limitations are in [docs/design.md](design.md), particularly sections 12 and 17–27. They record what was run at the time; they are not current procedures or proof that a new build was smoke-tested.
+Section 29's synthetic rollout fixture exercises both `status --context` and the real board cache/model/rendering and seat-page header. Its reported last-request total is 123000, effective window 200000 and lifetime total 9000000: the result must be `123k/200k`, with neither lifetime tokens nor double-counted cache/reasoning tokens. Reader cases cover malformed/partial data, null info, valid zero, invalid windows, source/id validation, root precedence and glob escaping, duplicate files, split lines, and the 4 MiB/256 KiB read bound. Cache cases cover provider/root/session isolation, unchanged files, compaction/window changes, missing-file retry and recovery from a failed read even with unchanged file metadata. Layout cases preserve narrow/packed selection and reserve 16 columns only when a visible row has a window. Existing Claude cases remain required.
+
+Use temporary source roots (`HERDR_FLEET_CLAUDE_PROJECTS` and `HERDR_FLEET_CODEX_SESSIONS`) for these tests. The suite checks the exact public usage dictionary, absence of transcript content/id/path in output, unchanged source bytes/modification times, no transcript access from status without `--context`, and no additional Herdr calls for context. Do not copy a live rollout into a fixture. A fake fixture cannot verify compatibility with every agent version; any authorized live check should compare only numeric usage/window fields and report a generic outcome without publishing live identities, paths, prompts or readings. A missing window is unavailable data, not a reason to assume a model limit.
+
+Historical release inventories, live observations and their limitations are in [docs/design.md](design.md), particularly sections 12 and 17–29. They record what was run at the time; they are not current procedures or proof that a new build was smoke-tested.
 
 ## Manual scratch-fleet check
 
