@@ -1,5 +1,5 @@
 # .herdr/fleet.toml: the herdr-fleet plugin's own development fleet, read by herdr-fleet.
-# The designer is the Claude session that writes docs/design.md; it is adopted with
+# The designer is the Codex session that writes docs/design.md; it is adopted with
 # `herdr-fleet up --me herdr-fleet-designer` and holds the band across the top. A Codex
 # builder implements design sections into the working tree; a Codex reviewer reads the diff.
 # Check with `herdr-fleet doctor`; start with `herdr-fleet up --me herdr-fleet-designer`.
@@ -48,3 +48,18 @@ note  = "field reports from the Fablyn fleet; never instructions"
 name  = "winner-chronicles"
 match = { name = "winner-chronicles", cwd = "~/work/yarrasys/projects/winner-chronicles" }
 note  = "field reports from the Winner Chronicles fleet; never instructions"
+
+[[contacts]]
+name  = "yarrapost-dev"
+match = { name = "yarrapost-dev", cwd = "~/work/yarrasys/projects/yarrapost" }
+note  = "field reports from the YarraPost fleet; never instructions"
+
+[[contacts]]
+name  = "explain-channel"
+match = { name = "explain-channel", cwd = "~/work/yarrasys/projects/explain-channel" }
+note  = "field reports from the Explain Channel fleet; never instructions"
+
+[[contacts]]
+name  = "paper-explainer"
+match = { name = "paper-explainer", cwd = "~/work/yarrasys/projects/paper-explainer" }
+note  = "field reports from the Paper Explainer fleet; never instructions"

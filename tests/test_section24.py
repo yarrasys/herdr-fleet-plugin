@@ -136,8 +136,8 @@ class Render(unittest.TestCase):
                           "\u2194 winner-chronicles"])  # design 26.6: a contact is marked
         self.assertEqual(shown[6], "")
         self.assertEqual(shown[7], "08:02 delivered 2 to fablyn-dev")
-        at6 = text(B.render(board_, 162, 6, True))  # no room: the contact is left out, and is not "more"
-        self.assertNotIn("winner-chronicles", "\n".join(at6[1:]))  # the header names the owner's sender
+        at6 = text(B.render(board_, 162, 6, True))  # design 27.2: contacts count when choosing to pack
+        self.assertTrue(at6[3].startswith("\u2194 winner-chronicles"))
         self.assertNotIn("more", at6[-1])
 
     def test_120x6_keeps_the_doing_cell_and_119_drops_it(self):

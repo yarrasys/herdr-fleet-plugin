@@ -111,8 +111,9 @@ def build_parser() -> argparse.ArgumentParser:
                                    "or absent seat keeps it queued in herdr-fleet until it is next idle or done "
                                    "(the watcher, `deliver`, a later send or the next kickoff). Only --now types "
                                    "into a working seat's own input. Nothing is sent while the owner is typing in "
-                                   "the seat's pane: it stays queued (--now: refused). An FYI never wakes an idle "
-                                   "seat. owner gets a herdr notification. Here --file is the text; pick a fleet "
+                                   "the seat's pane: it stays queued (--now: refused). FYIs normally stay queued; "
+                                   "explicit delivery or a pending refusal request can deliver them immediately. "
+                                   "owner gets a herdr notification. Here --file is the text; pick a fleet "
                                    "file with --fleet PATH.")
     p.add_argument("words", nargs="*", metavar="TARGET... [TEXT]",
                    help="seat, contact, owner or live agent names, then the text; with --file every item is a "
@@ -121,11 +122,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--as", dest="as_name", metavar="NAME",
                    help="sender name (default: your pane's agent, or the contact it matches; owner from a shell)")
     p.add_argument("--when-ready", dest="when_ready", metavar="MS", type=int,
-                   help="wait up to MS ms for each target to be idle or done; refuse it if not")
+                   help="wait up to MS ms for each target to be idle or done; queue if still not ready "
+                        "(--now refuses)")
     p.add_argument("--all", dest="all_seats", action="store_true", help="every live seat except the sender")
     p.add_argument("--fyi", action="store_true",
-                   help='a report that awaits no reply and never wakes an idle seat (text starting with "FYI:" '
-                        'or "FYI " counts too)')
+                   help='a report that awaits no reply and normally stays queued; explicit delivery or a pending '
+                        'refusal request can deliver it (text starting with "FYI:" or "FYI " counts too)')
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--queue", action="store_true",
                       help="only queue it; it waits for the seat to be idle or done (use it to control order)")

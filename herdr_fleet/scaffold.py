@@ -42,6 +42,8 @@ STARTER_FLEET = '''# .herdr/fleet.toml: the agent team for this repository, read
 state_note = ".herdr/STATE.md"   # its contents fill {state} in every kickoff; keep it current
 kickoff = ".herdr/kickoff/default.md"   # default kickoff template for every seat
 # quit_timeout_ms = 20000        # how long to wait for an agent to exit after its quit command
+# watch = false                  # top-level: up starts no watcher strip (before any table)
+#                                # Choose this OR the [watch] table below, never both.
 
 # [layout]
 # mode = "chain"                 # chain (default): each seat splits from the previous seat's pane
@@ -56,9 +58,8 @@ kickoff = ".herdr/kickoff/default.md"   # default kickoff template for every sea
 #                                # grid: direction of the first split off your pane
 # ratio = 0.5                    # chain: split ratio; grid: share your pane keeps (0 < ratio < 1)
 
-# watch = false                  # up starts no watcher strip below the seats
 # [watch]                        # the watcher strip `up` opens below the seats (not with watch = false)
-# ratio = 0.2                    # its share of the area it is split from, 0.1 to 0.4 (0.2: eight rows of board)
+# ratio = 0.2                    # its share of the area it is split from, 0.1 to 0.4; rows depend on tab height
 # notify_blocked_after = "3m"    # notify you once when a seat has been blocked this long
 
 [[agents]]

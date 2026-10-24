@@ -613,23 +613,24 @@ def urgency(row: Row) -> Tuple[int, int]:
 
 
 def plan(board: Board, width: int, height: int) -> Tuple[str, List[Row], int]:
-    """``(mode, rows in display order, how many seats are left out)``; mode ``single`` (one
-    line, below three rows), ``rows`` (one seat per row, contacts after them when height
-    allows) or ``packed`` (two seats per row)."""
+    """``(mode, rows in display order, hidden count)``. Seats and contacts share capacity;
+    overflow favours urgent seats, then contacts in file order (design 27.2). Below
+    three rows the existing most-urgent-seat view stays a single line."""
     seats = list(board.rows)
     if height < 3:
         chosen = sorted(seats, key=urgency)[:1]
         return "single", chosen, max(0, len(seats) - len(chosen))
     room = height - 2
-    if len(seats) <= room:
-        return "rows", seats + list(board.contacts)[:room - len(seats)], 0
-    if width >= 2 * PACK_HALF:
-        if len(seats) <= 2 * room:
-            return "packed", seats + list(board.contacts)[:2 * room - len(seats)], 0
-        chosen = sorted(seats, key=urgency)[:2 * room]
-        return "packed", chosen, len(seats) - len(chosen)
-    chosen = sorted(seats, key=urgency)[:room]
-    return "rows", chosen, len(seats) - len(chosen)
+    combined = seats + list(board.contacts)
+    if len(combined) <= room:
+        return "rows", combined, 0
+    mode = "packed" if width >= 2 * PACK_HALF else "rows"
+    capacity = 2 * room if mode == "packed" else room
+    if len(combined) <= capacity:
+        return mode, combined, 0
+    chosen = sorted(seats, key=urgency)[:capacity]
+    chosen += list(board.contacts)[:capacity - len(chosen)]
+    return mode, chosen, len(combined) - len(chosen)
 
 
 def visible(board: Board, width: int, height: int) -> List[Row]:
@@ -744,8 +745,8 @@ def blank(width: int) -> Line:
 
 
 def render(board: Board, width: int, height: int, colours: bool) -> List[Line]:
-    """Design 24.3, pure: the header, one row per seat (packed two to a row, or the most
-    urgent with ``+N more``, when they do not fit), contacts when height allows, the
+    """Design 24.3 and 27.2, pure: the header, seats then contacts (packed two to a row,
+    or urgent seats then contacts with ``+N more`` when they do not fit), the
     footer; below three rows, the most urgent seat's row alone."""
     if width < 1 or height < 1:
         return []
