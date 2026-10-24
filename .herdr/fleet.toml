@@ -17,11 +17,11 @@ ratio = 0.2
 
 [[agents]]
 name    = "herdr-fleet-designer"
-kind    = "claude"
-args    = ["--model", "claude-fable-5-1"]
+kind    = "codex"
+args    = ["-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=high", "-c", "agents.enabled=false", "-c", "model_verbosity=high", "-s", "workspace-write"]
 cwd     = "."
 kickoff = ".herdr/kickoff/designer.md"
-notes   = "Designer and orchestrator, adopted with --me: writes docs/design.md, briefs the builder, smoke-tests on Haiku seats, commits; pushes only on the owner's word. Never restart or swap it here."
+notes   = "Designer and orchestrator: writes docs/design.md, briefs fleet-builder, asks fleet-reviewer, smoke-tests on a Haiku seat, commits; pushes only on the owner's word. Swap or restart it only from another pane."
 
 [[agents]]
 name    = "fleet-builder"
