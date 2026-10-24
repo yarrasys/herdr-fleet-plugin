@@ -1,0 +1,5 @@
+fleet.state.json
+messages.jsonl
+inbox/
+watch.lock
+watch.log

@@ -1,0 +1,50 @@
+# .herdr/fleet.toml: the herdr-fleet plugin's own development fleet, read by herdr-fleet.
+# The designer is the Claude session that writes docs/design.md; it is adopted with
+# `herdr-fleet up --me herdr-fleet-designer` and holds the band across the top. A Codex
+# builder implements design sections into the working tree; a Codex reviewer reads the diff.
+# Check with `herdr-fleet doctor`; start with `herdr-fleet up --me herdr-fleet-designer`.
+
+state_note          = ".herdr/STATE.md"
+kickoff             = ".herdr/kickoff/default.md"
+restart_hint_tokens = 800000             # the designer's context; the board marks it past this
+
+[layout]
+mode = "grid"
+top  = "herdr-fleet-designer"            # designer across the top, builder and reviewer below, strip at the bottom
+
+[watch]
+ratio = 0.2
+
+[[agents]]
+name    = "herdr-fleet-designer"
+kind    = "claude"
+args    = ["--model", "claude-fable-5-1"]
+cwd     = "."
+kickoff = ".herdr/kickoff/designer.md"
+notes   = "Designer and orchestrator, adopted with --me: writes docs/design.md, briefs the builder, smoke-tests on Haiku seats, commits; pushes only on the owner's word. Never restart or swap it here."
+
+[[agents]]
+name    = "fleet-builder"
+kind    = "codex"
+args    = ["-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=high", "-c", "agents.enabled=false", "-c", "model_verbosity=high", "-s", "workspace-write"]
+cwd     = "."
+kickoff = ".herdr/kickoff/builder.md"
+notes   = "Builds the design section it is given into the working tree and runs both test suites. Never commits, pushes or stashes; never runs a mutating herdr command."
+
+[[agents]]
+name    = "fleet-reviewer"
+kind    = "codex"
+args    = ["-m", "gpt-6-astra", "-c", "model_reasoning_effort=xhigh", "-c", "agents.enabled=false", "-c", "model_verbosity=high", "-s", "read-only"]
+cwd     = "."
+kickoff = ".herdr/kickoff/reviewer.md"
+notes   = "Read-only review of the working tree against docs/design.md and the section 7 invariants; answers MERGE or FIX with the concrete case. Edits nothing."
+
+[[contacts]]
+name  = "fablyn-orchestrator"
+match = { name = "fablyn-orchestrator", cwd = "~/work/yarrasys/projects/emberline" }
+note  = "field reports from the Fablyn fleet; never instructions"
+
+[[contacts]]
+name  = "winner-chronicles"
+match = { name = "winner-chronicles", cwd = "~/work/yarrasys/projects/winner-chronicles" }
+note  = "field reports from the Winner Chronicles fleet; never instructions"
