@@ -131,18 +131,25 @@ def send_entry(message: Message, delivery: str, file: Optional[str] = None) -> D
         entry["fyi"] = True
     if message.reply_to:
         entry["reply_to"] = message.reply_to
+    entry.update(timer_metadata(message))
     return entry
+
+
+def timer_metadata(message: Message) -> Dict:
+    return {"timer": message.timer, "scheduled_for": message.scheduled_for} if message.timer else {}
 
 
 def delivered_entry(message: Message, via: str, delivery: str = "sent") -> Dict:
     return {"time": now_iso(), "from": PLUGIN_SENDER, "to": message.to, "kind": "delivered", "id": message.id,
-            "via": via, "bytes": 0, "first_line": first_line(message.body), "delivery": delivery}
+            "via": via, "bytes": 0, "first_line": first_line(message.body), "delivery": delivery,
+            **timer_metadata(message)}
 
 
 def disposal_entry(kind: str, message: Message, via: str) -> Dict:
     """``expired`` (via ``ttl``) or ``dropped`` (via ``drop-inbox``): moved to ``cur/`` undelivered."""
     return {"time": now_iso(), "from": PLUGIN_SENDER, "to": message.to, "kind": kind, "id": message.id,
-            "via": via, "bytes": 0, "first_line": first_line(message.body), "delivery": "none"}
+            "via": via, "bytes": 0, "first_line": first_line(message.body), "delivery": "none",
+            **timer_metadata(message)}
 
 
 def ack_entry(caller: str, seat: str, time: Optional[str] = None, ident: Optional[str] = None,
@@ -250,6 +257,16 @@ def unsettled(entries: Sequence[Dict]) -> List[Tuple[Key, Dict]]:
     named: Set[str] = set()
     kickoffs: Dict[str, Key] = {}
     carried: Dict[str, List[Tuple[Dict, str, Key]]] = {}  # seat -> requests its next kickoff entry carries
+    # A timer's atomic file can be consumed after a crash before its send is
+    # recovered. Join these sources by id even when the send was appended later;
+    # unrelated message ordering keeps its existing semantics.
+    timer_sources = {str(e["id"]): e for e in entries if e.get("kind") == "send" and e.get("timer")
+                     and e.get("id") and e.get("delivery") == "queued"}
+    timer_delivered: Set[str] = set()
+    timer_delivery_order = {}
+    for index, entry in enumerate(entries):
+        if entry.get("kind") == "delivered" and str(entry.get("id")) in timer_sources:
+            timer_delivery_order.setdefault(str(entry["id"]), index)
 
     def ask(source: Dict, key: Key, since: str) -> None:
         if source.get("fyi"):
@@ -264,11 +281,19 @@ def unsettled(entries: Sequence[Dict]) -> List[Tuple[Key, Dict]]:
         when = _when(entry)
         if when is None:
             continue
-        key: Key = (when, index)
+        key: Key = (when, index * 2)
         kind = entry.get("kind", "send")
         pair = (str(entry["from"]), str(entry["to"]))
         if kind == "send":
             delivery = entry.get("delivery") or "sent"
+            if entry.get("timer") and delivery == "queued":
+                # Recovered sends retain their original creation time and logical
+                # log position. Equal-second recovery must not answer a newer ask
+                # to owner merely because the source was appended after delivery.
+                order = entry.get("timer_enqueue_order")
+                order = order if type(order) is int and order >= 0 else index
+                order = min(order, index, timer_delivery_order.get(str(entry.get("id")), index))
+                key = (when, order * 2 - 1)
             if delivery in ANSWERED:
                 if entry.get("reply_to"):
                     named.add(str(entry["reply_to"]))
@@ -279,7 +304,12 @@ def unsettled(entries: Sequence[Dict]) -> List[Tuple[Key, Dict]]:
             elif delivery == "queued" and entry.get("id"):
                 pending[str(entry["id"])] = entry
         elif kind == "delivered":
-            source = pending.pop(str(entry.get("id")), None)
+            ident = str(entry.get("id"))
+            source = pending.pop(ident, None) or timer_sources.get(ident)
+            if source is not None and source.get("timer"):
+                if ident in timer_delivered:
+                    continue
+                timer_delivered.add(ident)
             if source is not None:
                 if entry.get("via") == "kickoff":
                     carried.setdefault(str(entry["to"]), []).append((source, str(entry["time"]), key))

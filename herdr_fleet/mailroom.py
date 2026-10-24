@@ -306,6 +306,8 @@ def _as_dict(message: Message, body: bool = False) -> Dict:
             "queued_by": message.mode, "urgent": message.urgent, "first_line": first_line(message.body)}
     if body:
         item["body"] = message.body
+    if message.timer:
+        item.update(timer=message.timer, scheduled_for=message.scheduled_for)
     return item
 
 

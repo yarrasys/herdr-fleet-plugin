@@ -19,7 +19,7 @@ from herdr_fleet import PLUGIN_ROOT, __version__, labels
 from herdr_fleet.checks import collect_status, render_status, run_doctor
 from herdr_fleet.context import (EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, Ctx, OpError, Report,
                                  UsageError, preflight)
-from herdr_fleet.fleetfile import FleetError
+from herdr_fleet.fleetfile import FleetError, find_fleet_file, load_fleet
 from herdr_fleet.herdr import Herdr, HerdrError, Runner, describe, find_binary
 from herdr_fleet.menu import run_menu, wait_for_enter
 from herdr_fleet.ops import (PEEK_LINES, op_down, op_go, op_install_cli, op_interrupt, op_kickoff, op_peek,
@@ -191,10 +191,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="after a seat turns idle, wait MS ms and check again before delivering (default %d)"
                         % DEFAULT_DEBOUNCE_MS)
     p.add_argument("--once", action="store_true",
-                   help="deliver what can be delivered now (seats already idle or done) and exit; no lock")
+                   help="enqueue due timers, deliver to seats already idle/done and exit; timer journal lock when configured")
     p.add_argument("--log", action="store_true",
                    help="print one line per event instead of drawing the board (the default when stdout is "
                         "not a terminal)")
+
+    p = sub.add_parser("timers", parents=[fleet], help="inspect daily request timers (read-only)")
+    p.add_argument("names", nargs="*", metavar="NAME")
+    p.add_argument("--json", action="store_true", help="print timer metadata as JSON")
+    p.add_argument("--dry-run", action="store_true", help="project occurrences offline; no Herdr calls or writes")
+    p.add_argument("--next", type=int, default=3, metavar="N", help="upcoming occurrences, 1-20 (default 3)")
 
     p = sub.add_parser("hooks", help="Claude Code hooks that let seats read their inbox (opt-in)",
                        description="Pick a fleet file with --fleet PATH after the action (hooks install --fleet ...).")
@@ -306,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # Commands whose positional list may be split by options: `send A --dry-run TEXT`.
-LIST_POSITIONALS = {"send": "words", "up": "names", "restart": "names", "swap": "names", "kickoff": "names",
+LIST_POSITIONALS = {"send": "words", "timers": "names", "up": "names", "restart": "names", "swap": "names", "kickoff": "names",
                     "down": "names", "ack": "names", "deliver": "names"}
 
 
@@ -370,6 +376,14 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 
 def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     command = args.command
+    if command == "timers":
+        from herdr_fleet.timers import inspect
+        # Inspection is offline even when action-related environment variables leaked
+        # into the shell. Fleet discovery here must never consult a focused pane.
+        ctx._fleet = load_fleet(find_fleet_file(ctx.cwd, ctx.file, ctx.env))
+        for warning in ctx._fleet.warnings:
+            ctx.warn(warning)
+        return inspect(ctx, args.names, args.next, args.dry_run, args.json)
     if command == "init":  # pure file writing: no preflight, no herdr command
         return _init(ctx, args)
     if command == "log":  # reads .herdr/messages.jsonl only
@@ -515,7 +529,7 @@ def _fail(ctx: Ctx, args: argparse.Namespace, stdin: TextIO, code: int, kind: st
     if args.command == "ui":
         code = EXIT_USAGE
     pane = args.command == "watch" and ctx.env.get("HERDR_PLUGIN_ENTRYPOINT_ID")  # the watch pane shows no error
-    if ctx.notify_enabled or args.command == "ui" or ctx.env.get("HERDR_PLUGIN_ACTION_ID") or pane:
+    if args.command != "timers" and (ctx.notify_enabled or args.command == "ui" or ctx.env.get("HERDR_PLUGIN_ACTION_ID") or pane):
         what = args.entrypoint if args.command == "ui" else args.command
         ctx.notify("Fleet %s failed" % what, "\n".join(lines), "request")
     if getattr(args, "hold", False) or args.command == "menu":

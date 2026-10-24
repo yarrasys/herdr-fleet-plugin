@@ -53,7 +53,7 @@ class Send(LiveFleet):
                                                     entry["id"] + ".md")))  # direct sends land in cur/
         with open(os.path.join(self.repo, ".herdr", ".gitignore")) as handle:
             self.assertEqual(handle.read().split(), ["fleet.state.json", "messages.jsonl", "inbox/", "watch.lock",
-                                                     "watch.log"])
+                                                     "watch.log", "timers.state.json", "timers.lock"])
 
     def test_working_target_gets_it_queued(self):  # design 21.1: typed ahead only with --now
         self.status_of("w2:p2", "working")

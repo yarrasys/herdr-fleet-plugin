@@ -51,6 +51,7 @@ Tests are the executable coverage inventory. For the principal areas, start with
 | Messages, inbox, delivery and state notes | `test_messages.py`, `test_inbox.py`, `test_contacts.py`, `test_statenote.py`, `test_section20.py`, `test_section23.py` |
 | Watcher, hooks and presence | `test_watch.py`, `test_hooks.py`, `test_section21.py` |
 | Board, pages and file reload | `test_section24.py`, `test_section25.py`, `test_section26_6.py` |
+| Daily timers, calendar/fallback and durable queue recovery | `test_section30.py` |
 | Starter examples and combined seat/contact capacity | `test_section27.py` |
 | Claude/Codex transcript usage, windows and cache | `test_context.py`, `test_section29.py` |
 | Git/permissions and command entrypoints | `test_worktrees.py`, `test_permissions.py`, `test_status_doctor.py`, `test_manifest.py`, `test_cli_subprocess.py` |
@@ -60,6 +61,8 @@ Section 27's regression enables the generated layout and top-level disabled watc
 Section 29's synthetic rollout fixture exercises both `status --context` and the real board cache/model/rendering and seat-page header. Its reported last-request total is 123000, effective window 200000 and lifetime total 9000000: the result must be `123k/200k`, with neither lifetime tokens nor double-counted cache/reasoning tokens. Reader cases cover malformed/partial data, null info, valid zero, invalid windows, source/id validation, root precedence and glob escaping, duplicate files, split lines, and the 4 MiB/256 KiB read bound. Cache cases cover provider/root/session isolation, unchanged files, compaction/window changes, missing-file retry and recovery from a failed read even with unchanged file metadata. Layout cases preserve narrow/packed selection and reserve 16 columns only when a visible row has a window. Existing Claude cases remain required.
 
 Use temporary source roots (`HERDR_FLEET_CLAUDE_PROJECTS` and `HERDR_FLEET_CODEX_SESSIONS`) for these tests. The suite checks the exact public usage dictionary, absence of transcript content/id/path in output, unchanged source bytes/modification times, no transcript access from status without `--context`, and no additional Herdr calls for context. Do not copy a live rollout into a fixture. A fake fixture cannot verify compatibility with every agent version; any authorized live check should compare only numeric usage/window fields and report a generic outcome without publishing live identities, paths, prompts or readings. A missing window is unavailable data, not a reason to assume a model limit.
+
+Section 30 exercises the public timers CLI/parser, offline zero-write dry-run, the real watcher delivery seam, TTL on ordinary pull/hook/kickoff/send paths, metadata-only ownership checks, body snapshotting, crash recovery before file/after file/after logging, reordered send/delivery audit, corruption, concurrent schedulers and lock order. Both calendar backends receive the same DST/fold/gap/non-hour-zone checks; forcing the native backend on Python 3.9/3.12 simulates the fallback and is not an actual Python 3.8 run. Active schedules beyond the former small-cache capacity must reuse calendar batches on the next cycle. Test timer/history-bearing log-mode reload, removal of the last timer preserving unrelated mail, and pristine no-timer behavior separately.
 
 Historical release inventories, live observations and their limitations are in [docs/design.md](design.md), particularly sections 12 and 17–29. They record what was run at the time; they are not current procedures or proof that a new build was smoke-tested.
 
@@ -191,7 +194,53 @@ Queue a scratch message, then use its seat page's `d` to deliver and `p` to view
 
 To test the presence guard, the owner types `draft text` into the idle scratch seat's input by hand, without submitting it, then returns to the controller shell. Run a plain scratch `send`. It should queue and the watcher should hold it, including after the owner leaves that pane. Clear the draft manually with Ctrl-U in the scratch pane; do not submit it. Delivery can then proceed when the seat is idle/done. If a dialog appears, answer or close it manually; no raw key or prompt command should be used to dismiss it.
 
-For fleet-file reload, edit a scratch seat's `label` and observe it on the board within a refresh (about 5 s). A malformed edit should keep the last good board and show a red error until repaired. An edit does not reload Python code or rearrange panes. `--log` mode does not reload the fleet file. Restarts, top-band geometry, interrupt cleanup and exit-confirmation edge cases have focused fake coverage; exercise them live only when the change calls for it and in this scratch fleet, with the owner handling dialogs.
+For fleet-file reload, edit a scratch seat's `label` and observe it on the board within a refresh (about 5 s). A malformed edit should keep the last good board and show a red error until repaired. An edit does not reload Python code or rearrange panes. `--log` mode reloads when the watcher has timers or timer history; a history-free watcher that has never had timers retains its no-reload behavior and needs a restart for the first timer addition. Restarts, top-band geometry, interrupt cleanup and exit-confirmation edge cases have focused fake coverage; exercise them live only when the change calls for it and in this scratch fleet, with the owner handling dialogs.
+
+### Daily timer acceptance in the scratch fleet
+
+The designer or owner runs this only after approving a cheap synthetic scratch seat. Stop any manual scratch watcher with Ctrl-C in its own pane before writing/enabling the timer and keep it stopped through the dry-run review. Dry-run does not pause another running watcher; a timer-aware watcher could reload and enqueue first. Disabled timers project no upcoming fires, so review the enabled candidate only while the watcher is stopped before intentionally activating it. Use the `fleet_smoke` function above: it selects the checkout explicitly, so no global installation is needed and a previously registered plugin cannot silently supply different code. Record `python3 "$FLEET_CHECKOUT/bin/herdr-fleet" --version` and `fleet_smoke timers --help`; this candidate is not an installed release. For an approved deployment later, use the README's install/link instructions and restart the actual watcher process. Never use a production job's request file or change its coordinator for this test.
+
+Generate one timer only in the existing disposable fleet. The script refuses to append a second timer set. Its UTC schedule is due in the current minute, starts a minute earlier, has two minutes of grace and a three-minute cutoff. Run inspection promptly; regenerate a fresh scratch fleet if the window has already passed rather than deleting occurrence history.
+
+```bash
+python3 - "$FLEET_SMOKE_FILE" "$FLEET_SMOKE_NAME" <<'PY'
+import datetime
+import json
+from pathlib import Path
+import sys
+fleet, seat = Path(sys.argv[1]), sys.argv[2]
+text = fleet.read_text()
+if "[[timers]]" in text:
+    sys.exit("Use a fresh scratch fleet; do not duplicate or erase timer history")
+now = datetime.datetime.now(datetime.timezone.utc).replace(second=0, microsecond=0)
+body = fleet.parent / "timer-check.md"
+body.write_text("Synthetic timer acceptance: reply TIMER READY once. Run no tools or jobs.\n")
+values = dict(name="scratch-check", to=seat, file=str(body), at=now.strftime("%H:%M"), tz="UTC",
+              starts_at=(now-datetime.timedelta(minutes=1)).isoformat(),
+              until=(now+datetime.timedelta(minutes=3)).isoformat(), grace="2m")
+with fleet.open("a") as handle:
+    handle.write("\n[[timers]]\n")
+    for key, value in values.items():
+        handle.write("%s = %s\n" % (key, json.dumps(value)))
+PY
+fleet_smoke timers --dry-run --json
+fleet_smoke timers scratch-check --next 3
+fleet_smoke watch --once
+fleet_smoke timers scratch-check --json
+fleet_smoke log --json
+fleet_smoke log --owed
+fleet_smoke watch --once
+```
+
+Record the chosen message id, scheduled UTC/local time and deadline. An idle/done seat should receive one owner request with timer metadata, then owe its reply to owner; the repeated pass must not create or submit it again. Inspect only synthetic request/log data. Timer decisions must not copy the body into the journal, and decision entries must not create reply debt. The body file should stay unchanged. A submission marked unconfirmed must not be resubmitted automatically; the fake tests cover this outcome deterministically, so do not manufacture a live failure by interrupting a seat.
+
+For hold/expiry acceptance, use a new scratch timer name and a fresh short window. The owner types a draft into the idle scratch seat without submitting it, then runs `watch --once` from the controller. Expect `timer NAME waiting: typing`, one pending id and its absolute deadline. Keep the draft until the displayed deadline passes, run another pass, and verify that mail moved to `cur/` with an expired audit entry and no timer submission. The owner clears the input manually. Do not inject keys, answer a permission dialog automatically or use `--now` to bypass the hold.
+
+For downtime/catch-up, stop only the scratch watcher, allow a scheduled minute to pass within grace, and restart the selected checkout watcher. It should enqueue only the latest eligible occurrence. Restart once more and verify the same occurrence is not submitted again. Test beyond-grace skip and cutoff using new scratch identities/windows; record skipped/stopped outcomes and no backlog. These short synthetic windows test the same deadline calculation as the default six-hour grace without waiting six hours.
+
+For reload, start a timer-bearing scratch watcher with `--log`, then disable/remove its timer or change its local target in that scratch file. Valid edits must reload; pending owned mail must expire, and unrelated queued mail must remain. Removing the last timer must still reconcile its journal, with no calendar work for removed timers. A malformed edit retains the last valid configuration and reports an error until repaired. Repeat relevant checks in board mode when UI behavior changed. A history-free log watcher requires a restart for its first timer addition, and every Python code update requires a process restart. Stop the manual watcher before returning to cleanup.
+
+Record exactly which live cases ran and which were only covered by fake tests. Passing synthetic acceptance does not install code, approve production configuration or prove exactly-once external execution. Migration must disable the previous trigger and choose a non-overlapping explicit `starts_at`; the requesting coordinator owns that configuration and production acceptance.
 
 ### Cleanup and evidence
 

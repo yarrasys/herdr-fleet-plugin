@@ -94,7 +94,7 @@ class Starter(InitCase):
                          b"Where things stand: (nothing yet).\n\n## production\n\n## in flight\n\n## next\n\n"
                          b"## backlog\n\n")
         self.assertEqual(self.read(project, ".herdr", ".gitignore"),
-                         b"fleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\nwatch.log\n")
+                         b"fleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\nwatch.log\ntimers.state.json\ntimers.lock\n")
         self.assertIn(b"<!--", self.read(project, ".herdr", "kickoff", "default.md").splitlines()[0])
         self.assertEqual(fleet.mode, "chain")
         text = self.read(project, ".herdr", "fleet.toml").decode()

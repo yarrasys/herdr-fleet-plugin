@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from herdr_fleet.timers import Timer, parse_timers
+
 try:
     import tomllib  # Python 3.11+
 except ImportError:  # pragma: no cover - exercised on Python < 3.11
@@ -27,7 +29,7 @@ FLEET_NAME = "fleet.toml"
 DIRECTIONS = ("right", "down")
 
 TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "contacts", "quit_timeout_ms",
-            "restart_hint_tokens", "watch", "inbox_print_max", "interrupt"}
+            "restart_hint_tokens", "watch", "inbox_print_max", "interrupt", "timers"}
 CONTACT_KEYS = {"name", "match", "note"}
 MATCH_KEYS = {"cwd", "kind", "name"}
 LAYOUT_KEYS = {"mode", "columns", "direction", "ratio", "top", "top_ratio"}
@@ -112,6 +114,7 @@ class Fleet:
     interrupt: Dict[str, List[str]] = field(default_factory=dict)  # [interrupt] keys per kind (design 23.7)
     top: Optional[str] = None                  # [layout] top: the seat across the top (design 26.1)
     top_ratio: float = TOP_RATIO               # [layout] top_ratio, clamped to TOP_RATIO_RANGE
+    timers: List[Timer] = field(default_factory=list)  # opt-in daily requests (design 30)
 
     def contact(self, name: str) -> Optional[Contact]:
         for contact in self.contacts:
@@ -253,6 +256,7 @@ def load_fleet(path: str) -> Fleet:
     contacts = _parse_contacts(data.get("contacts", []), repo, [s.name for s in seats], errors, warnings)
     watch, watch_ratio, watch_position, blocked_after = _parse_watch(data.get("watch", True), errors, warnings)
     interrupt = parse_interrupt(data.get("interrupt", {}), errors)
+    timers = parse_timers(data.get("timers", []), repo, [s.name for s in seats], errors, warnings)
 
     if errors:
         raise FleetError(["%s: %s" % (path, e) for e in errors])
@@ -261,7 +265,7 @@ def load_fleet(path: str) -> Fleet:
                  quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns,
                  contacts=contacts, restart_hint_tokens=hint_tokens, watch=watch, watch_ratio=watch_ratio,
                  watch_position=watch_position, notify_blocked_after=blocked_after, inbox_print_max=print_max,
-                 interrupt=interrupt, top=top, top_ratio=top_ratio)
+                 interrupt=interrupt, top=top, top_ratio=top_ratio, timers=timers)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:

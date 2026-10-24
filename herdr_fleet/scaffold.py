@@ -146,7 +146,7 @@ def starter_files(root: str) -> Files:
         (".herdr/fleet.toml", fleet.encode("utf-8")),
         (".herdr/kickoff/default.md", (KICKOFF_COMMENT + DEFAULT_TEMPLATE).encode("utf-8")),
         (".herdr/STATE.md", STATE_NOTE.encode("utf-8")),
-        (".herdr/.gitignore", b"fleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\nwatch.log\n"),
+        (".herdr/.gitignore", b"fleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\nwatch.log\ntimers.state.json\ntimers.lock\n"),
     ]
 
 

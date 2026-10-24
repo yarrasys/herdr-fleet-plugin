@@ -67,7 +67,7 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from herdr_fleet import board, inbox, presence, seen, tui
+from herdr_fleet import board, inbox, presence, seen, timers, tui
 from herdr_fleet.context import EXIT_OK, Ctx, OpError, UsageError
 from herdr_fleet.fleetfile import FleetError
 from herdr_fleet.herdr import HerdrError, describe
@@ -255,6 +255,13 @@ def op_watch(ctx: Ctx, debounce_ms: Optional[int] = None, once: bool = False, lo
 
 
 def watch_once(ctx: Ctx) -> int:
+    with timers.cycle(ctx) as lines:
+        for line in lines:
+            ctx.say(line)
+        return _watch_once(ctx)
+
+
+def _watch_once(ctx: Ctx) -> int:
     """``--once``: what ``deliver`` without names would deliver, logged via ``watch``,
     with the watcher's notification for each mailbox delivered. Exit 1 when a prompt
     failed or may not have arrived, as ``deliver``; else 0."""
@@ -266,12 +273,20 @@ def watch_once(ctx: Ctx) -> int:
         ctx.say("nothing to deliver")
         return EXIT_OK
     codes = [EXIT_OK]
+    timer_states = {str(a.get("name")): str(a.get("agent_status") or "unknown") for a in agents}
+    typing = []
     for name in order:
         line, code, drop = deliver_one(ctx, name, agents, waiting.get(name, []), via="watch")
         ctx.say(line)
         codes.append(code)
         if drop is not None and name != OWNER:
             notify_delivery(ctx, name, drop)
+            if drop.status == "typing":
+                typing.append(name)
+    if ctx.fleet.timers:
+        pending = [m for queue in inbox.queued(ctx.fleet.repo).values() for m in queue]
+        for line in timers.waiting_lines(pending, timer_states, typing):
+            ctx.say(line)
     return max(codes)
 
 
@@ -396,6 +411,9 @@ class Watcher:
         self.last_warning = ""
         self.warnings: List[str] = []           # the last warnings other code wrote (the fleet page shows them)
         self.lock_since = str((read_lock(self.repo) or {}).get("started") or "")
+        self.timer_aware = bool(ctx.fleet.timers) or os.path.exists(timers.state_path(self.repo))
+        self.timer_mtime = fleet_mtime(ctx.fleet.path)
+        self.timer_error = ""
 
     def unhook(self) -> None:
         """Give the context its own streams back (board mode)."""
@@ -482,7 +500,7 @@ class Watcher:
                 try:
                     self.cycle()
                     self.trouble = ""
-                except (HerdrError, OSError) as exc:  # herdr away, a file unreadable: say it once, keep going
+                except (HerdrError, OSError, OpError) as exc:  # say it once, keep going
                     text = describe(exc) if isinstance(exc, HerdrError) else str(exc)
                     if text != self.trouble:
                         self.trouble = text
@@ -524,6 +542,11 @@ class Watcher:
         """One pass: notify the owner, then start a waiter for every seat or contact with a
         message that is not FYI and no waiter yet. Reads files; asks herdr only for the
         agent list, and only when a waiter is due."""
+        if self.timer_aware:
+            self.reload_timers()
+        with timers.cycle(self.ctx) as lines:
+            for line in lines:
+                self.say(line)
         waiting = inbox.queued(self.repo)
         if waiting.get(OWNER):
             self.owner(waiting[OWNER])
@@ -541,6 +564,10 @@ class Watcher:
             return
         agents = self.ctx.herdr.agent_list()
         self.observe_list(agents)
+        states = {str(a.get("name")): str(a.get("agent_status") or "unknown") for a in agents}
+        for line in timers.waiting_lines([m for queue in waiting.values() for m in queue], states, self.holds):
+            if not line.endswith(("idle", "done")):
+                self.note("timer:" + line.split()[1], line)
         for name in due:
             count = len(waiting[name])
             target, problem = herdr_target(self.ctx, name, agents)
@@ -553,6 +580,25 @@ class Watcher:
                 self.announced[name] = count
                 self.say("waiting on %s (%d queued)" % (name, count))
             self.start(name, target)
+
+    def reload_timers(self) -> None:
+        """Timer-aware watchers reload in log mode too; pristine fleets keep their old path."""
+        if self.view is not None:
+            self.view.reread_fleet()
+            return
+        mtime = fleet_mtime(self.ctx.fleet.path)
+        if mtime is None or mtime == self.timer_mtime:
+            return
+        self.timer_mtime = mtime
+        try:
+            fleet = self.ctx.reload_fleet()
+        except FleetError as exc:
+            self.timer_error = "; ".join(exc.errors)
+            self.say("fleet file does not parse; still using the last good one: " + self.timer_error, error=True)
+            return
+        self.timer_error = ""
+        self.blocked_after = fleet.notify_blocked_after
+        self.say("fleet file %s changed; reloaded" % fleet.path)
 
     def held(self, name: str, messages: List[Message]) -> bool:
         """A mailbox left alone for now: a pointer already named all of it (a new message
@@ -628,6 +674,8 @@ class Watcher:
         with self.cond:
             self.holds[name] = drop.detail
         try:
+            for line in timers.waiting_lines(drop.waiting, {}, [name]):
+                self.say(line)
             self.say("%s %s; %s, holding %d" % (name, drop.state or "idle", drop.detail, len(drop.waiting)))
             while not self.stopping:
                 self.ctx.clock.sleep(HOLD_RECHECK_S)

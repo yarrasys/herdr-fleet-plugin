@@ -28,7 +28,7 @@ from typing import Dict, Iterator, List, Mapping, Optional
 from herdr_fleet.herdr import Herdr, HerdrError
 
 STATE_NAME = "fleet.state.json"
-IGNORED = (STATE_NAME, "messages.jsonl", "inbox/", "watch.lock", "watch.log")  # .herdr/.gitignore (5, 16.2, 18.1, 24.1)
+IGNORED = (STATE_NAME, "messages.jsonl", "inbox/", "watch.lock", "watch.log", "timers.state.json", "timers.lock")
 VERSION = 1
 
 

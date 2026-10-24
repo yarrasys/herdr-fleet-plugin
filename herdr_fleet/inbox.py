@@ -71,6 +71,8 @@ class Message:
     path: str = ""
     box: str = NEW
     mtime_ns: int = 0
+    timer: Optional[str] = None
+    scheduled_for: Optional[str] = None
 
     @property
     def short(self) -> str:
@@ -242,7 +244,8 @@ def render_file(message: Message) -> str:
         lines.append("queued_by: %s" % message.queued_by)
     if message.priority:
         lines.append("priority: %d" % message.priority)
-    for key, value in (("reply_to", message.reply_to), ("ttl", message.ttl), ("file", message.file)):
+    for key, value in (("reply_to", message.reply_to), ("ttl", message.ttl), ("file", message.file),
+                       ("timer", message.timer), ("scheduled_for", message.scheduled_for)):
         if value:
             lines.append("%s: %s" % (key, _one_line(value)))
     return "\n".join(lines) + "\n\n" + message.body
@@ -268,7 +271,8 @@ def parse_file(text: str, path: str = "", box: str = NEW) -> Message:
     return Message(id=fields["id"], sender=fields["from"], to=fields["to"], time=fields["time"], body=body,
                    fyi=fields.get("fyi", "").lower() == "true", reply_to=fields.get("reply_to") or None,
                    ttl=fields.get("ttl") or None, file=fields.get("file") or None,
-                   queued_by=fields.get("queued_by") or None, priority=priority, path=path, box=box)
+                   queued_by=fields.get("queued_by") or None, priority=priority, path=path, box=box,
+                   timer=fields.get("timer") or None, scheduled_for=fields.get("scheduled_for") or None)
 
 
 def write(repo: str, message: Message, box: str = NEW) -> Message:
@@ -295,8 +299,26 @@ def write(repo: str, message: Message, box: str = NEW) -> Message:
 
 
 def load(path: str, box: str) -> Message:
-    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
         message = parse_file(handle.read(), path, box)
+    message.mtime_ns = os.stat(path).st_mtime_ns
+    return message
+
+
+def load_headers(path: str, box: str) -> Message:
+    """Read metadata for timer ownership/recovery without inspecting a payload."""
+    head = []
+    size = 0
+    with open(path, encoding="utf-8", newline="") as handle:
+        while True:
+            line = handle.readline(16385)
+            size += len(line)
+            if not line or size > 16384:
+                raise ValueError("missing or oversized message header")
+            head.append(line)
+            if line == "\n":
+                break
+    message = parse_file("".join(head), path, box)
     message.mtime_ns = os.stat(path).st_mtime_ns
     return message
 
@@ -385,6 +407,8 @@ def size_of(text: str) -> int:
 def direct_text(message: Message) -> str:
     """A message delivered on its own: ``[from X #3f2a9c] body``, or the body as written
     when it already starts with ``[from`` (design 16.1)."""
+    if message.timer:
+        return item_header(message) + " " + message.body
     if message.body.lstrip().startswith("[from"):
         return message.body
     return "[from %s #%s] %s" % (message.sender, message.short, message.body)
@@ -395,7 +419,8 @@ def item_header(message: Message, direction: bool = False, today: Optional[datet
     recipient too (``--history``)."""
     who = "%s to %s" % (message.sender, message.to) if direction else message.sender
     reply = " re #%s" % short_of(message.reply_to) if message.reply_to else ""
-    return "[from %s at %s #%s%s]" % (who, time_label(message.time, today), message.short, reply)
+    timer = " timer %s scheduled %s" % (message.timer, message.scheduled_for) if message.timer else ""
+    return "[from %s at %s #%s%s%s]" % (who, time_label(message.time, today), message.short, reply, timer)
 
 
 def render_batch(messages: Sequence[Message], direction: bool = False,

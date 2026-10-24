@@ -269,6 +269,7 @@ class FleetCase(unittest.TestCase):
         previous: Optional[List[str]] = None
         listed: Dict[str, Optional[str]] = {}  # the states the command's last `agent list` answered
         pressed: Optional[str] = None          # the last key the fake screen replayed, until a focus uses it
+        timer_reads = 0
         for call in entries:
             if "command" in call:
                 keys.finish()
@@ -276,12 +277,18 @@ class FleetCase(unittest.TestCase):
                 keys = KeysCheck(self, command)
                 previous = None
                 listed, pressed = {}, None
+                timer_reads = 0
                 continue
             if "key" in call:
                 pressed = call["key"]
                 continue
             argv, info = call["argv"], call["info"]
             self.assertTrue(argv, "bare herdr was run")
+            if command[:1] == ["timers"]:
+                self.assertNotIn("--dry-run", command, "offline timers called Herdr")
+                self.assertEqual(argv, ["agent", "list"], "timer inspection may only list agents")
+                timer_reads += 1
+                self.assertLessEqual(timer_reads, 1, "timer inspection listed agents more than once")
             if argv[:2] == ["agent", "list"] and "states" in info:
                 listed = dict(info["states"])
             if argv[:2] == ["agent", "get"] and info.get("name"):
