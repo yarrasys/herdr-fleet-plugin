@@ -58,12 +58,14 @@ class Subprocess(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("herdr agent start fablyn-reviewer --kind codex", proc.stdout)
         self.assertIn("--env FABLYN_ROLE=orchestrator", proc.stdout)
-        # The example uses mode = "grid": four seats make a 2x2 grid in the new workspace's root pane.
-        self.assertIn("layout: grid - 4 seats in 2 columns (2+2) in <root pane of fablyn>", proc.stdout)
+        # The example uses mode = "grid" with top = "fablyn-orchestrator" (design 26): the orchestrator
+        # keeps the new workspace's root pane as a band, and the other three make a 2 + 1 grid below it.
+        self.assertIn("layout: grid - top: fablyn-orchestrator, then 3 seats in 2 columns (2+1) in "
+                      "<root pane of fablyn>", proc.stdout)
         root = "'<root pane of fablyn>'"
-        for line in ("fablyn-reviewer: plan - herdr pane split %s --direction right --ratio 0.5" % root,
-                     "fablyn-dev: plan - herdr pane split %s --direction down --ratio 0.5" % root,
-                     "fablyn-designer: plan - herdr pane split '<pane of fablyn-reviewer>' --direction down "
+        for line in ("fablyn-dev: plan - herdr pane split %s --direction down --ratio 0.375" % root,
+                     "fablyn-designer: plan - herdr pane split '<pane of fablyn-dev>' --direction right --ratio 0.5",
+                     "fablyn-reviewer: plan - herdr pane split '<pane of fablyn-dev>' --direction down "
                      "--ratio 0.5",
                      "herdr agent start fablyn-orchestrator --kind claude --pane %s" % root):
             self.assertIn(line, proc.stdout)

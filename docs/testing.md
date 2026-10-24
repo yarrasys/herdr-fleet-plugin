@@ -750,6 +750,18 @@ Design 25 (pages in the board, the same release), `tests/test_section25.py` (37 
 
 The 706 tests of 0.12.0 pass; their changed expectations: the `.herdr/.gitignore` written by the state file, the message log and `init` gains `watch.log` (four tests), and `tests/test_watchpane.py`'s strip geometry follows the 0.2 default ratio (a resize of 0.3 instead of 0.38, `20% of the area`, the strip 10 rows of 50, tile's `--ratio 0.8`; eight tests). `tests/test_section24.py`'s keys follow 25.1 (Enter and the numbers open pages; `g` focuses) and its header and footer the owner cell and the hints.
 
+Version 0.14.0 (design 26), `tests/test_section26.py` (42 tests):
+
+- `layout.band_plan` for 2 to 6 seats, every column count, `top_ratio` 0.1, 0.3 and 0.6 and `[watch] ratio` 0.1, 0.2, 0.4 and none (the band, the strip and every grid cell as shares of the area; herdr's 0.9 clamp when 0.6 with a 0.4 strip asks for 1.0), the order of the steps, the band without a strip, the top seat alone; `band_ratio`, `describe_shape` with `top`, and `is_top_band` (rects drawn inside borders included);
+- the fleet file: `top` and `top_ratio` (defaults, an unknown seat, chain mode, out of range clamped with a warning, the ratio grammar, `top_ratio` without `top`, one seat giving a band and an empty grid), the example and the starter;
+- `up` in a workspace it creates: the top seat, last in the file, gets the root pane with its env and starts first, kickoffs stay in file order; the strip from the root before any split, then the band's split (0.375), then the grid, checked at 200x50 (band 15 rows, grid 25, strip 10); other ratios and columns; `--no-watch` (the band keeps 0.3 itself); the clamp warning; `--dry-run`; the top seat not selected;
+- `--me`: on the top seat beside the caller and inside the labelled workspace (the caller's pane is the band, no side share), on another seat (14.4 and the `top needs …` line), on another seat with a workspace `up` creates (the band in its root), no `--me` beside the caller, no agent in the caller's pane, the caller outside the fleet's workspace, and `--join` into a workspace `up` creates (the `run herdr-fleet tile` line, then `tile` makes the band and the next `up` is quiet);
+- an existing layout: a band (nothing moves, nothing said), a plain grid (the `run herdr-fleet tile` line last, nothing moved, quiet after `tile`), an absent top seat, and a strip opened later going under the grid rather than the band;
+- `tile`: the moves in order (the other seats parked, the strip back under the top seat with 0.8, the grid's first seat with 0.375, the rest from it) and the geometry, `--dry-run`, no strip (0.3), the top seat not live and in another workspace, the top seat alone;
+- `status`, `status --json` and `doctor` identical, herdr calls included, with and without `top`.
+
+The 801 tests of 0.13.0 pass; the example's dry run in `tests/test_cli_subprocess.py` now expects the band, since `examples/fablyn` sets `top = "fablyn-orchestrator"`.
+
 ## Live smoke test for 0.12.0 (to run by hand)
 
 Not run yet. For the designer or the owner, inside herdr, with `HERDR_FLEET_BIN` exported and a one-seat Haiku scratch fleet as for 0.10.0 (seat `n12-a`, no watcher strip). Two live reproductions of design 23: the exit confirmation that `/exit` shows while a background task runs, and one Ctrl-C to a working seat. Check `herdr agent get n12-a` before each step that sends anything: never send a prompt or a key to it while it is `blocked`, except the one Enter herdr-fleet presses itself in step 3. Run the steps from a plain shell pane or a pane whose agent has a herdr name: since 0.12.0 a pane with an unnamed agent that no contact matches is a usage error for `interrupt`, `send`, `ack` and `inbox` (design 23.3; add `--as owner` there).
@@ -870,3 +882,17 @@ Not run yet. For the owner, on a fleet that is up with its watcher strip (Fablyn
 | 7 | as described; nothing wraps |
 
 `a` (ack), `d` (deliver now) and `p` (screen) change the message log, deliver messages or read a screen; try them on a scratch fleet rather than a working one (the 0.12.0 one-seat Haiku fleet without `watch = false`, so `up` opens its strip): queue a message to the idle seat with `send --as owner --queue n12-a "reply PONG"`, click into the strip, press `1` for its page and `d`, and the seat gets it at once (`delivered 1 to n12-a` in the footer, no `idle; delivering` line before it); press `p`: its last twelve screen lines appear under `screen`. Then `send --as owner n12-a "please answer"` (n12-a now owes owner), select the debt on its page with ↓, press `a` (the footer asks `ack #… (n12-a owes owner …)? y/n`) and `y`: `herdr-fleet log --last 1` reads `<time>  n12-a → owner  ack #…  acked by owner: from the board`, and the debt leaves the page.
+
+## Live check for 0.14.0 (to run by hand)
+
+Not run yet. For the owner, after installing 0.14.0, with `top = "<orchestrator>"` and `mode = "grid"` in a fleet's `[layout]`. Nothing here prompts a seat; `tile` only moves panes.
+
+1. `herdr-fleet up --dry-run` on a fleet whose workspace does not exist yet: the plan reads `layout: grid - top: <orchestrator>, then N seats in C columns (…)`, the strip's `plugin pane open` and `pane resize` on the root pane, then `pane split '<root pane of …>' --direction down --ratio 0.375`, then the grid from the first grid seat's pane; the orchestrator's `agent start` comes first.
+2. On a fleet that is already up as a plain grid (Fablyn after 0.13.0): `herdr-fleet up` moves nothing and its report ends `layout: run herdr-fleet tile for the top band`. Then `herdr-fleet tile --dry-run`, and `herdr-fleet tile`.
+3. Run `herdr-fleet up` again.
+
+| Step | Expected |
+| --- | --- |
+| 1 | as described; nothing is created |
+| 2 | after `tile`: the orchestrator across the whole width at the top (about 30% of the height), the other seats in the grid below it, the watcher strip across the bottom (about 20%); every agent keeps working and keeps its pane id; `herdr pane layout` shows the band's split at 0.375 and the strip's at 0.8 |
+| 3 | no `run herdr-fleet tile` line |

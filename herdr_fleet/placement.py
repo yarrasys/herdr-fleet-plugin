@@ -13,10 +13,18 @@ splits panes; ``bringup`` starts the agents.
   by an earlier run are already in the workspace, new seats are appended with
   the chain rule instead.
 
-Both take ``on_area``: called once with the first pane of a fresh layout (the
-root pane, the grid area, or the first chained seat's pane) before anything
-else splits it, so ``up`` can open the watcher strip below the whole layout
-(design 19.1).
+- ``place_band`` (design 26): with ``[layout] top``, the top seat's pane (the
+  root pane of a workspace created in this run, or the caller's pane with
+  ``--me <top seat>``) is a band across the whole width: the strip is split
+  from it first, then the grid's first seat ``down`` so that the band keeps
+  ``top_ratio`` of the area, then the rest of the grid from that seat
+  (``layout.band_plan``). ``band_anchor`` decides whether a run builds the band,
+  and ``band_check`` whether a live layout already is one.
+
+All take ``on_area``: called once with the first pane of a fresh layout (the
+root pane, the grid area, the first chained seat's pane, or the band's pane)
+before anything else splits it, so ``up`` can open the watcher strip below the
+whole layout (design 19.1). It answers whether a strip was opened (or planned).
 """
 
 from __future__ import annotations
@@ -27,12 +35,13 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from herdr_fleet.context import Ctx, Report
 from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, render_cmd, split_argv
-from herdr_fleet.layout import describe_shape, grid_plan, placeholder
+from herdr_fleet.layout import (Rect, band_ratio, band_warning, describe_shape, grid_plan, is_top_band,
+                                placeholder)
 
 GRID_AREA_RATIO = 0.5  # share the anchor keeps when [layout] ratio is unset
 
 Placed = Dict[str, Tuple[str, bool]]  # seat name -> (pane, created by this run)
-AreaHook = Optional[Callable[[str], None]]
+AreaHook = Optional[Callable[[str], Optional[bool]]]
 
 
 @dataclass
@@ -168,6 +177,13 @@ def place_grid(ctx: Ctx, needs: Sequence[Seat], target: Target, live: Dict[str, 
     if on_area is not None:
         on_area(area)
     placed: Placed = {first.name: (area, created)}
+    _fill_grid(ctx, names, area, report, placed)
+    return placed
+
+
+def _fill_grid(ctx: Ctx, names: Sequence[str], area: str, report: Report, placed: Placed) -> None:
+    """Split the rest of an even grid of ``names`` out of ``area``, the first seat's pane."""
+    fleet = ctx.fleet
     refs = {area: area}
     for step in grid_plan(names, area, fleet.columns):
         seat = fleet.seat(step.seat)
@@ -179,4 +195,116 @@ def place_grid(ctx: Ctx, needs: Sequence[Seat], target: Target, live: Dict[str, 
         if pane:
             placed[seat.name] = (pane, True)
             refs[placeholder(seat.name)] = pane
+
+
+# -- the top band (design 26) ------------------------------------------------------------------
+
+NOT_PLACED = "top seat %s is not placed in this run; placed without the band"
+NOT_HERE = "top seat %s is not in the fleet's workspace; placed without the band"
+NEEDS = "top needs the fleet's own workspace or --me %s"
+RUN_TILE = "run herdr-fleet tile for the top band"
+
+
+def band_anchor(ctx: Ctx, me: Optional[str], adopted: bool, needs: Sequence[Seat], target: Target,
+                fresh: bool, report: Report) -> Tuple[Optional[str], bool]:
+    """Design 26.2: ``(pane, check)``. ``pane`` is the band's pane when this run builds the
+    band: the root pane of a workspace created in this run when the top seat takes it, or
+    the caller's pane in the fleet's workspace with ``--me <top seat>``. Otherwise None,
+    with a ``layout:`` line saying why on a fresh layout. ``check``: whether ``up`` should
+    look at the live layout afterwards (``band_check``): always but when a line said that
+    the band was not applied."""
+    top = ctx.fleet.top
+    if top is None or ctx.fleet.mode != "grid":
+        return None, False
+    if not fresh:
+        return None, True  # an existing layout: nothing moves (19.3); band_check says whether to tile
+    if me == top:
+        here = ctx.invocation.workspace_id == target.workspace_id  # both None: a dry run that would --join
+        if not adopted:
+            report.add("layout", NOT_PLACED % top, "")
+            return None, False
+        if not here:
+            report.add("layout", NOT_HERE % top, "")
+            return None, False
+        if target.free_pane:  # joined a workspace created in this run: its root pane is taken by a seat
+            return None, True
+        return ctx.invocation.pane_id, True
+    if target.free_pane:
+        if target.free_for == top:
+            return target.free_pane, True
+        report.add("layout", NOT_PLACED % top, "")
+        return None, False
+    report.add("layout", NEEDS % top, "")
+    return None, False
+
+
+def place_band(ctx: Ctx, needs: Sequence[Seat], target: Target, report: Report, anchor: str,
+               on_area: AreaHook = None) -> Placed:
+    """Design 26.2: ``anchor`` is the top seat's pane (taken here when it is the root pane
+    reserved for the top seat). The strip is split from it first (``on_area``), then the
+    grid's first seat ``down`` so that the band keeps ``top_ratio`` of the area, then the
+    rest of the grid from that seat, as 14.2 does."""
+    fleet = ctx.fleet
+    top = str(fleet.top)
+    placed: Placed = {}
+    if target.free_pane and target.free_pane == anchor and target.free_for == top:
+        placed[top] = (anchor, False)  # root pane: never closed by --close-panes
+        target.free_pane = None
+    others = [s for s in needs if s.name != top]
+    names = [s.name for s in others]
+    report.add("layout", "grid", "%s in %s" % (describe_shape(names, fleet.columns, top=top), anchor))
+    opened = bool(on_area(anchor)) if on_area is not None else False
+    if not others:
+        return placed
+    ratio, wanted = band_ratio(fleet.top_ratio, fleet.watch_ratio if opened else None)
+    if ratio != wanted:
+        ctx.warn(band_warning(ratio, wanted))
+    first = others[0]
+    area = split_pane(ctx, first, anchor, report, "down", ratio)
+    if area is None:
+        for seat in others[1:]:
+            report.add(seat.name, "failed", "not placed: the pane it splits from was not created", "fail")
+        return placed
+    placed[first.name] = (area, True)
+    _fill_grid(ctx, names, area, report, placed)
     return placed
+
+
+def band_check(ctx: Ctx, live: Dict[str, Dict], target: Target, report: Report) -> None:
+    """Design 26.2: on a layout ``up`` did not build as a band, add ``layout: run
+    herdr-fleet tile for the top band`` when the top seat is live in the fleet's workspace
+    but its pane is not a band across the seats above all of them, judged from ``pane
+    layout`` (read-only). Nothing is said when the layout cannot be read."""
+    top = ctx.fleet.top
+    agent = live.get(top or "")
+    if not top or not agent or not agent.get("pane_id"):
+        return
+    if target.workspace_id is None or agent.get("workspace_id") not in (None, target.workspace_id):
+        return
+    pane = str(agent["pane_id"])
+    try:
+        layout = ctx.herdr.pane_layout(pane)
+    except HerdrError:
+        return
+    rects = {str(p.get("pane_id")): _rect(p.get("rect")) for p in (layout.get("panes") or [])
+             if isinstance(p, dict)}
+    mine = rects.get(pane)
+    if mine is None:
+        return
+    others: List[Rect] = []
+    for seat in ctx.fleet.seats:
+        other = (live.get(seat.name) or {}).get("pane_id")
+        rect = rects.get(str(other)) if other and seat.name != top else None
+        if rect is not None:
+            others.append(rect)
+    if not is_top_band(mine, others):
+        report.add("layout", RUN_TILE, "")
+
+
+def _rect(value: object) -> Optional[Rect]:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return (float(value["x"]), float(value["y"]), float(value["width"]), float(value["height"]))
+    except (KeyError, TypeError, ValueError):
+        return None

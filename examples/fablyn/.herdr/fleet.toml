@@ -9,7 +9,10 @@ kickoff    = ".herdr/kickoff/default.md"   # optional default kickoff template (
 [layout]
 mode      = "grid"               # chain (default): each seat splits from the previous one;
                                  # grid: the seats fill an even grid, column-major in file order
-# columns = 2                    # grid only; default ceil(sqrt(seats placed)): 4 seats -> 2x2
+top       = "fablyn-orchestrator"  # grid only: this seat gets a band across the whole width,
+                                 # above the grid of the other seats (the watcher strip stays at the bottom)
+# top_ratio = 0.3                # the band's share of the tab's height, 0.1 to 0.6
+# columns = 2                    # grid only; default ceil(sqrt(seats placed)): 3 seats -> 2 + 1
 direction = "right"              # chain: split direction between seats. grid: first split off your pane
 ratio     = 0.5                  # chain: split ratio. grid: share your pane keeps when it is not a seat
 

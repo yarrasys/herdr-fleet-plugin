@@ -9,8 +9,9 @@ prompted, typed or started in it.
 
 - Where: on a fresh layout, split from the first pane of the layout before any
   other seat splits it (``placement``'s ``on_area`` hook), so it spans the seats;
-  on an existing layout, under the last seat's pane in the workspace (``tile``
-  stretches it across the grid later).
+  with ``[layout] top`` that is the top seat's pane, before the grid is split off
+  it (design 26.2); on an existing layout, under the last seat's pane in the
+  workspace (``tile`` stretches it across the grid later).
 - Size: herdr splits 50/50, so the pane above is resized with ``pane resize
   --direction down``, which adds the amount to the split's first-child ratio;
   the current ratio comes from ``pane layout``. A failed resize is a warning.
@@ -160,9 +161,10 @@ class Strip:
         self.report = report
         self.tried = False
 
-    def open_at(self, area: str) -> None:
-        """Split the strip from ``area``, the first pane of a fresh layout."""
-        self.open(area)
+    def open_at(self, area: str) -> bool:
+        """Split the strip from ``area``, the first pane of a fresh layout. True when it
+        was opened (or, on a dry run, planned), so a top band (design 26) knows its ratio."""
+        return self.open(area)
 
     def open_after(self, live: Dict[str, Dict], placed: Placed, target: Target, up: bool) -> None:
         """An existing layout: under the last seat's pane in the fleet's workspace.
@@ -179,9 +181,9 @@ class Strip:
             return
         self.open(pane)
 
-    def open(self, above: str) -> None:
+    def open(self, above: str) -> bool:
         if self.tried:
-            return
+            return False
         self.tried = True
         ctx, fleet = self.ctx, self.ctx.fleet
         ratio = fleet.watch_ratio
@@ -191,14 +193,14 @@ class Strip:
             resize = pane_resize_argv(above, "down", round(1 - ratio - FIFTY_FIFTY, 4))
             self.report.add("watcher", "plan", "%s, then %s (the strip gets %s of %s)"
                             % (render_cmd(argv), render_cmd(resize), percent(ratio), above))
-            return
+            return True
         try:
             pane = ctx.herdr.plugin_split_open(plugin_id(ctx), ENTRYPOINT, above, DIRECTION, fleet.repo,
                                                {"HERDR_FLEET_FILE": fleet.path})
         except HerdrError as exc:
             self.report.add("watcher", "failed", "plugin pane open: %s; start one by hand with `herdr-fleet watch`"
                             % describe(exc), "partial")
-            return
+            return False
         strip = str(pane["pane_id"])
         ctx.state.set_watch(strip, True, now_iso())
         ctx.save()
@@ -206,6 +208,7 @@ class Strip:
         focus = "; herdr moved the focus to it" if pane.get("focused") else ""
         self.report.add("watcher", "started", "herdr-fleet watch in pane %s below %s, %s%s"
                         % (strip, above, size, focus))
+        return True
 
     def resize(self, above: str, strip: str, ratio: float) -> str:
         """Resize the split herdr made 50/50 so the strip gets ``ratio``; say what it got."""
@@ -237,9 +240,13 @@ class Strip:
 
 def last_seat_pane(ctx: Ctx, live: Dict[str, Dict], placed: Placed, target: Target) -> Optional[str]:
     """The pane of the last seat in file order that has one in the fleet's workspace
-    (not the caller's own pane)."""
+    (not the caller's own pane). The ``[layout] top`` seat comes last of all (design 26):
+    the strip goes under the grid, not between the band and the grid."""
     cache: Dict[str, Optional[str]] = {}
-    for seat in reversed(ctx.fleet.seats):
+    seats = list(reversed(ctx.fleet.seats))
+    if ctx.fleet.top and ctx.fleet.mode == "grid":
+        seats.sort(key=lambda seat: seat.name == ctx.fleet.top)
+    for seat in seats:
         pane = pane_of(ctx, seat.name, live, placed)
         if pane and pane != ctx.invocation.pane_id and in_target(ctx, pane, target, cache):
             return pane

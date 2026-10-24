@@ -7,9 +7,10 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 - ``ops``: the operations (up, restart, swap, kickoff, down, go, peek, interrupt,
   ui, install-cli)
   and their refusals; ``bringup``: workspace resolution, classifying and
-  starting seats; ``placement``: where new panes go (chain or grid);
-  ``layout``: the pure grid plan; ``tile``: re-tile live seats with pane moves;
-  ``checks``: read-only drift, status, doctor.
+  starting seats; ``placement``: where new panes go (chain, grid, or the
+  grid under a top band); ``layout``: the pure grid and top-band plans;
+  ``tile``: re-tile live seats with pane moves; ``checks``: read-only drift,
+  status, doctor.
 - ``seats``: the per-seat lifecycle against herdr (shell check, start with
   retry, the only prompt path, the quit procedure with its one Enter on the
   exit confirmation, the interrupt keys); ``presence``: the guard that sends
@@ -40,7 +41,7 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 
 import os
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

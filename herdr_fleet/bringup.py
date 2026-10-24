@@ -46,7 +46,8 @@ def require_caller_context(ctx: Ctx) -> None:
 def resolve_target(ctx: Ctx, report: Report, first: Optional[Seat] = None) -> Target:
     """Find or create the fleet's workspace (design 4.1 step 2). A new
     workspace's root pane is created with the cwd and env of ``first``, the
-    first seat that will need a pane, and is reserved for it."""
+    first seat that will need a pane (the ``[layout] top`` seat when it needs
+    one, design 26.2), and is reserved for it."""
     fleet, state, inv = ctx.fleet, ctx.state, ctx.invocation
     if not fleet.workspace:
         require_caller_context(ctx)

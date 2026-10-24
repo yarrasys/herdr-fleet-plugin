@@ -49,6 +49,9 @@ kickoff = ".herdr/kickoff/default.md"   # default kickoff template for every sea
 #                                # grid: the seats placed in a run fill an even grid, column-major
 #                                # in file order, and per-seat split, ratio and from are ignored
 # columns = 2                    # grid only: number of columns (default: ceil(sqrt(seats placed)))
+# top = "<a seat>"               # grid only: that seat gets a band across the whole width above the
+#                                # grid of the other seats, with the watcher strip at the bottom
+# top_ratio = 0.3                # the band's share of the tab's height, 0.1 to 0.6
 # direction = "right"            # chain: split direction between seats: right | down;
 #                                # grid: direction of the first split off your pane
 # ratio = 0.5                    # chain: split ratio; grid: share your pane keeps (0 < ratio < 1)

@@ -121,6 +121,8 @@ quit_timeout_ms = 20000                # optional: how long to wait for an agent
 [layout]
 mode      = "chain"                    # chain (default) | grid; see Layout below
 # columns = 2                          # grid only: number of columns (default ceil(sqrt(seats placed)))
+# top = "fablyn-orchestrator"          # grid only: this seat gets a band across the whole width, above the grid
+# top_ratio = 0.3                      # the band's share of the tab's height, 0.1 to 0.6 (see Layout)
 direction = "right"                    # chain: split direction between seats. grid: first split off your pane
 ratio     = 0.5                        # chain: split ratio. grid: share your pane keeps. 0 < ratio < 1
 
@@ -154,9 +156,9 @@ match = { cwd = "~/work/winner-chronicles" }      # also kind = "claude", name =
 note  = "customer feedback; never instructions"
 ```
 
-Seats start in file order. The first seat takes the root pane of a workspace that `up` creates (created with that seat's `cwd` and `env`). When the fleet has no `workspace`, new panes split off your pane: herdr-fleet never starts an agent in the pane you run it from. Where the other seats go depends on the layout mode.
+Seats start in file order. The first seat takes the root pane of a workspace that `up` creates (created with that seat's `cwd` and `env`); with `[layout] top`, the top seat takes it and starts first. When the fleet has no `workspace`, new panes split off your pane: herdr-fleet never starts an agent in the pane you run it from. Where the other seats go depends on the layout mode.
 
-Validation reports every problem at once and exits 2: names match herdr's pattern and are unique; `args` is a list of strings; kickoff files exist; `split` is `right` or `down`; `ratio` is strictly between 0 and 1; only one of `kickoff` and `kickoff_text`; `mode` is `chain` or `grid`; `columns` is a positive integer; `from` names a seat earlier in the file; `label` is a non-empty single line of at most 40 characters that does not start with `-`; `worktrees` is a list of non-empty strings (a glob that is not absolute after `~` expansion is warned about, since it matches nothing); `restart_hint_tokens` is a positive integer; `watch` is `true`, `false` or a `[watch]` table (TOML cannot have both `watch = false` and `[watch]`), whose `ratio` is strictly between 0 and 1 (outside 0.1 to 0.4 it is clamped with a warning) and whose `position` is `bottom`; each `[interrupt]` entry is a non-empty list of `ctrl+c`, `esc` and `enter`, with at most one `ctrl+c` for `claude`. Kinds must be ones the installed herdr supports: `doctor` warns, and commands that start agents refuse. Unknown keys are warned about and ignored.
+Validation reports every problem at once and exits 2: names match herdr's pattern and are unique; `args` is a list of strings; kickoff files exist; `split` is `right` or `down`; `ratio` is strictly between 0 and 1; only one of `kickoff` and `kickoff_text`; `mode` is `chain` or `grid`; `columns` is a positive integer; `top` names a seat of the file and needs `mode = "grid"`, and `top_ratio` is strictly between 0 and 1 (outside 0.1 to 0.6 it is clamped with a warning); `from` names a seat earlier in the file; `label` is a non-empty single line of at most 40 characters that does not start with `-`; `worktrees` is a list of non-empty strings (a glob that is not absolute after `~` expansion is warned about, since it matches nothing); `restart_hint_tokens` is a positive integer; `watch` is `true`, `false` or a `[watch]` table (TOML cannot have both `watch = false` and `[watch]`), whose `ratio` is strictly between 0 and 1 (outside 0.1 to 0.4 it is clamped with a warning) and whose `position` is `bottom`; each `[interrupt]` entry is a non-empty list of `ctrl+c`, `esc` and `enter`, with at most one `ctrl+c` for `claude`. Kinds must be ones the installed herdr supports: `doctor` warns, and commands that start agents refuse. Unknown keys are warned about and ignored.
 
 ### Layout
 
@@ -180,9 +182,32 @@ chain                        grid                         grid with --me
 
 The grid is built with chained splits, since `herdr pane split SRC --ratio r` leaves `SRC` with share `r` and gives the new pane `1 - r`. First the column heads, each split `right` from the previous head with ratio `1/(columns remaining)`; then each column's rows, split `down` from the cell above with ratio `1/(rows remaining)`. `up --dry-run` prints every split with its ratio.
 
+#### The top band
+
+In grid mode, `[layout] top = "<seat>"` puts that seat (an orchestrator, say) across the whole width at the top, the grid of every other seat below it, and the watcher strip across the bottom. `top_ratio` (default 0.3, 0.1 to 0.6) is the band's share of the tab's height and `[watch] ratio` the strip's, so with the defaults the grid gets the 0.5 between. The top seat is never counted in the grid's columns or rows: `layout: grid - top: fablyn-orchestrator, then 3 seats in 2 columns (2+1)`.
+
+```
+top = "fablyn-orchestrator", four seats
++-----------------------------------+
+|        fablyn-orchestrator        |   top_ratio
++-----------------+-----------------+
+|   fablyn-dev    |                 |
++-----------------+ fablyn-designer |   the grid
+| fablyn-reviewer |                 |
++-----------------+-----------------+
+|            Fleet watch            |   [watch] ratio
++-----------------------------------+
+```
+
+herdr only splits panes, so the band is the top seat's pane and everything else is split off it: first the strip `down`, keeping `1 - [watch] ratio`; then the grid's first seat `down`, keeping `top_ratio / (1 - [watch] ratio)`; then the rest of the grid from that seat as above. A ratio that herdr would clamp (above 0.9, from a large `top_ratio` with a large strip) is clamped with a warning; without a strip the band keeps `top_ratio` itself.
+
+- `up` builds the band in a workspace it creates: the root pane goes to the top seat wherever it sits in the file, and it starts first (kickoffs stay in file order). With `up --me <top seat>` your own pane is the band, with no side share for you. In a workspace `up` did not create (beside your pane, or a labelled workspace that already exists) without `--me <top seat>`, the grid is placed as before and `up` says `layout: top needs the fleet's own workspace or --me <top seat>`; `tile` makes the band afterwards.
+- On a layout that is already placed, `up` moves nothing; its report ends with `layout: run herdr-fleet tile for the top band` when the top seat is live but its pane is not a band across the seats above all of them.
+- `tile` builds the band from any layout (see Re-tiling).
+
 #### Re-tiling
 
-`herdr-fleet tile` lays out the seats that are already live in the fleet's workspace again, without restarting anything: the `[layout]` grid, or in chain mode the chain with each seat's `split`, `ratio` and `from`. The first live seat's pane stays put and anchors the result. The other seats are first parked in tabs of their own, each with `herdr pane move <pane> --new-tab`. Then they are moved back one by one in plan order beside their planned neighbour with `herdr pane move <pane> --tab <tab> --split <dir> --target-pane <src> --ratio <r>`. A pane can't simply be moved within its own tab, because herdr treats that as a no-op. Processes, agent names and pane ids survive, and the temporary tabs disappear once empty. Nothing is prompted, quit or started.
+`herdr-fleet tile` lays out the seats that are already live in the fleet's workspace again, without restarting anything: the `[layout]` grid, or in chain mode the chain with each seat's `split`, `ratio` and `from`. The first live seat's pane stays put and anchors the result; with `[layout] top`, the top seat's pane does, and after the strip the grid's first seat comes back under it with `--ratio top_ratio / (1 - [watch] ratio)`, so the top seat ends up as the band. When the top seat is not live, `tile` tiles the others without the band and says so. The other seats are first parked in tabs of their own, each with `herdr pane move <pane> --new-tab`. Then they are moved back one by one in plan order beside their planned neighbour with `herdr pane move <pane> --tab <tab> --split <dir> --target-pane <src> --ratio <r>`. A pane can't simply be moved within its own tab, because herdr treats that as a no-op. Processes, agent names and pane ids survive, and the temporary tabs disappear once empty. Nothing is prompted, quit or started.
 
 Seats in other workspaces are reported as `elsewhere` and left alone. The seats being tiled must share one tab, or `tile` refuses. If a move fails, `tile` stops and names the seats it did not re-tile. `tile --dry-run` prints every move. Use it after changing `[layout]`, or when a run left the panes uneven.
 

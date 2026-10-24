@@ -30,7 +30,7 @@ TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "co
             "restart_hint_tokens", "watch", "inbox_print_max", "interrupt"}
 CONTACT_KEYS = {"name", "match", "note"}
 MATCH_KEYS = {"cwd", "kind", "name"}
-LAYOUT_KEYS = {"mode", "columns", "direction", "ratio"}
+LAYOUT_KEYS = {"mode", "columns", "direction", "ratio", "top", "top_ratio"}
 MODES = ("chain", "grid")
 WATCH_KEYS = {"ratio", "position", "notify_blocked_after"}
 INBOX_PRINT_MAX = 8192               # design 20.4: bytes of one message `inbox --read` prints in full
@@ -39,6 +39,8 @@ DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
 WATCH_POSITIONS = ("bottom",)        # design 19.1: the only position in 0.8.0
 WATCH_RATIO = 0.2                    # the strip's default share of the area it is split from (design 25)
 WATCH_RATIO_RANGE = (0.1, 0.4)       # herdr clamps every split ratio to 0.1-0.9 (19.4)
+TOP_RATIO = 0.3                      # [layout] top_ratio: the band's share of the tab's height (design 26.1)
+TOP_RATIO_RANGE = (0.1, 0.6)
 SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "from", "env", "kickoff",
              "kickoff_text", "quit", "notes", "worktrees", "label"}
 LABEL_MAX = 40                       # design 22.1: the seat key `label`, shown on the pane's border
@@ -108,6 +110,8 @@ class Fleet:
     notify_blocked_after: Optional[int] = None  # [watch] notify_blocked_after in seconds (design 20.5)
     inbox_print_max: int = INBOX_PRINT_MAX     # design 20.4
     interrupt: Dict[str, List[str]] = field(default_factory=dict)  # [interrupt] keys per kind (design 23.7)
+    top: Optional[str] = None                  # [layout] top: the seat across the top (design 26.1)
+    top_ratio: float = TOP_RATIO               # [layout] top_ratio, clamped to TOP_RATIO_RANGE
 
     def contact(self, name: str) -> Optional[Contact]:
         for contact in self.contacts:
@@ -218,6 +222,10 @@ def load_fleet(path: str) -> Fleet:
         columns = None
     if columns is not None and mode != "grid":
         warnings.append("layout.columns: ignored in chain mode (it applies to mode = \"grid\")")
+    top = _opt_str(layout, "top", "layout.top", errors)
+    if top is not None and mode != "grid":
+        errors.append('layout.top needs mode = "grid"')
+    top_ratio = _top_ratio(layout, top, errors, warnings)
 
     raw_seats = data.get("agents", [])
     if not isinstance(raw_seats, list) or not all(isinstance(s, dict) for s in raw_seats):
@@ -239,6 +247,9 @@ def load_fleet(path: str) -> Fleet:
         seats.append(seat)
     if mode == "grid":
         _grid_overrides(seats, raw_seats, direction, ratio, warnings)
+    if top is not None and raw_seats and top not in seen:
+        errors.append("layout.top: %r is not a seat in this file (seats: %s)"
+                      % (top, ", ".join(s.name for s in seats) or "none"))
     contacts = _parse_contacts(data.get("contacts", []), repo, [s.name for s in seats], errors, warnings)
     watch, watch_ratio, watch_position, blocked_after = _parse_watch(data.get("watch", True), errors, warnings)
     interrupt = parse_interrupt(data.get("interrupt", {}), errors)
@@ -250,7 +261,7 @@ def load_fleet(path: str) -> Fleet:
                  quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns,
                  contacts=contacts, restart_hint_tokens=hint_tokens, watch=watch, watch_ratio=watch_ratio,
                  watch_position=watch_position, notify_blocked_after=blocked_after, inbox_print_max=print_max,
-                 interrupt=interrupt)
+                 interrupt=interrupt, top=top, top_ratio=top_ratio)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
@@ -348,6 +359,22 @@ def _check_from(seat: Seat, earlier: List[str], errors: List[str]) -> None:
     if seat.from_seat is not None and seat.from_seat not in earlier:
         errors.append("agents[%d] (%s).from: %r must name a seat earlier in the file (%s)"
                       % (seat.index, seat.name, seat.from_seat, ", ".join(earlier) or "none"))
+
+
+def _top_ratio(layout: Dict, top: Optional[str], errors: List[str], warnings: List[str]) -> float:
+    """``[layout] top_ratio`` (design 26.1): the ``ratio`` grammar, default 0.3, clamped to
+    0.1-0.6 with a warning; it means nothing without ``top``, which is warned about."""
+    value = _ratio(layout.get("top_ratio"), "layout.top_ratio", errors)
+    if value is None:
+        return TOP_RATIO
+    if top is None:
+        warnings.append("layout.top_ratio: ignored without layout.top")
+    low, high = TOP_RATIO_RANGE
+    if not low <= value <= high:
+        clamped = min(max(value, low), high)
+        warnings.append("layout.top_ratio: %s is outside %s-%s; using %s" % (value, low, high, clamped))
+        value = clamped
+    return float(value)
 
 
 def _grid_overrides(seats: List[Seat], raw_seats: List[Dict], direction: str, ratio: Optional[float],

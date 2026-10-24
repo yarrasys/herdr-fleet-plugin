@@ -1,5 +1,5 @@
 """Operations that change the fleet: up (design 4.1, with the watcher strip of
-section 19), restart (4.3), swap (4.4), kickoff (4.5) and down (4.6), plus
+section 19 and the top band of section 26), restart (4.3), swap (4.4), kickoff (4.5) and down (4.6), plus
 ``go`` (22.2), ``peek`` (23.6), ``interrupt`` (23.7), ``ui`` and ``install-cli``.
 Each of up, restart, swap and kickoff ends by naming the seats' panes
 (``labels.apply``, design 22.1); ``down`` clears the name of a seat pane it
@@ -28,7 +28,7 @@ from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, Report, U
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import HerdrError, describe, has_agent, pane_move_argv, render_cmd, start_argv
 from herdr_fleet.messages import OWNER, drop_queued, interrupt_entry, record, resolve_sender, resolve_targets
-from herdr_fleet.placement import Target, existing_panes, place_chain, place_grid
+from herdr_fleet.placement import Target, band_anchor, band_check, existing_panes, place_band, place_chain, place_grid
 from herdr_fleet.seats import (DEFAULT_INTERRUPT_WAIT_MS, EXIT_DIALOG_LINES, QUIT_CONFIG_HINT, SETTLED,
                                at_shell_prompt, describe_foreground, dialog_first_line, interrupt_agent,
                                interrupt_keys, live_by_name, quit_agent, quit_command, state_words)
@@ -91,9 +91,9 @@ def drop_inboxes(ctx: Ctx, seats: Sequence[Seat], report: Report) -> None:
 
 def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: bool = False,
           note: Optional[str] = None, join: bool = False, no_watch: bool = False) -> Report:
-    """Design 4.1, 14 and 19: classify every seat, find or create the workspace,
-    place the seats that need panes (chain or grid), start them, brief them, and
-    start the watcher in a strip below them unless one runs already."""
+    """Design 4.1, 14, 19 and 26: classify every seat, find or create the workspace,
+    place the seats that need panes (chain, grid, or the grid under a top band), start
+    them, brief them, and start the watcher in a strip below them unless one runs already."""
     report = Report("up")
     fleet = ctx.fleet
     selected = {s.name for s in select_seats(fleet, names)}
@@ -112,14 +112,23 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
     order = [s for s in fleet.seats if s.name in selected and s.name != me]
     claims = {s.name: claim_seat(ctx, s, live, report) for s in order}
     needs = [s for s in order if claims[s.name].state == "needs"]
-    target = resolve_target(ctx, report, needs[0] if needs else None)
+    # Design 26.2: a workspace created for a top band gets its root pane for the top seat.
+    top = next((s for s in needs if s.name == fleet.top), None) if fleet.mode == "grid" else None
+    target = resolve_target(ctx, report, top or (needs[0] if needs else None))
     if caller is not None:
         _join_or_warn(ctx, fleet.seat(me), caller, target, live, join, report)
     # Design 19.1: on a fresh layout the strip is split from its first pane before
     # anything else is, so it spans every seat; otherwise it opens after the kickoffs.
-    fresh = strip is not None and bool(needs) and not existing_panes(ctx, needs, live, target)
-    place = place_grid if fleet.mode == "grid" else place_chain
-    placed = place(ctx, needs, target, live, report, on_area=strip.open_at if fresh else None)
+    layout_fresh = bool(needs) and not existing_panes(ctx, needs, live, target)
+    fresh = strip is not None and layout_fresh
+    band, check = band_anchor(ctx, me, caller is not None, needs, target, layout_fresh, report)
+    on_area = strip.open_at if fresh else None
+    if band is not None:
+        placed = place_band(ctx, needs, target, report, band, on_area=on_area)
+        order = sorted(order, key=lambda s: s.name != fleet.top)  # the top seat starts first
+    else:
+        place = place_grid if fleet.mode == "grid" else place_chain
+        placed = place(ctx, needs, target, live, report, on_area=on_area)
     started = [s for s in order if start_claimed(ctx, s, claims[s.name], placed, report)]
     if started and no_kickoff:
         ctx.say("kickoffs skipped (--no-kickoff)")
@@ -130,7 +139,10 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
             or any(c.state in ("live", "adopted") for c in claims.values())
         strip.open_after(live, placed, target, up)
     ctx.save()
-    labels.apply(ctx, None, report)  # design 22.1: every live seat, adopted and --me seats included
+    now = live_by_name(ctx.herdr) if check else None
+    labels.apply(ctx, now, report)  # design 22.1: every live seat, adopted and --me seats included
+    if now is not None:
+        band_check(ctx, now, target, report)  # design 26.2: the report ends with the tile hint
     return report
 
 

@@ -19,6 +19,13 @@ keeps ``1 - [watch] ratio``, before any seat comes back; so it spans the whole
 layout afterwards. A strip in another tab or workspace is reported and left
 alone; a failed strip move is reported and the seats are tiled anyway.
 
+With ``[layout] top`` (design 26.2) the top seat anchors the layout instead of the
+first seat: after the strip comes back under it, the grid's first seat comes back
+under it keeping ``top_ratio / (1 - [watch] ratio)`` (``top_ratio`` without a strip),
+so the top seat is a band across the whole width, and the rest of the grid follows
+from that seat (``layout.band_plan``). When the top seat is not live here, the others
+are tiled as before and the report says so.
+
 Afterwards every live seat's pane is named after its seat (``labels.apply``, design
 22.1), which is a display name only and moves nothing.
 """
@@ -32,7 +39,7 @@ from herdr_fleet import labels, watchpane
 from herdr_fleet.context import Ctx, OpError, Report
 from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, pane_move_argv, pane_park_argv, render_cmd
-from herdr_fleet.layout import describe_shape, grid_plan, placeholder
+from herdr_fleet.layout import STRIP, band_plan, band_ratio, band_warning, describe_shape, grid_plan, placeholder
 from herdr_fleet.seats import live_by_name
 from herdr_fleet.state import pane_moved
 
@@ -65,12 +72,24 @@ def fleet_workspace(ctx: Ctx) -> str:
     return chosen or ids[0]
 
 
-def plan_moves(ctx: Ctx, seats: List[Seat]) -> List[Move]:
-    """The moves for every seat after the first, in the order they must happen."""
+def _source(ref: str) -> str:
+    """The seat a plan's source placeholder names."""
+    return ref[len("<pane of "):-1]
+
+
+def plan_moves(ctx: Ctx, seats: List[Seat], band: bool = False, strip: bool = False) -> List[Move]:
+    """The moves for every seat after the first, in the order they must happen. With
+    ``band`` the first seat is the top seat (design 26.2): the grid's first seat comes
+    back under it with the band's ratio (``strip``: the strip is back under it first)."""
     names = [s.name for s in seats]
+    if band:
+        fleet = ctx.fleet
+        plan = band_plan(names[0], names[1:], fleet.columns, fleet.top_ratio, fleet.watch_ratio if strip else None)
+        return [Move(step.seat, _source(step.source), step.direction, step.ratio)
+                for step in plan if step.seat != STRIP]
     if ctx.fleet.mode == "grid":
         area = placeholder(names[0])
-        return [Move(step.seat, names[0] if step.source == area else step.source[len("<pane of "):-1],
+        return [Move(step.seat, names[0] if step.source == area else _source(step.source),
                      step.direction, step.ratio)
                 for step in grid_plan(names, area, ctx.fleet.columns)]
     moves = []
@@ -111,13 +130,27 @@ def _tile(ctx: Ctx, report: Report) -> None:
     tab = tabs[0]
     seats = [seat for seat, _ in here]
     panes = {seat.name: str(agent["pane_id"]) for seat, agent in here}
-    moves = plan_moves(ctx, seats)
-    shape = describe_shape([s.name for s in seats], fleet.columns) if fleet.mode == "grid" \
-        else "chain of %d seats" % len(seats)
+    band = _band(ctx, seats)
+    if band:  # design 26.2: the top seat anchors the layout
+        seats = sorted(seats, key=lambda s: s.name != fleet.top)
+    names = [s.name for s in seats]
+    if fleet.mode == "grid":
+        shape = describe_shape(names, fleet.columns, top=fleet.top if band else None)
+    else:
+        shape = "chain of %d seats" % len(seats)
     report.add("layout", fleet.mode, "%s in tab %s" % (shape, tab))
+    if fleet.top and fleet.mode == "grid" and not band:
+        agent = live.get(fleet.top)
+        where = "is not live" if agent is None else "is in workspace %s" % agent.get("workspace_id")
+        report.add("layout", "top seat %s %s; tiled without the band" % (fleet.top, where), "")
     anchor = seats[0].name
     report.add(anchor, "kept", "anchors the layout in %s" % panes[anchor])
     strip = watchpane.tile_strip(ctx, workspace, tab, report)
+    moves = plan_moves(ctx, seats, band, bool(strip))
+    if band and len(seats) > 1:
+        ratio, wanted = band_ratio(fleet.top_ratio, fleet.watch_ratio if strip else None)
+        if ratio != wanted:
+            ctx.warn(band_warning(ratio, wanted))
     if ctx.dry_run:
         if strip:
             report.add("watcher", "plan", watchpane.tile_plan(ctx, strip, anchor, panes[anchor], workspace, tab,
@@ -129,6 +162,13 @@ def _tile(ctx: Ctx, report: Report) -> None:
                 render_cmd(pane_move_argv(pane, tab, move.direction, move.ratio, source))))
         return
     _execute(ctx, moves, panes, workspace, tab, report, (strip, anchor) if strip else None)
+
+
+def _band(ctx: Ctx, seats: List[Seat]) -> bool:
+    """Whether this ``tile`` builds the top band: grid mode, ``[layout] top`` set and the
+    top seat among the seats live in the workspace's tab."""
+    fleet = ctx.fleet
+    return bool(fleet.mode == "grid" and fleet.top and any(s.name == fleet.top for s in seats))
 
 
 def _execute(ctx: Ctx, moves: List[Move], panes: Dict[str, str], workspace: str, tab: str, report: Report,
