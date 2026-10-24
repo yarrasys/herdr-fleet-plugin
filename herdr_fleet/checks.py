@@ -177,7 +177,7 @@ def queued_summary(fleet: Fleet) -> Tuple[Dict[str, int], Dict[str, str]]:
 
 
 def queued_line(data: Dict) -> Optional[str]:
-    """``queued: fablyn-dev 2 (oldest 25m), owner 1`` (ages, design 20.8); None when every
+    """``queued: sample-dev 2 (oldest 25m), owner 1`` (ages, design 20.8); None when every
     mailbox is empty."""
     counts, oldest = data.get("queued") or {}, data.get("queued_oldest") or {}
     if not counts:
@@ -196,7 +196,7 @@ def git_branch(cwd: str) -> str:
 
 
 def shorten(path: str, home: Optional[str]) -> str:
-    """``/Users/me/work/x`` -> ``~/work/x``."""
+    """``/home/example/projects/x`` -> ``~/projects/x``."""
     home = (home or os.path.expanduser("~")).rstrip("/")
     if path == home:
         return "~"

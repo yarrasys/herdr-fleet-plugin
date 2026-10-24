@@ -518,7 +518,7 @@ def _close_workspace(ctx: Ctx, report: Report) -> None:
 def op_go(ctx: Ctx, name: str) -> Tuple[int, str]:
     """Design 22.2: focus the pane of NAME, resolved as a ``send`` target (a seat, a contact
     or a live herdr agent name), with ``agent focus``. Returns (exit code, line):
-    ``focused fablyn-orchestrator (w1H:p5, working)``; an absent seat or a contact that
+    ``focused sample-orchestrator (w2:p5, working)``; an absent seat or a contact that
     cannot be reached is exit 3 and nothing is focused; an unknown name is a usage error.
     Writes nothing: no ``state_seen``, no log entry, no file. The pane and state in the
     line come from ``agent get``, read just before the focus."""

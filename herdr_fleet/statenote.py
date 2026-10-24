@@ -65,7 +65,7 @@ def set_section(text: str, key: str, body: str, now: Optional[datetime.datetime]
 
 
 def starter_text(intro: str = "") -> str:
-    """The four empty sections ``init`` and the Fablyn example ship."""
+    """The four empty sections ``init`` and the Sample example ship."""
     head = intro.rstrip("\n") + "\n\n" if intro else ""
     return head + "".join("## %s\n\n" % key for key in STARTER_SECTIONS)
 

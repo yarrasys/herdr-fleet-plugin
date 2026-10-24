@@ -14,7 +14,7 @@ import unittest
 from support import ROOT, THREE_SEATS, install_fake_herdr, read_log
 
 BIN = os.path.join(ROOT, "bin", "herdr-fleet")
-EXAMPLE = os.path.join(ROOT, "examples", "fablyn")
+EXAMPLE = os.path.join(ROOT, "examples", "team")
 READ_ONLY = (["--version"], ["agent", "list"], ["agent"], ["agent", "get"], ["pane", "get"], ["pane", "list"],
              ["pane", "current"],
              ["pane", "process-info"], ["workspace", "list"], ["workspace", "get"], ["integration", "status"],
@@ -51,23 +51,23 @@ class Subprocess(unittest.TestCase):
         proc = self.run_bin("doctor", cwd=os.path.join(EXAMPLE, ".herdr", "kickoff"))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("ok    fleet file: %s" % os.path.join(EXAMPLE, ".herdr", "fleet.toml"), proc.stdout)
-        self.assertIn("ok    kickoff fablyn-reviewer", proc.stdout)
+        self.assertIn("ok    kickoff sample-reviewer", proc.stdout)
 
     def test_up_dry_run_on_the_example_changes_nothing(self):
         proc = self.run_bin("up", "--dry-run", "--file", os.path.join(EXAMPLE, ".herdr", "fleet.toml"))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("herdr agent start fablyn-reviewer --kind codex", proc.stdout)
-        self.assertIn("--env FABLYN_ROLE=orchestrator", proc.stdout)
-        # The example uses mode = "grid" with top = "fablyn-orchestrator" (design 26): the orchestrator
+        self.assertIn("herdr agent start sample-reviewer --kind codex", proc.stdout)
+        self.assertIn("--env SAMPLE_ROLE=orchestrator", proc.stdout)
+        # The example uses mode = "grid" with top = "sample-orchestrator" (design 26): the orchestrator
         # keeps the new workspace's root pane as a band, and the other three make a 2 + 1 grid below it.
-        self.assertIn("layout: grid - top: fablyn-orchestrator, then 3 seats in 2 columns (2+1) in "
-                      "<root pane of fablyn>", proc.stdout)
-        root = "'<root pane of fablyn>'"
-        for line in ("fablyn-dev: plan - herdr pane split %s --direction down --ratio 0.375" % root,
-                     "fablyn-designer: plan - herdr pane split '<pane of fablyn-dev>' --direction right --ratio 0.5",
-                     "fablyn-reviewer: plan - herdr pane split '<pane of fablyn-dev>' --direction down "
+        self.assertIn("layout: grid - top: sample-orchestrator, then 3 seats in 2 columns (2+1) in "
+                      "<root pane of sample>", proc.stdout)
+        root = "'<root pane of sample>'"
+        for line in ("sample-dev: plan - herdr pane split %s --direction down --ratio 0.375" % root,
+                     "sample-designer: plan - herdr pane split '<pane of sample-dev>' --direction right --ratio 0.5",
+                     "sample-reviewer: plan - herdr pane split '<pane of sample-dev>' --direction down "
                      "--ratio 0.5",
-                     "herdr agent start fablyn-orchestrator --kind claude --pane %s" % root):
+                     "herdr agent start sample-orchestrator --kind claude --pane %s" % root):
             self.assertIn(line, proc.stdout)
         for argv in self.calls():
             self.assertIn(argv[:2] if argv[:2] != ["agent"] else ["agent"], [list(r) for r in READ_ONLY], argv)

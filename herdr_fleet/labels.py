@@ -50,7 +50,7 @@ def seat_panes(ctx: Ctx, live: Optional[Dict[str, Dict]] = None) -> List[Tuple[S
 
 
 def summary(named: List[str]) -> str:
-    """``named 1 (fablyn-designer)`` or ``named 4 after their seats``."""
+    """``named 1 (sample-designer)`` or ``named 4 after their seats``."""
     if len(named) == 1:
         return "named 1 (%s)" % named[0]
     return "named %d after their seats" % len(named)

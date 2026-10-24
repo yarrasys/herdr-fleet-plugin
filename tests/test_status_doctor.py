@@ -21,14 +21,14 @@ from herdr_fleet.ops import launcher_text
 class Status(LiveFleet):
     def test_table_states_drift_notes_and_integrations(self):
         self.write_fleet(self.read_fleet().replace(
-            'name = "fablyn-reviewer"', 'name = "fablyn-reviewer"\nnotes = "reviews read-only"')
+            'name = "sample-reviewer"', 'name = "sample-reviewer"\nnotes = "reviews read-only"')
             + '\n[[agents]]\nname = "helper"\nkind = "pi"\n')
         self.world["panes"]["w2:p2"]["agent"]["agent_status"] = "working"
         self.world["panes"]["w2:p1"]["procs"][0]["argv"] = ["claude", "--model", "old"]
         code, out, _ = self.run_cli("status")
         self.assertEqual(code, 0, out)
         lines = out.splitlines()
-        self.assertTrue(any(l.startswith("fablyn-dev ") and "working" in l for l in lines))
+        self.assertTrue(any(l.startswith("sample-dev ") and "working" in l for l in lines))
         self.assertTrue(any(l.startswith("helper ") and "absent" in l for l in lines))
         self.assertIn("args: running --model old, file says --model claude-opus-5-5", out)
         self.assertIn("reviews read-only", out)
@@ -41,7 +41,7 @@ class Status(LiveFleet):
         code, out, _ = self.run_cli("status", "--json")
         self.assertEqual(code, 0)
         data = json.loads(out)
-        self.assertEqual([s["name"] for s in data["seats"]], ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"])
+        self.assertEqual([s["name"] for s in data["seats"]], ["sample-orchestrator", "sample-dev", "sample-reviewer"])
         dev = data["seats"][1]
         self.assertEqual((dev["kind"], dev["live_kind"], dev["pane_id"], dev["state"], dev["drift"]),
                          ("claude", "claude", "w2:p2", "idle", []))
@@ -52,7 +52,7 @@ class Status(LiveFleet):
     def test_startup_labels_follow_the_live_state(self):
         self.write_fleet(self.read_fleet() + '\n[[agents]]\nname = "helper"\nkind = "pi"\n')
         state = self.read_state()
-        for name in ("fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"):
+        for name in ("sample-orchestrator", "sample-dev", "sample-reviewer"):
             state["agents"][name]["blocked_at_startup"] = True
         state["agents"]["helper"] = {"pane_id": None, "kind": "pi", "blocked_at_startup": True}
         self.write_state(state)
@@ -61,11 +61,11 @@ class Status(LiveFleet):
         code, out, _ = self.run_cli("status")
         self.assertEqual(code, 0, out)
         rows = {l.split()[0]: l for l in out.splitlines()[2:6]}
-        self.assertIn("blocked (<1m) (blocked at startup)", rows["fablyn-orchestrator"])  # 20.5: with its age
-        self.assertIn("idle (kickoff pending)", rows["fablyn-dev"])
-        self.assertIn("unknown (<1m)", rows["fablyn-reviewer"])  # unknown: its age (20.5), no startup label
-        self.assertNotIn("startup", rows["fablyn-reviewer"])
-        self.assertNotIn("pending", rows["fablyn-reviewer"])
+        self.assertIn("blocked (<1m) (blocked at startup)", rows["sample-orchestrator"])  # 20.5: with its age
+        self.assertIn("idle (kickoff pending)", rows["sample-dev"])
+        self.assertIn("unknown (<1m)", rows["sample-reviewer"])  # unknown: its age (20.5), no startup label
+        self.assertNotIn("startup", rows["sample-reviewer"])
+        self.assertNotIn("pending", rows["sample-reviewer"])
         self.assertNotIn("(", rows["helper"])  # absent: no label
         for state_name in ("working", "done"):
             self.status_of("w2:p2", state_name)
@@ -73,7 +73,7 @@ class Status(LiveFleet):
             self.assertIn("%s (kickoff pending)" % state_name, out)
         # the flag alone decides nothing: a seat blocked later in its life is just blocked
         state = self.read_state()
-        state["agents"]["fablyn-orchestrator"]["blocked_at_startup"] = False
+        state["agents"]["sample-orchestrator"]["blocked_at_startup"] = False
         self.write_state(state)
         out = self.run_cli("status")[1]
         self.assertNotIn("blocked at startup", out)
@@ -100,7 +100,7 @@ class Doctor(FleetCase):
         self.assertEqual(code, 0, out)
         for check in ("ok    python", "ok    herdr version: 0.9.4", "ok    HERDR_ENV", "ok    herdr server",
                       "ok    fleet file", "ok    kinds: claude, codex", "ok    integration claude",
-                      "ok    quit fablyn-reviewer: /quit (codex)", "ok    state file"):
+                      "ok    quit sample-reviewer: /quit (codex)", "ok    state file"):
             self.assertIn(check, out)
 
     def test_agy_seat_has_a_known_quit_command(self):
@@ -259,7 +259,7 @@ class Invocation(FleetCase):
         self.assertEqual(code, 0)
         note = self.world["notifications"][-1]
         self.assertEqual((note["title"], note["sound"]), ("Fleet up: done", "done"))
-        self.assertIn("fablyn-dev: started", note["body"])
+        self.assertIn("sample-dev: started", note["body"])
 
 
 class UiAndMenu(LiveFleet):
@@ -273,16 +273,16 @@ class UiAndMenu(LiveFleet):
     def test_menu_restart_one_seat(self):
         code, out, _ = self.run_cli("menu", stdin="2\n1\nfresh start\ny\n\n")
         self.assertEqual(code, 0, out)
-        self.assertIn("2) fablyn-dev", out)
-        self.assertEqual(self.prompts_to("fablyn-dev")[0], "/exit")
-        self.assertIn("fresh start", self.prompts_to("fablyn-dev")[1])
+        self.assertIn("2) sample-dev", out)
+        self.assertEqual(self.prompts_to("sample-dev")[0], "/exit")
+        self.assertIn("fresh start", self.prompts_to("sample-dev")[1])
         self.assertIn("Press Enter to close.", out)
-        self.assertEqual(self.prompts_to("fablyn-orchestrator"), [])
+        self.assertEqual(self.prompts_to("sample-orchestrator"), [])
 
     def test_menu_kickoff_all(self):
         code, out, _ = self.run_cli("menu", stdin="a\n3\n\ny\n\n")
         self.assertEqual(code, 0, out)
-        for name in ("fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"):
+        for name in ("sample-orchestrator", "sample-dev", "sample-reviewer"):
             self.assertEqual(len(self.prompts_to(name)), 1)
 
     def test_menu_quit_and_decline_do_nothing(self):
@@ -386,9 +386,9 @@ class FleetFileVsGit(GitCase):
         self.assertEqual(line, "ok    fleet file vs git: committed, same as HEAD; no default branch found to "
                                "compare with")
 
-    def test_untracked_and_origin_copy_differs(self):  # emberline's case
+    def test_untracked_and_origin_copy_differs(self):  # sampleapp's case
         self.set_origin(self.git("rev-parse", "HEAD"))
-        self.git("checkout", "-q", "-b", "docs/render-launch-recovery-receipt")
+        self.git("checkout", "-q", "-b", "docs/example-change")
         self.git("rm", "-q", "--cached", ".herdr/fleet.toml")
         self.git("commit", "-q", "-m", "untrack")
         before = self.read_fleet().count("\n")
@@ -397,7 +397,7 @@ class FleetFileVsGit(GitCase):
         code, line = self.doctor_line()
         self.assertEqual(code, 0)  # drift is never a fail
         self.assertEqual(line, "warn  fleet file vs git: untracked in this checkout (branch "
-                               "docs/render-launch-recovery-receipt); origin/main copy differs: +7/-0 lines, "
+                               "docs/example-change); origin/main copy differs: +7/-0 lines, "
                                "first at line %d" % (before + 1))
 
     def test_modified_since_head(self):
@@ -470,12 +470,12 @@ class StatusFoldingRules(LiveFleet):
         lines = self.run_cli("status")[1].splitlines()
         self.assertIn("CWD", lines[1])
         self.assertNotIn("cwd ", lines[0])
-        self.assertIn("~/elsewhere", [l for l in lines if l.startswith("fablyn-reviewer")][0])
+        self.assertIn("~/elsewhere", [l for l in lines if l.startswith("sample-reviewer")][0])
 
     def test_absent_seats_do_not_count_and_one_live_seat_keeps_columns(self):
         self.world["panes"]["w2:p3"]["agent"] = None  # reviewer absent: its configured cwd is ignored
-        self.write_fleet(self.read_fleet().replace('name = "fablyn-reviewer"\nkind = "codex"',
-                                                   'name = "fablyn-reviewer"\nkind = "codex"\ncwd = "/"'))
+        self.write_fleet(self.read_fleet().replace('name = "sample-reviewer"\nkind = "codex"',
+                                                   'name = "sample-reviewer"\nkind = "codex"\ncwd = "/"'))
         lines = self.run_cli("status")[1].splitlines()
         self.assertNotIn("CWD", lines[1])
         self.world["panes"]["w2:p2"]["agent"] = None  # one live seat left

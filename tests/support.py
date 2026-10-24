@@ -1,6 +1,7 @@
 """Shared test fixtures: a temp repo with a fleet file, a fake herdr world,
 a fake clock, and ``FleetCase.run_cli`` which calls ``herdr_fleet.cli.main``
-in-process with the fake herdr as its runner.
+in-process with the fake herdr as its runner. All identities, paths, transcript
+usage records and message bodies are synthetic test data.
 
 Every test's call log is checked in ``tearDown`` against the safety
 invariants of design section 7, so each scenario doubles as a safety test.
@@ -66,20 +67,20 @@ READ_COMMANDS = ("peek", "restart", "swap", "down", "menu", "interrupt", "watch"
 PEEK_CALLS = (["agent", "list"], ["--version"], ["pane", "current"], ["agent", "read"])
 
 THREE_SEATS = """
-workspace = "fablyn"
+workspace = "sample"
 
 [[agents]]
-name = "fablyn-orchestrator"
+name = "sample-orchestrator"
 kind = "claude"
 args = ["--model", "claude-opus-5-5"]
 
 [[agents]]
-name = "fablyn-dev"
+name = "sample-dev"
 kind = "claude"
 args = ["--model", "claude-opus-5-5"]
 
 [[agents]]
-name = "fablyn-reviewer"
+name = "sample-reviewer"
 kind = "codex"
 args = ["-m", "gpt-6-astra"]
 """
@@ -186,7 +187,7 @@ class FleetCase(unittest.TestCase):
         with open(os.path.join(self.repo, ".herdr", "fleet.state.json"), "r", encoding="utf-8") as handle:
             return json.load(handle)
 
-    def fleet_ws(self, ws: str = "w2", label: str = "fablyn") -> str:
+    def fleet_ws(self, ws: str = "w2", label: str = "sample") -> str:
         """Add an existing workspace for the fleet; returns its root pane."""
         return fake_herdr.add_workspace(self.world, ws, label, self.repo)
 
@@ -486,17 +487,17 @@ class LiveFleet(FleetCase):
     def setUp(self):
         super().setUp()
         self.fleet_ws()
-        fake_herdr.put_agent(self.world, "w2:p1", "claude", "fablyn-orchestrator", args=ARGS)
-        for pane, kind, name, args in (("w2:p2", "claude", "fablyn-dev", ARGS),
-                                       ("w2:p3", "codex", "fablyn-reviewer", ["-m", "gpt-6-astra"])):
+        fake_herdr.put_agent(self.world, "w2:p1", "claude", "sample-orchestrator", args=ARGS)
+        for pane, kind, name, args in (("w2:p2", "claude", "sample-dev", ARGS),
+                                       ("w2:p3", "codex", "sample-reviewer", ["-m", "gpt-6-astra"])):
             fake_herdr.add_pane(self.world, pane, "w2", self.repo, created=True)
             fake_herdr.put_agent(self.world, pane, kind, name, args=args)
-        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "fablyn",
+        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "sample",
                           "created_workspace": False, "agents": {
-                              "fablyn-orchestrator": {"pane_id": "w2:p1", "created_pane": False,
+                              "sample-orchestrator": {"pane_id": "w2:p1", "created_pane": False,
                                                       "kind": "claude", "args": ARGS},
-                              "fablyn-dev": {"pane_id": "w2:p2", "created_pane": True, "kind": "claude", "args": ARGS},
-                              "fablyn-reviewer": {"pane_id": "w2:p3", "created_pane": True, "kind": "codex",
+                              "sample-dev": {"pane_id": "w2:p2", "created_pane": True, "kind": "claude", "args": ARGS},
+                              "sample-reviewer": {"pane_id": "w2:p3", "created_pane": True, "kind": "codex",
                                                   "args": ["-m", "gpt-6-astra"]}}})
 
     def status_of(self, pane, status):
@@ -505,7 +506,7 @@ class LiveFleet(FleetCase):
 
 FOUR_SEATS = THREE_SEATS + '''
 [[agents]]
-name = "fablyn-designer"
+name = "sample-designer"
 kind = "claude"
 args = ["--model", "claude-opus-5-5"]
 '''

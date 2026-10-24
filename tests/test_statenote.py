@@ -15,9 +15,9 @@ STAMP = r"\(updated \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\)"
 
 class Sections(unittest.TestCase):
     def test_replace_append_and_preserve(self):
-        text = "# Fablyn state\nIntro.\n\n## production\nv12 live\n### detail\nkept inside\n\n# Archive\nold\n"
+        text = "# Sample state\nIntro.\n\n## production\nv12 live\n### detail\nkept inside\n\n# Archive\nold\n"
         out = set_section(text, "production", "v13 live", NOW)
-        self.assertEqual(out, "# Fablyn state\nIntro.\n\n## production (updated 2026-10-20 00:31 UTC)\nv13 live\n\n"
+        self.assertEqual(out, "# Sample state\nIntro.\n\n## production (updated 2026-10-20 00:31 UTC)\nv13 live\n\n"
                               "# Archive\nold\n")
         out = set_section(out, "next", "ship the export dialog", NOW)
         self.assertTrue(out.endswith("old\n\n## next (updated 2026-10-20 00:31 UTC)\nship the export dialog\n\n"))
@@ -42,17 +42,17 @@ class Commands(FleetCase):
 
     def test_set_keys_show(self):
         self.write_file(".herdr/STATE.md", "Where things stand.\n\n" + starter_text())
-        code, out, _ = self.run_cli("state", "set", "in flight", "dev: export dialog\nreviewer: round 3")
+        code, out, _ = self.run_cli("state", "set", "in flight", "dev: parser change\nreviewer: parser review")
         self.assertEqual(code, 0, out)
         text = self.note()
         self.assertTrue(text.startswith("Where things stand.\n\n## production\n\n## in flight "))
-        self.assertRegex(text, r"## in flight %s\ndev: export dialog\nreviewer: round 3\n\n## next\n" % STAMP)
+        self.assertRegex(text, r"## in flight %s\ndev: parser change\nreviewer: parser review\n\n## next\n" % STAMP)
         brief = self.write_file("risks.md", "none known\n")
         self.assertEqual(self.run_cli("state", "set", "risks", "--file", brief)[0], 0)
         self.assertRegex(self.note(), r"## backlog\n\n## risks %s\nnone known\n\n$" % STAMP)
         self.assertEqual(self.run_cli("state", "keys")[1].splitlines(),
                          ["production", "in flight", "next", "backlog", "risks"])
-        self.assertIn("reviewer: round 3", self.run_cli("state", "show")[1])
+        self.assertIn("reviewer: parser review", self.run_cli("state", "show")[1])
         self.assertEqual([f for f in os.listdir(os.path.join(self.repo, ".herdr")) if f.endswith(".tmp")], [])
         self.assertEqual(self.calls(), [])  # no herdr command
 

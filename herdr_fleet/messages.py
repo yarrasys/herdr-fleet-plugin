@@ -346,12 +346,12 @@ def format_entry(entry: Dict) -> str:
     interrupt ``time  from  interrupt → to (done)`` (23.7)."""
     kind = entry.get("kind", "send")
     ident = "#%s" % inbox.short_of(str(entry["id"])) if entry.get("id") else ""
-    if kind == "interrupt":  # design 23.7: `time  caller  interrupt → fablyn-dev (done)`
+    if kind == "interrupt":  # design 23.7: `time  caller  interrupt → sample-dev (done)`
         return "%s  %s  interrupt → %s (%s)" % (entry["time"], entry["from"], entry["to"], entry.get("result", "?"))
     head = "%s  %s → %s" % (entry["time"], entry["from"], entry["to"])
     if kind == "ack":
         closed = ""
-        if entry.get("by"):  # design 23.4: `acked by winner-chronicles: superseded`
+        if entry.get("by"):  # design 23.4: `acked by partner-workspace: superseded`
             closed = "  acked by %s%s" % (entry["by"], ": %s" % entry["reason"] if entry.get("reason") else "")
         return "%s  ack%s%s" % (head, " " + ident if ident else "", closed)
     if kind in ("delivered", "expired", "dropped"):
@@ -729,7 +729,7 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
 
 def inbox_note(ctx: Ctx, name: str, explicit: bool) -> Optional[str]:
     """Design 23.1: when the sender's own mailbox holds messages not past their ttl,
-    ``note: 1 unread from fablyn-orchestrator (#018934, 20:20); read it before you go on:
+    ``note: 1 unread from sample-orchestrator (#103001, 20:20); read it before you go on:
     herdr-fleet inbox --read``; for several, the senders in the order of their oldest
     message and ``(oldest #id, HH:MM)``. ``--as NAME`` names the mailbox in the command.
     ``send`` prints it before its per-target lines; it only reads."""

@@ -59,13 +59,13 @@ class Parsing(Base):
     def test_example_fields_and_defaults(self):
         self.write("x", "docs/kickoff/o.md")
         fleet = load_fleet(self.write("""
-workspace = "fablyn"
+workspace = "sample"
 state_note = "docs/STATE.md"
 [layout]
 direction = "down"
 ratio = 0.4
 [[agents]]
-name = "fablyn-orchestrator"
+name = "sample-orchestrator"
 kind = "claude"
 args = ["--model", "m"]
 cwd = "~/elsewhere"
@@ -75,12 +75,12 @@ kickoff = "docs/kickoff/o.md"
 quit = "/exit"
 notes = "n"
 [[agents]]
-name = "fablyn-dev"
+name = "sample-dev"
 kind = "codex"
 cwd = "/abs/path"
 """))
         first, second = fleet.seats
-        self.assertEqual(fleet.workspace, "fablyn")
+        self.assertEqual(fleet.workspace, "sample")
         self.assertEqual(fleet.repo, self.repo)
         self.assertEqual(fleet.cwd, self.repo)
         self.assertEqual(fleet.state_note, os.path.join(self.repo, "docs", "STATE.md"))
@@ -154,9 +154,9 @@ class Version050Keys(Base):
 
     def test_worktrees_globs(self):
         fleet = load_fleet(self.write('[[agents]]\nname = "a"\nkind = "claude"\n'
-                                      'worktrees = ["/private/tmp/fablyn-*", "~/wt/a-*"]\n'
+                                      'worktrees = ["/private/tmp/sample-*", "~/wt/a-*"]\n'
                                       '[[agents]]\nname = "b"\nkind = "claude"\n'))
-        self.assertEqual(fleet.seats[0].worktrees, ["/private/tmp/fablyn-*", os.path.expanduser("~/wt/a-*")])
+        self.assertEqual(fleet.seats[0].worktrees, ["/private/tmp/sample-*", os.path.expanduser("~/wt/a-*")])
         self.assertEqual(fleet.seats[1].worktrees, [])
         self.assertEqual(fleet.warnings, [])
         for bad in ('"/tmp/x-*"', '["/tmp/x", 3]', '[""]', '["  "]', "true"):

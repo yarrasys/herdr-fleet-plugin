@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .herdr/fleet.state.json
 .pytest_cache/
+
+# This checkout's live development fleet is local configuration.
+/.herdr/

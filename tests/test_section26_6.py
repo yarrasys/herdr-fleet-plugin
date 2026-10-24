@@ -24,13 +24,13 @@ B = board
 DOT = " · "
 CONTACT = '''
 [[contacts]]
-name = "explain-channel"
+name = "docs-channel"
 match = { cwd = "%s" }
 '''
 
 
 def contact_row(**extra):
-    values = dict(name="explain-channel", shown="explain-channel", state="idle", index=4, age=60, contact=True,
+    values = dict(name="docs-channel", shown="docs-channel", state="idle", index=4, age=60, contact=True,
                   queued=1, oldest=120, next_id="aaaaaa", next_line="hello")
     values.update(extra)
     return B.Row(**values)
@@ -42,22 +42,22 @@ class Marker(unittest.TestCase):
         lines = B.render(board_, 162, 8, True)
         row = lines[5]
         text = "".join(t for t, _ in row)
-        self.assertTrue(text.startswith("↔ explain-channel   ○ idle 1m"))
+        self.assertTrue(text.startswith("↔ docs-channel      ○ idle 1m"))
         self.assertEqual({style for _, style in row}, {"contact"})  # the whole row, its state colour included
         self.assertEqual({style for _, style in lines[2]} - {""}, {"dim", "yellow"})  # a seat keeps its styles
-        board_.selected = "explain-channel"
+        board_.selected = "docs-channel"
         self.assertEqual({style for _, style in B.render(board_, 162, 8, True)[5]}, {"contact reverse"})
         plain = B.render(board_, 162, 8, False)[5]
         self.assertEqual({style for _, style in plain}, {"reverse"})  # no dim without colours; the marker stays
-        self.assertTrue("".join(t for t, _ in plain).startswith("↔ explain-channel"))
+        self.assertTrue("".join(t for t, _ in plain).startswith("↔ docs-channel"))
 
     def test_packed_rows_mark_the_contact_too(self):
         board_ = sample(contacts=[contact_row()])
-        board_.rows += [B.Row("fablyn-qa", "fablyn-qa", "done", 4, age=30),
-                        B.Row("fablyn-ops", "fablyn-ops", "absent", 5)]
+        board_.rows += [B.Row("sample-qa", "sample-qa", "done", 4, age=30),
+                        B.Row("sample-ops", "sample-ops", "absent", 5)]
         lines = B.render(board_, 162, 6, True)
         line = lines[4]  # six seats on rows 1 to 3, the contact on the left of row 4
-        self.assertTrue("".join(t for t, _ in line).startswith("↔ explain-channel   ○ idle 1m     1 queued"))
+        self.assertTrue("".join(t for t, _ in line).startswith("↔ docs-channel      ○ idle 1m     1 queued"))
         left = []
         used = 0
         for text, style in line:
@@ -68,12 +68,12 @@ class Marker(unittest.TestCase):
         self.assertEqual(set(left), {"contact"})
 
     def test_the_contact_page_header(self):
-        page = B.ContactPage("explain-channel")
-        page.row = contact_row(pane="w1C:pG")
-        self.assertEqual(page.title(), "↔ explain-channel · contact of this fleet · ○ idle 1m "
-                                       "· w1C:pG")
+        page = B.ContactPage("docs-channel")
+        page.row = contact_row(pane="w4:pG")
+        self.assertEqual(page.title(), "↔ docs-channel · contact of this fleet · ○ idle 1m "
+                                       "· w4:pG")
         page.row = None
-        self.assertEqual(page.title(), "↔ explain-channel · contact of this fleet · ? unknown "
+        self.assertEqual(page.title(), "↔ docs-channel · contact of this fleet · ? unknown "
                                        "· no pane")
 
 
@@ -83,7 +83,7 @@ class ContactKeys(PageCase):
         self.page(["4", "esc", "down", "down", "down", "enter"])
         titles = [t for t in self.titles() if t.startswith("↔ ")]
         self.assertTrue(titles)
-        self.assertTrue(all(t.startswith("↔ winner-chronicles · contact of this fleet") for t in titles))
+        self.assertTrue(all(t.startswith("↔ partner-workspace · contact of this fleet") for t in titles))
         self.assertGreaterEqual(len({i for i, t in enumerate(self.titles()) if t.startswith("↔ ")}), 2)
         self.assertFalse(self.argvs("agent", "focus"))
 
@@ -110,13 +110,13 @@ class Reload(PageCase):
         found = []
         for index in range(len(self.screen.draws)):
             lines = self.screen.text(index)
-            if lines and lines[0].startswith("fablyn" + DOT):
+            if lines and lines[0].startswith("sample" + DOT):
                 found.append([line[:20].rstrip() for line in lines[1:-1] if line.strip()])
         return found
 
     def test_an_added_contact_a_new_label_and_a_removed_contact_show_within_a_refresh(self):
         added = THREE_SEATS + CONTACT % self.channel
-        labelled = added.replace('name = "fablyn-dev"', 'name = "fablyn-dev"\nlabel = "DEV"')
+        labelled = added.replace('name = "sample-dev"', 'name = "sample-dev"\nlabel = "DEV"')
         code, _, err = self.page([self.edit(added), ("wait", 5.0), self.edit(labelled), ("wait", 5.0),
                                   self.edit(THREE_SEATS), ("wait", 5.0)], size=(162, 8))
         self.assertEqual(code, 0, err)
@@ -125,10 +125,10 @@ class Reload(PageCase):
             if not shapes or shapes[-1] != rows:
                 shapes.append(rows)
         self.assertEqual(shapes, [
-            ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"],
-            ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer", "↔ explain-channel"],
-            ["fablyn-orchestrator", "DEV", "fablyn-reviewer", "↔ explain-channel"],
-            ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"]])
+            ["sample-orchestrator", "sample-dev", "sample-reviewer"],
+            ["sample-orchestrator", "sample-dev", "sample-reviewer", "↔ docs-channel"],
+            ["sample-orchestrator", "DEV", "sample-reviewer", "↔ docs-channel"],
+            ["sample-orchestrator", "sample-dev", "sample-reviewer"]])
         reloaded = [line for line in self.watch_log() if "changed; reloaded" in line]
         self.assertEqual(len(reloaded), 3)
         self.assertTrue(reloaded[0].startswith("fleet file %s" % os.path.join(self.repo, ".herdr", "fleet.toml")))
@@ -146,21 +146,21 @@ class Reload(PageCase):
                       and "red" in style for t, style in draw[-1])]
         self.assertTrue(red)
         during = self.screen.text(red[-1])
-        self.assertIn("↔ explain-channel", "\n".join(during))  # the last good fleet: the contact stays
+        self.assertIn("↔ docs-channel", "\n".join(during))  # the last good fleet: the contact stays
         last = self.screen.text()
         self.assertNotIn("still using", last[-1])
-        self.assertNotIn("explain-channel", "\n".join(last[1:]))  # the repaired file has no contact
+        self.assertNotIn("docs-channel", "\n".join(last[1:]))  # the repaired file has no contact
 
     def test_a_removed_seat_gets_no_new_waiter(self):
-        put(self.repo, "fablyn-reviewer", "review this")
-        put(self.repo, "fablyn-dev", "build this")
-        without = THREE_SEATS.split('[[agents]]\nname = "fablyn-reviewer"')[0]
+        put(self.repo, "sample-reviewer", "review this")
+        put(self.repo, "sample-dev", "build this")
+        without = THREE_SEATS.split('[[agents]]\nname = "sample-reviewer"')[0]
         self.page([("wait", 4.0), self.edit(without), ("wait", 5.0)], idle=40)
-        before = [i for i, c in enumerate(self.calls()) if c["argv"][:3] == ["agent", "wait", "fablyn-reviewer"]]
-        dev = [i for i, c in enumerate(self.calls()) if c["argv"][:3] == ["agent", "wait", "fablyn-dev"]]
+        before = [i for i, c in enumerate(self.calls()) if c["argv"][:3] == ["agent", "wait", "sample-reviewer"]]
+        dev = [i for i, c in enumerate(self.calls()) if c["argv"][:3] == ["agent", "wait", "sample-dev"]]
         self.assertLessEqual(len(before), 4)   # the passes before the reload (waits time out at once here)
         self.assertGreaterEqual(len(dev), len(before) + 4)  # the seat still in the file is waited on every pass
-        self.assertEqual(self.prompts_to("fablyn-reviewer"), [])
+        self.assertEqual(self.prompts_to("sample-reviewer"), [])
 
     def test_log_mode_never_reloads(self):
         clock = StopClock(cycles=3)

@@ -43,9 +43,9 @@ PERMISSION = "\n".join([
     "   3. No, and tell Claude what to do differently",
     "",
     " Esc to cancel"]) + "\n"
-ORCH_SESSION = "6e3695ad-375b-464e-ba43-1aa9fc13e401"
-DEV_SESSION = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0"
-DEBT_ID = "20261024T050000Z-62437b"
+ORCH_SESSION = "00000000-0000-4000-8000-000000000001"
+DEV_SESSION = "00000000-0000-4000-8000-000000000002"
+DEBT_ID = "20261024T050000Z-103002"
 STAMP = re.compile(r"^\d\d:\d\d:\d\d  ")
 HHMM = r"\d\d:\d\d"
 
@@ -54,34 +54,34 @@ def ago(**delta):
     return inbox.now_utc() - datetime.timedelta(**delta)
 
 
-OWNER_NEWEST = B.Ref(id="20261024T011300Z-bade2a", sender="winner-chronicles", to="owner",
+OWNER_NEWEST = B.Ref(id="20261024T011300Z-103003", sender="partner-workspace", to="owner",
                      time=datetime.datetime.now().astimezone().replace(hour=12, minute=13, second=0,
                                                                         microsecond=0).isoformat(),
-                     first_line="1.28.1 is LIVE")
+                     first_line="Example ready")
 
 
 def sample(**extra):
     """The board of design 24.3's example: four seats, one of them blocked."""
     rows = [
-        B.Row("fablyn-dev", "fablyn-dev", "working", 0, age=180, doing="vitest run", queued=2, oldest=200,
-              next_id="018934", next_from="fablyn-orchestrator", next_line="two 1.30.4 items", tokens=376000),
-        B.Row("fablyn-reviewer", "fablyn-reviewer", "idle", 1, age=7300, debt_to="fablyn-orchestrator",
-              debt_shown="orchestrator", debt_id="62437b", debt_age=7300, tokens=514000, over=True),
-        B.Row("fablyn-designer", "fablyn-designer", "idle", 2, age=1500, tokens=382000),
-        B.Row("fablyn-orchestrator", "fablyn-orchestrator", "blocked", 3, age=240, doing="Allow Bash(pnpm test)?",
+        B.Row("sample-dev", "sample-dev", "working", 0, age=180, doing="vitest run", queued=2, oldest=200,
+              next_id="103001", next_from="sample-orchestrator", next_line="Review parser tests", tokens=376000),
+        B.Row("sample-reviewer", "sample-reviewer", "idle", 1, age=7300, debt_to="sample-orchestrator",
+              debt_shown="orchestrator", debt_id="103002", debt_age=7300, tokens=514000, over=True),
+        B.Row("sample-designer", "sample-designer", "idle", 2, age=1500, tokens=382000),
+        B.Row("sample-orchestrator", "sample-orchestrator", "blocked", 3, age=240, doing="Allow Bash(pnpm test)?",
               queued=1, oldest=60, next_id="aaaaaa", note="holding: owner typing", tokens=730000, over=True),
     ]
-    values = dict(fleet="fablyn", rows=rows, watching=11 * 3600 + 60, owner_count=1, owner_id="bade2a",
-                  owner_line="1.28.1 is LIVE", waiting=2, holding=1, owner_newest=OWNER_NEWEST,
-                  event=B.Event("08:02", "delivered 2 to fablyn-dev"), threshold=450000)
+    values = dict(fleet="sample", rows=rows, watching=11 * 3600 + 60, owner_count=1, owner_id="103003",
+                  owner_line="Example ready", waiting=2, holding=1, owner_newest=OWNER_NEWEST,
+                  event=B.Event("08:02", "delivered 2 to sample-dev"), threshold=450000)
     values.update(extra)
     return B.Board(**values)
 
 
 def six(**extra):
     board_ = sample(**extra)
-    board_.rows += [B.Row("fablyn-qa", "fablyn-qa", "done", 4, age=30),
-                    B.Row("fablyn-ops", "fablyn-ops", "absent", 5)]
+    board_.rows += [B.Row("sample-qa", "sample-qa", "done", 4, age=30),
+                    B.Row("sample-ops", "sample-ops", "absent", 5)]
     return board_
 
 
@@ -108,36 +108,36 @@ class Render(unittest.TestCase):
         self.assertEqual(widths(lines), [162] * 6)
         shown = text(lines)
         self.assertTrue(shown[0].startswith(  # design 25.3: the newest message to the owner
-            'fablyn \u00b7 watching 11h \u00b7 owner: #bade2a 12:13 from winner-chronicles "1.28.1 is LIVE"'))
+            'sample \u00b7 watching 11h \u00b7 owner: #103003 12:13 from partner-workspace "Example ready"'))
         self.assertTrue(shown[0].endswith("waiting on 2 \u00b7 holding 1"))
         dev, reviewer, designer, orch = shown[1:5]
         # name 20, state 14, then 118 columns shared 2:3:2 (33, 52, 33), context 10
-        self.assertEqual(dev[:20], "fablyn-dev".ljust(20))
+        self.assertEqual(dev[:20], "sample-dev".ljust(20))
         self.assertEqual(dev[20:34], "\u25cf working 3m".ljust(14))
         self.assertEqual(dev[34:67], "vitest run".ljust(33))
-        self.assertEqual(dev[67:119], '2 queued, oldest 3m  #018934 "two 1.30.4 items"'.ljust(52))
+        self.assertEqual(dev[67:119], '2 queued, oldest 3m  #103001 "Review parser tests"'.ljust(52))
         self.assertEqual(dev[119:152], "\u2013".ljust(33))
         self.assertEqual(dev[152:], "ctx 376k")
         self.assertEqual(reviewer[20:34].rstrip(), "\u25cb idle 2h")
-        self.assertEqual(reviewer[119:152].rstrip(), "owes orchestrator 2h #62437b")
+        self.assertEqual(reviewer[119:152].rstrip(), "owes orchestrator 2h #103002")
         self.assertEqual(reviewer[152:], "ctx 514k \u26a0")
         self.assertEqual(designer[67:119].rstrip(), "\u2013")
         self.assertEqual(orch[20:34].rstrip(), "\u25d0 blocked 4m")
         self.assertEqual(orch[34:67].rstrip(), '"Allow Bash(pnpm test)?"')
         self.assertEqual(orch[67:119].rstrip(), "1 queued, holding: owner typing")
-        self.assertEqual(shown[5], "08:02 delivered 2 to fablyn-dev")
+        self.assertEqual(shown[5], "08:02 delivered 2 to sample-dev")
 
     def test_162x8_leaves_room_and_shows_contacts(self):
-        board_ = sample(contacts=[B.Row("winner-chronicles", "winner-chronicles", "idle", 4, age=60, contact=True)])
+        board_ = sample(contacts=[B.Row("partner-workspace", "partner-workspace", "idle", 4, age=60, contact=True)])
         shown = text(B.render(board_, 162, 8, True))
         self.assertEqual(len(shown), 8)
         self.assertEqual([line[:20].rstrip() for line in shown[1:6]],
-                         ["fablyn-dev", "fablyn-reviewer", "fablyn-designer", "fablyn-orchestrator",
-                          "\u2194 winner-chronicles"])  # design 26.6: a contact is marked
+                         ["sample-dev", "sample-reviewer", "sample-designer", "sample-orchestrator",
+                          "\u2194 partner-workspace"])  # design 26.6: a contact is marked
         self.assertEqual(shown[6], "")
-        self.assertEqual(shown[7], "08:02 delivered 2 to fablyn-dev")
+        self.assertEqual(shown[7], "08:02 delivered 2 to sample-dev")
         at6 = text(B.render(board_, 162, 6, True))  # design 27.2: contacts count when choosing to pack
-        self.assertTrue(at6[3].startswith("\u2194 winner-chronicles"))
+        self.assertTrue(at6[3].startswith("\u2194 partner-workspace"))
         self.assertNotIn("more", at6[-1])
 
     def test_120x6_keeps_the_doing_cell_and_119_drops_it(self):
@@ -159,7 +159,7 @@ class Render(unittest.TestCase):
         at89 = text(B.render(sample(), 89, 6, True))
         self.assertNotIn("owes", at89[2])
         self.assertTrue(at89[2].endswith("ctx 514k \u26a0"))
-        self.assertTrue(at89[1][34:].startswith("2 queued, oldest 3m  #018934"))
+        self.assertTrue(at89[1][34:].startswith("2 queued, oldest 3m  #103001"))
 
     def test_60x6_and_59x6(self):
         at60 = text(B.render(sample(), 60, 6, True))
@@ -167,52 +167,52 @@ class Render(unittest.TestCase):
         self.assertEqual(at60[1][34:50].rstrip(), "2 queued, olde\u2026")
         self.assertTrue(at60[4].endswith("ctx 730k \u26a0"))
         at59 = text(B.render(sample(), 59, 6, True))
-        self.assertEqual(at59[1], "fablyn-dev          \u25cf working 3m  2 queued")
-        self.assertEqual(at59[4], "fablyn-orchestrator \u25d0 blocked 4m  1 queued")
+        self.assertEqual(at59[1], "sample-dev          \u25cf working 3m  2 queued")
+        self.assertEqual(at59[4], "sample-orchestrator \u25d0 blocked 4m  1 queued")
         self.assertNotIn("ctx", "\n".join(at59))
 
     def test_40x2_is_one_line_the_most_urgent_seat(self):
         lines = B.render(sample(), 40, 2, True)
         self.assertEqual(len(lines), 1)
         self.assertEqual(widths(lines), [40])
-        self.assertEqual(text(lines), ["fablyn-orchest\u2026 \u25d0 blocked 4m  1 queued"])
+        self.assertEqual(text(lines), ["sample-orchest\u2026 \u25d0 blocked 4m  1 queued"])
         board_ = sample()
         board_.rows[3].state = "idle"
-        self.assertTrue(text(B.render(board_, 40, 1, True))[0].startswith("fablyn-dev"))  # then a queue
+        self.assertTrue(text(B.render(board_, 40, 1, True))[0].startswith("sample-dev"))  # then a queue
 
     def test_six_seats_in_six_rows_packed_two_to_a_row(self):
         lines = B.render(six(), 162, 6, True)
         shown = text(lines)
         self.assertEqual(widths(lines), [162] * 6)
-        self.assertEqual(shown[1][:81].rstrip(), "fablyn-dev          \u25cf working 3m  2 queued")
-        self.assertEqual(shown[1][81:].rstrip(), "fablyn-reviewer     \u25cb idle 2h     \u2013" + " " * 44 + "\u26a0")
-        self.assertTrue(shown[2][81:].startswith("fablyn-orchestrator \u25d0 blocked 4m  1 queued"))
-        self.assertEqual(shown[3], "fablyn-qa           \u2713 done <1m    \u2013" + " " * 46
-                         + "fablyn-ops          \u2013 absent      \u2013")
+        self.assertEqual(shown[1][:81].rstrip(), "sample-dev          \u25cf working 3m  2 queued")
+        self.assertEqual(shown[1][81:].rstrip(), "sample-reviewer     \u25cb idle 2h     \u2013" + " " * 44 + "\u26a0")
+        self.assertTrue(shown[2][81:].startswith("sample-orchestrator \u25d0 blocked 4m  1 queued"))
+        self.assertEqual(shown[3], "sample-qa           \u2713 done <1m    \u2013" + " " * 46
+                         + "sample-ops          \u2013 absent      \u2013")
         self.assertEqual(shown[4], "")
         self.assertNotIn("more", shown[5])
         self.assertEqual([r.name for r in B.visible(six(), 162, 6)],
-                         ["fablyn-dev", "fablyn-reviewer", "fablyn-designer", "fablyn-orchestrator", "fablyn-qa",
-                          "fablyn-ops"])
+                         ["sample-dev", "sample-reviewer", "sample-designer", "sample-orchestrator", "sample-qa",
+                          "sample-ops"])
 
     def test_packed_rows_take_contacts_after_the_seats_when_they_fit(self):
-        board_ = six(contacts=[B.Row("winner-chronicles", "winner-chronicles", "idle", 6, contact=True)])
+        board_ = six(contacts=[B.Row("partner-workspace", "partner-workspace", "idle", 6, contact=True)])
         shown = text(B.render(board_, 162, 6, True))
-        self.assertTrue(shown[4].startswith("\u2194 winner-chronicles \u25cb idle"))
-        self.assertEqual(B.visible(board_, 162, 6)[-1].name, "winner-chronicles")
+        self.assertTrue(shown[4].startswith("\u2194 partner-workspace \u25cb idle"))
+        self.assertEqual(B.visible(board_, 162, 6)[-1].name, "partner-workspace")
         self.assertNotIn("winner", "\n".join(text(B.render(board_, 162, 5, True))[1:]))  # no room left
 
     def test_six_seats_too_narrow_to_pack_show_the_most_urgent_and_more(self):
         shown = text(B.render(six(), 100, 6, True))
         self.assertEqual([line[:20].rstrip() for line in shown[1:5]],
-                         ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer", "fablyn-designer"])
-        self.assertTrue(shown[5].startswith("08:02 delivered 2 to fablyn-dev"))
+                         ["sample-orchestrator", "sample-dev", "sample-reviewer", "sample-designer"])
+        self.assertTrue(shown[5].startswith("08:02 delivered 2 to sample-dev"))
         self.assertTrue(shown[5].endswith("+2 more"))
         self.assertEqual(len(shown[5]), 100)
         board_ = six()
         board_.rows[5].state, board_.rows[2].state = "working", "done"  # working before the rest
         self.assertEqual([r.name for r in B.visible(board_, 100, 6)],
-                         ["fablyn-orchestrator", "fablyn-dev", "fablyn-ops", "fablyn-reviewer"])
+                         ["sample-orchestrator", "sample-dev", "sample-ops", "sample-reviewer"])
 
     def test_packed_rows_that_still_do_not_fit(self):
         board_ = six()
@@ -220,7 +220,7 @@ class Render(unittest.TestCase):
         shown = text(B.render(board_, 162, 5, True))  # 3 rows of 2: the six most urgent
         self.assertTrue(shown[4].endswith("+4 more"))
         self.assertEqual(len(B.visible(board_, 162, 5)), 6)
-        self.assertEqual(B.visible(board_, 162, 5)[0].name, "fablyn-orchestrator")
+        self.assertEqual(B.visible(board_, 162, 5)[0].name, "sample-orchestrator")
 
     def test_every_state_cell(self):
         cases = {"working": "\u25cf working 3m", "idle": "\u25cb idle 3m", "blocked": "\u25d0 blocked 3m",
@@ -238,20 +238,20 @@ class Render(unittest.TestCase):
     def test_the_queue_debt_and_context_cells(self):
         row = B.Row("s", "s", "idle", 0)
         self.assertEqual(B.queue_text(row, 50), "\u2013")
-        row.queued, row.oldest, row.next_id, row.next_line = 1, 200, "018934", "first line"
-        self.assertEqual(B.queue_text(row, 50), '1 queued, 3m  #018934 "first line"')
+        row.queued, row.oldest, row.next_id, row.next_line = 1, 200, "103001", "first line"
+        self.assertEqual(B.queue_text(row, 50), '1 queued, 3m  #103001 "first line"')
         row.queued = 2
-        self.assertEqual(B.queue_text(row, 50), '2 queued, oldest 3m  #018934 "first line"')
-        self.assertEqual(B.queue_text(row, 36), '2 queued, oldest 3m  #018934 "first\u2026')
-        self.assertEqual(B.queue_text(row, 30), "2 queued, oldest 3m  #018934")
+        self.assertEqual(B.queue_text(row, 50), '2 queued, oldest 3m  #103001 "first line"')
+        self.assertEqual(B.queue_text(row, 36), '2 queued, oldest 3m  #103001 "first\u2026')
+        self.assertEqual(B.queue_text(row, 30), "2 queued, oldest 3m  #103001")
         for note in ("holding: owner typing", "retrying in 45 s", "pointed to inbox --read"):
             row.note = note
             self.assertEqual(B.queue_text(row, 50), "2 queued, " + note)
         self.assertEqual(B.debt_text(B.Row("s", "s", "idle", 0), 30), "\u2013")
         debt = B.Row("s", "s", "idle", 0, debt_to="owner", debt_shown="owner", debt_age=7300)
         self.assertEqual(B.debt_text(debt, 30), "owes owner 2h")  # a message sent before ids
-        debt.debt_id = "62437b"
-        self.assertEqual(B.debt_text(debt, 30), "owes owner 2h #62437b")
+        debt.debt_id = "103002"
+        self.assertEqual(B.debt_text(debt, 30), "owes owner 2h #103002")
         self.assertEqual(B.context_text(B.Row("s", "s", "idle", 0)), "")
         self.assertEqual(B.context_text(B.Row("s", "s", "idle", 0, tokens=1234567)), "ctx 1.2M")
         self.assertEqual([B.hold_reason(d) for d in ("owner typing in w1:p2",
@@ -261,7 +261,7 @@ class Render(unittest.TestCase):
                          ["owner typing", "text in its input", "a dialog or a menu", "presence check: herdr error x"])
 
     def test_colours_on(self):
-        board_ = sample(selected="fablyn-designer")
+        board_ = sample(selected="sample-designer")
         lines = B.render(board_, 162, 6, True)
         self.assertEqual(styles(lines[4], "blocked"), "red bold")
         self.assertEqual(styles(lines[4], "Allow Bash"), "red bold")
@@ -272,14 +272,14 @@ class Render(unittest.TestCase):
         self.assertFalse(any("reverse" in style for _, style in lines[2]))
         board_.error = "cannot read herdr: herdr_not_found"
         self.assertEqual(styles(B.render(board_, 162, 6, True)[5], "cannot read"), "red")
-        board_.error, board_.event = "", B.Event("08:03", "failed fablyn-dev: x", True)
+        board_.error, board_.event = "", B.Event("08:03", "failed sample-dev: x", True)
         self.assertEqual(styles(B.render(board_, 162, 6, True)[5], "failed"), "red")
         done = sample()
         done.rows[0].state = "done"
         self.assertEqual(styles(B.render(done, 162, 6, True)[1], "done"), "dim")
 
     def test_colours_off(self):
-        board_ = sample(selected="fablyn-designer", error="cannot read herdr: x")
+        board_ = sample(selected="sample-designer", error="cannot read herdr: x")
         lines = B.render(board_, 162, 6, False)
         self.assertEqual(styles(lines[4], "blocked"), "bold")      # still marked without colour
         self.assertEqual(styles(lines[1], "working"), "")
@@ -292,11 +292,11 @@ class Render(unittest.TestCase):
         self.assertEqual(text(lines), text(B.render(board_, 162, 6, True)))  # same text either way
 
     def test_the_footer_notice_and_the_header_without_queues(self):
-        board_ = sample(notice="ack #62437b (fablyn-reviewer owes fablyn-orchestrator 2h)? y/n")
+        board_ = sample(notice="ack #103002 (sample-reviewer owes sample-orchestrator 2h)? y/n")
         self.assertEqual(text(B.render(board_, 162, 6, True))[5],
-                         "ack #62437b (fablyn-reviewer owes fablyn-orchestrator 2h)? y/n")
+                         "ack #103002 (sample-reviewer owes sample-orchestrator 2h)? y/n")
         quiet = sample(owner_count=0, owner_newest=None, waiting=0, holding=0)
-        self.assertEqual(text(B.render(quiet, 162, 6, True))[0], "fablyn \u00b7 watching 11h \u00b7 owner: nothing")
+        self.assertEqual(text(B.render(quiet, 162, 6, True))[0], "sample \u00b7 watching 11h \u00b7 owner: nothing")
         self.assertEqual(text(B.render(sample(event=None), 162, 6, True))[5], "")
 
     def test_text_is_cut_never_wrapped(self):
@@ -358,12 +358,12 @@ class BoardCase(LiveFleet):
         self.status_of("w2:p1", "blocked")
 
     def debt(self, when=None):
-        """fablyn-reviewer owes fablyn-orchestrator #62437b, delivered two hours ago."""
+        """sample-reviewer owes sample-orchestrator #103002, delivered two hours ago."""
         when = when or ago(hours=2, minutes=1)
-        put(self.repo, "fablyn-reviewer", "Review round 3, please", ident=DEBT_ID, when=when, which=CUR)
-        messages.append(self.repo, {"time": inbox.iso_local(when), "from": "fablyn-orchestrator",
-                                    "to": "fablyn-reviewer", "kind": "send", "id": DEBT_ID, "bytes": 40,
-                                    "first_line": "Review round 3, please", "delivery": "sent"})
+        put(self.repo, "sample-reviewer", "Review parser tests, please", ident=DEBT_ID, when=when, which=CUR)
+        messages.append(self.repo, {"time": inbox.iso_local(when), "from": "sample-orchestrator",
+                                    "to": "sample-reviewer", "kind": "send", "id": DEBT_ID, "bytes": 40,
+                                    "first_line": "Review parser tests, please", "delivery": "sent"})
 
     def sessions(self, orch=730000, dev=376000):
         recent = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -384,25 +384,25 @@ class Build(BoardCase):
         self.blocked_orchestrator()
         self.status_of("w2:p2", "working")
         fake_herdr.set_title(self.world, "w2:p2", "vitest run")
-        fake_herdr.set_title(self.world, "w2:p3", "fablyn-reviewer")  # idle: not read anyway
-        self.seen_since("fablyn-dev", "working", minutes=10)
-        self.seen_since("fablyn-reviewer", "working", minutes=10)  # another state: since becomes now
+        fake_herdr.set_title(self.world, "w2:p3", "sample-reviewer")  # idle: not read anyway
+        self.seen_since("sample-dev", "working", minutes=10)
+        self.seen_since("sample-reviewer", "working", minutes=10)  # another state: since becomes now
         result = self.build()
         orch, dev, reviewer = result.rows
-        self.assertEqual((orch.name, orch.state, orch.doing), ("fablyn-orchestrator", "blocked",
+        self.assertEqual((orch.name, orch.state, orch.doing), ("sample-orchestrator", "blocked",
                                                                 "Allow Bash(pnpm test)?"))
         self.assertEqual((dev.state, dev.doing), ("working", "vitest run"))
         self.assertEqual((reviewer.state, reviewer.doing), ("idle", ""))
         self.assertAlmostEqual(dev.age, 600, delta=5)
         self.assertLess(reviewer.age, 5)
-        self.assertEqual(self.read_state()["agents"]["fablyn-reviewer"]["state_seen"]["state"], "idle")  # 20.5
-        self.assertEqual(result.fleet, "fablyn")
+        self.assertEqual(self.read_state()["agents"]["sample-reviewer"]["state_seen"]["state"], "idle")  # 20.5
+        self.assertEqual(result.fleet, "sample")
         # what was read: one list, a pane get for the working seat, the blocked seat's screen
         reads = [c["argv"] for c in self.calls()]
         self.assertEqual([a for a in reads if a[:2] == ["agent", "list"]], [["agent", "list"]])
         self.assertEqual([a for a in reads if a[:2] == ["pane", "get"]], [["pane", "get", "w2:p2"]])
         self.assertEqual([a for a in reads if a[:2] == ["agent", "read"]],
-                         [["agent", "read", "fablyn-orchestrator", "--lines", "16"]])
+                         [["agent", "read", "sample-orchestrator", "--lines", "16"]])
         self.assertFalse([a for a in reads if a[:2] in (["agent", "prompt"], ["agent", "send-keys"],
                                                          ["agent", "focus"])])
         # nothing else of the screen is kept or shown (invariant 22)
@@ -410,14 +410,14 @@ class Build(BoardCase):
         self.assertNotIn(SECRET, "\n".join(text(B.render(result, 162, 6, True))))
 
     def test_a_title_naming_the_seat_or_its_label_is_nothing(self):
-        self.write_fleet(self.read_fleet().replace('name = "fablyn-dev"', 'name = "fablyn-dev"\nlabel = "DEV"'))
+        self.write_fleet(self.read_fleet().replace('name = "sample-dev"', 'name = "sample-dev"\nlabel = "DEV"'))
         self.status_of("w2:p2", "working")
         self.status_of("w2:p3", "working")
         fake_herdr.set_title(self.world, "w2:p2", "DEV")
-        fake_herdr.set_title(self.world, "w2:p3", "fablyn-reviewer")
+        fake_herdr.set_title(self.world, "w2:p3", "sample-reviewer")
         result = self.build()
         self.assertEqual([(r.shown, r.doing) for r in result.rows],
-                         [("fablyn-orchestrator", ""), ("DEV", ""), ("fablyn-reviewer", "")])
+                         [("sample-orchestrator", ""), ("DEV", ""), ("sample-reviewer", "")])
 
     def test_a_blocked_seat_without_a_numbered_choice_shows_nothing(self):
         fake_herdr.show_dialog(self.world, "w2:p1")  # the fake's dialog has no highlighted choice
@@ -425,49 +425,49 @@ class Build(BoardCase):
         self.assertEqual(self.build().rows[0].doing, "")
 
     def test_queues_owner_inbox_and_holds(self):
-        put(self.repo, "fablyn-dev", "older task\nwith a second line", when=ago(minutes=7))
-        put(self.repo, "fablyn-dev", "[from x] newer task", sender="fablyn-reviewer", when=ago(minutes=2))
-        put(self.repo, "fablyn-dev", "an FYI that waits", when=ago(minutes=1), fyi=True)
-        put(self.repo, "fablyn-reviewer", "expired", when=ago(minutes=9), ttl=ago(minutes=1))
-        owner = put(self.repo, "owner", "1.28.1 is LIVE\nsecond line", sender="fablyn-dev", when=ago(minutes=4))
-        state = B.WatcherState(watching=3600 * 11, waiting=["fablyn-dev"],
-                               holds={"fablyn-dev": "owner typing in w2:p2"}, retries={"fablyn-orchestrator": 42.4},
-                               pointed=["fablyn-reviewer"], event=B.Event("08:02", "delivered 2 to fablyn-dev"))
-        put(self.repo, "fablyn-orchestrator", "for the orchestrator", sender="fablyn-dev")
+        put(self.repo, "sample-dev", "older task\nwith a second line", when=ago(minutes=7))
+        put(self.repo, "sample-dev", "[from x] newer task", sender="sample-reviewer", when=ago(minutes=2))
+        put(self.repo, "sample-dev", "an FYI that waits", when=ago(minutes=1), fyi=True)
+        put(self.repo, "sample-reviewer", "expired", when=ago(minutes=9), ttl=ago(minutes=1))
+        owner = put(self.repo, "owner", "Example ready\nsecond line", sender="sample-dev", when=ago(minutes=4))
+        state = B.WatcherState(watching=3600 * 11, waiting=["sample-dev"],
+                               holds={"sample-dev": "owner typing in w2:p2"}, retries={"sample-orchestrator": 42.4},
+                               pointed=["sample-reviewer"], event=B.Event("08:02", "delivered 2 to sample-dev"))
+        put(self.repo, "sample-orchestrator", "for the orchestrator", sender="sample-dev")
         result = self.build(state)
         orch, dev, reviewer = result.rows
-        self.assertEqual((dev.queued, dev.next_from, dev.next_line), (3, "fablyn-orchestrator", "older task"))
+        self.assertEqual((dev.queued, dev.next_from, dev.next_line), (3, "sample-orchestrator", "older task"))
         self.assertAlmostEqual(dev.oldest, 420, delta=5)
         self.assertEqual(dev.note, "holding: owner typing")
         self.assertEqual(orch.note, "retrying in 42 s")
         self.assertEqual((reviewer.queued, reviewer.note), (0, "pointed to inbox --read"))  # past its ttl: not counted
-        self.assertEqual(len(box(self.repo, "fablyn-reviewer", NEW)), 1)  # and not moved: the board only reads
+        self.assertEqual(len(box(self.repo, "sample-reviewer", NEW)), 1)  # and not moved: the board only reads
         self.assertEqual((result.owner_count, result.owner_id, result.owner_from, result.owner_line),
-                         (1, owner.short, "fablyn-dev", "1.28.1 is LIVE"))
-        self.assertEqual((result.owner_newest.id, result.owner_newest.sender), (owner.id, "fablyn-dev"))
+                         (1, owner.short, "sample-dev", "Example ready"))
+        self.assertEqual((result.owner_newest.id, result.owner_newest.sender), (owner.id, "sample-dev"))
         self.assertEqual((result.waiting, result.holding, result.retrying, result.watching), (1, 1, 1, 3600 * 11))
-        self.assertEqual(result.event.text, "delivered 2 to fablyn-dev")
+        self.assertEqual(result.event.text, "delivered 2 to sample-dev")
         shown = text(B.render(result, 162, 6, True))
-        self.assertRegex(shown[0], r'owner: #%s %s from fablyn-dev "1\.28\.1 is LIVE"' % (owner.short, HHMM))
+        self.assertRegex(shown[0], r'owner: #%s %s from sample-dev "Example ready"' % (owner.short, HHMM))
         self.assertTrue(shown[0].endswith("waiting on 1 \u00b7 holding 1 \u00b7 retrying 1"))
         self.assertIn("3 queued, holding: owner typing", shown[2])
-        self.assertTrue(shown[5].startswith("08:02 delivered 2 to fablyn-dev"))
+        self.assertTrue(shown[5].startswith("08:02 delivered 2 to sample-dev"))
 
     def test_debts_the_oldest_owed_by_each_seat(self):
         self.debt()
         later = ago(minutes=30)
-        put(self.repo, "fablyn-reviewer", "second ask", sender="owner", ident="20261024T060000Z-a1b2c3",
+        put(self.repo, "sample-reviewer", "second ask", sender="owner", ident="20261024T060000Z-a1b2c3",
             when=later, which=CUR)
-        messages.append(self.repo, {"time": inbox.iso_local(later), "from": "owner", "to": "fablyn-reviewer",
+        messages.append(self.repo, {"time": inbox.iso_local(later), "from": "owner", "to": "sample-reviewer",
                                     "kind": "send", "id": "20261024T060000Z-a1b2c3", "bytes": 9,
                                     "first_line": "second ask", "delivery": "sent"})
         result = self.build()
         reviewer = result.rows[2]
-        self.assertEqual((reviewer.debt_to, reviewer.debt_shown, reviewer.debt_id), ("fablyn-orchestrator",
-                                                                                      "orchestrator", "62437b"))
+        self.assertEqual((reviewer.debt_to, reviewer.debt_shown, reviewer.debt_id), ("sample-orchestrator",
+                                                                                      "orchestrator", "103002"))
         self.assertAlmostEqual(reviewer.debt_age, 7260, delta=5)
         self.assertEqual(result.rows[0].debt_to, "")
-        self.assertIn("owes orchestrator 2h #62437b", text(B.render(result, 162, 6, True))[3])
+        self.assertIn("owes orchestrator 2h #103002", text(B.render(result, 162, 6, True))[3])
 
     def test_the_log_is_parsed_again_only_when_it_changed(self):
         self.debt()
@@ -478,7 +478,7 @@ class Build(BoardCase):
             self.build(state)
             self.build(state)
             self.assertEqual(reading.call_count, 1)
-            messages.append(self.repo, messages.ack_entry("fablyn-reviewer", "fablyn-orchestrator", ident=DEBT_ID))
+            messages.append(self.repo, messages.ack_entry("sample-reviewer", "sample-orchestrator", ident=DEBT_ID))
             result = self.build(state)
             self.assertEqual(reading.call_count, 2)
         self.assertEqual(result.rows[2].debt_to, "")  # the ack settled it
@@ -518,20 +518,20 @@ class Build(BoardCase):
     def test_contacts_and_an_absent_seat(self):
         winner = os.path.join(self.tmp, "winner")
         os.makedirs(winner)
-        self.write_fleet(self.read_fleet() + '\n[[contacts]]\nname = "winner-chronicles"\nmatch = { cwd = "%s" }\n'
+        self.write_fleet(self.read_fleet() + '\n[[contacts]]\nname = "partner-workspace"\nmatch = { cwd = "%s" }\n'
                          % winner)
         fake_herdr.add_workspace(self.world, "w3", "winner", winner)
         fake_herdr.add_pane(self.world, "w3:p4", "w3", winner)
         fake_herdr.put_agent(self.world, "w3:p4", "claude", name=None, status="working")
         self.world["panes"]["w2:p3"]["agent"] = None  # the reviewer is gone
-        put(self.repo, "winner-chronicles", "for the contact", sender="fablyn-dev")
+        put(self.repo, "partner-workspace", "for the contact", sender="sample-dev")
         result = self.build()
         self.assertEqual(result.rows[2].state, "absent")
         (contact,) = result.contacts
         self.assertEqual((contact.name, contact.state, contact.queued, contact.contact),
-                         ("winner-chronicles", "working", 1, True))
+                         ("partner-workspace", "working", 1, True))
         self.assertEqual(text(B.render(result, 162, 8, True))[4][:40].rstrip(),
-                         "\u2194 winner-chronicles \u25cf working <1m")
+                         "\u2194 partner-workspace \u25cf working <1m")
         self.assertFalse(self.argvs("pane", "get"))  # a contact's title is not read
 
     def test_herdr_unreachable(self):
@@ -592,9 +592,9 @@ class Modes(Strip):
         self.assertTrue(self.screen.closed)
         first = self.screen.text(0)
         self.assertEqual(len(first), 6)
-        self.assertTrue(first[0].startswith("fablyn \u00b7 watching <1m \u00b7 owner: nothing"))
+        self.assertTrue(first[0].startswith("sample \u00b7 watching <1m \u00b7 owner: nothing"))
         self.assertEqual([line[:20].rstrip() for line in first[1:4]],
-                         ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"])
+                         ["sample-orchestrator", "sample-dev", "sample-reviewer"])
         self.assertRegex(first[5], r"^%s watching repo \(pid %d\)  " % (HHMM, os.getpid()))  # 25.8: short
         self.assertTrue(self.watch_log()[0].startswith("watching %s (pid" % os.path.join(self.repo, ".herdr",
                                                                                          "fleet.toml")))
@@ -625,8 +625,8 @@ class Modes(Strip):
         self.assertEqual(self.watch_log(), [])
 
     def test_log_prints_todays_lines_on_a_terminal(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        self.world["behaviors"]["wait_results"] = {"fablyn-dev": ["idle"]}
+        put(self.repo, "sample-dev", "Task A")
+        self.world["behaviors"]["wait_results"] = {"sample-dev": ["idle"]}
         self.clock = StopClock(cycles=2)
 
         def never(env, stream=None):
@@ -636,8 +636,8 @@ class Modes(Strip):
                 mock.patch.object(tui, "open_screen", never), mock.patch.object(watch, "spawn", inline):
             code, out, _ = self.run_cli("watch", "--log")
         self.assertEqual(code, 0)
-        self.assertEqual(events(out)[1:], ["waiting on fablyn-dev (1 queued)", "fablyn-dev idle; delivering 1",
-                                           "delivered 1 to fablyn-dev", "stopped"])
+        self.assertEqual(events(out)[1:], ["waiting on sample-dev (1 queued)", "sample-dev idle; delivering 1",
+                                           "delivered 1 to sample-dev", "stopped"])
         self.assertEqual(self.watch_log(), [])
 
     def test_a_stdout_that_is_not_a_terminal_prints_todays_lines(self):
@@ -661,8 +661,8 @@ class Modes(Strip):
         self.assertEqual((code, out), (0, "nothing to deliver\n"))
 
     def test_the_board_follows_deliveries_and_rebuilds_on_events(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        self.world["behaviors"]["wait_results"] = {"fablyn-dev": ["timeout", "idle"]}
+        put(self.repo, "sample-dev", "Task A")
+        self.world["behaviors"]["wait_results"] = {"sample-dev": ["timeout", "idle"]}
         built = []
         real = B.build
 
@@ -676,29 +676,29 @@ class Modes(Strip):
         start = built[0]
         # at the start; at the next pass, right after the delivery (an event); then 5 s later
         self.assertEqual([t - start for t in built[:3]], [0.0, 2.0, 7.0])
-        self.assertIn("delivered 1 to fablyn-dev", self.watch_log())
-        self.assertTrue(any(f.startswith("") and "delivered 1 to fablyn-dev" in f for f in self.footers()))
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
+        self.assertIn("delivered 1 to sample-dev", self.watch_log())
+        self.assertTrue(any(f.startswith("") and "delivered 1 to sample-dev" in f for f in self.footers()))
+        self.assertEqual(len(self.prompts_to("sample-dev")), 1)
 
 
 class Keys(Strip):
     def test_g_goes_to_the_selected_seat(self):  # design 25.1: what Enter and the numbers did in 24.4
         code, _, err = self.run_board(["down", "g"])  # 25.8: the first row starts selected
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "fablyn-dev"]])
+        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "sample-dev"]])
         self.assertEqual(self.focused_pane(), "w2:p2")
-        self.assertIn("focused fablyn-dev (w2:p2, idle)", self.watch_log())
+        self.assertIn("focused sample-dev (w2:p2, idle)", self.watch_log())
 
     def test_a_number_without_a_seat_and_an_absent_seat(self):
         self.world["panes"]["w2:p3"]["agent"] = None
         self.run_board(["7", "down", "down", "down", "g"])
         self.assertFalse(self.argvs("agent", "focus"))
         self.assertIn("no seat 7 on the board", self.footers())
-        self.assertIn("fablyn-reviewer is absent; nothing to focus", self.watch_log())
+        self.assertIn("sample-reviewer is absent; nothing to focus", self.watch_log())
 
     def test_up_down_and_enter(self):
         self.run_board(["down", "down", "up", "g"])
-        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "fablyn-dev"]])
+        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "sample-dev"]])
         selected = [i for i, draw in enumerate(self.screen.draws)
                     if any("reverse" in style for line in draw[1:2] for _, style in line)]
         self.assertTrue(selected)  # the first row was drawn selected after the first Down
@@ -706,22 +706,22 @@ class Keys(Strip):
     def test_the_first_row_starts_selected(self):  # design 25.8
         self.run_board(["enter"])
         self.assertTrue(all("reverse" in style for _, style in self.screen.draws[0][1]))
-        self.assertTrue(self.screen.text()[0].startswith("fablyn-orchestrator \u00b7"))  # Enter opened its page
+        self.assertTrue(self.screen.text()[0].startswith("sample-orchestrator \u00b7"))  # Enter opened its page
         self.assertFalse(self.argvs("agent", "focus"))
 
     def test_a_then_y_acks_the_oldest_debt_as_owner(self):
         self.debt()
         code, _, err = self.run_board(["down", "down", "down", "a", "y"])
         self.assertEqual(code, 0, err)
-        self.assertTrue(any(re.match(r"^ack #62437b \(fablyn-reviewer owes fablyn-orchestrator 2h\)\? y/n$", f)
+        self.assertTrue(any(re.match(r"^ack #103002 \(sample-reviewer owes sample-orchestrator 2h\)\? y/n$", f)
                             for f in self.footers()), self.footers())
         acks = [e for e in log_entries(self.repo) if e["kind"] == "ack"]
         self.assertEqual(len(acks), 1)
         self.assertEqual({k: acks[0][k] for k in ("from", "to", "id", "by", "reason")},
-                         {"from": "fablyn-reviewer", "to": "fablyn-orchestrator", "id": DEBT_ID, "by": "owner",
+                         {"from": "sample-reviewer", "to": "sample-orchestrator", "id": DEBT_ID, "by": "owner",
                           "reason": "from the board"})
-        self.assertTrue(any(line.startswith("acked #62437b from fablyn-orchestrator since ")
-                            and line.endswith("owed by fablyn-reviewer; reason: from the board")
+        self.assertTrue(any(line.startswith("acked #103002 from sample-orchestrator since ")
+                            and line.endswith("owed by sample-reviewer; reason: from the board")
                             for line in self.watch_log()), self.watch_log())
         self.assertFalse(self.argvs("pane", "current"))  # the caller is owner: no lookup
         self.assertFalse(self.argvs("agent", "prompt"))  # ack sends nothing (invariant 10)
@@ -735,41 +735,41 @@ class Keys(Strip):
 
     def test_a_with_nothing_owed_or_nothing_selected(self):
         self.run_board(["a", "down", "a", "up", "up", "a"])
-        self.assertIn("fablyn-orchestrator owes nothing", self.footers())
-        self.assertIn("fablyn-dev owes nothing", self.footers())
+        self.assertIn("sample-orchestrator owes nothing", self.footers())
+        self.assertIn("sample-dev owes nothing", self.footers())
         self.assertIn("select a seat with \u2191 and \u2193 first", self.footers())  # the header selected
         self.assertFalse([e for e in log_entries(self.repo) if e["kind"] == "ack"])
 
     def test_d_delivers_now_to_idle_seats_only(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        put(self.repo, "fablyn-reviewer", "Review B")
-        put(self.repo, "fablyn-orchestrator", "for the blocked one", sender="fablyn-dev")
+        put(self.repo, "sample-dev", "Task A")
+        put(self.repo, "sample-reviewer", "Review B")
+        put(self.repo, "sample-orchestrator", "for the blocked one", sender="sample-dev")
         self.status_of("w2:p3", "working")
         self.blocked_orchestrator()
-        self.world["behaviors"]["wait_results"] = {"fablyn-dev": ["timeout"] * 9,
-                                                   "fablyn-reviewer": ["timeout"] * 9}
+        self.world["behaviors"]["wait_results"] = {"sample-dev": ["timeout"] * 9,
+                                                   "sample-reviewer": ["timeout"] * 9}
         code, _, err = self.run_board(["d"])
         self.assertEqual(code, 0, err)
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
-        self.assertEqual(self.prompts_to("fablyn-reviewer"), [])
-        self.assertEqual(self.prompts_to("fablyn-orchestrator"), [])
+        self.assertEqual(len(self.prompts_to("sample-dev")), 1)
+        self.assertEqual(self.prompts_to("sample-reviewer"), [])
+        self.assertEqual(self.prompts_to("sample-orchestrator"), [])
         lines = self.watch_log()
-        self.assertIn("delivered 1 to fablyn-dev", lines)
-        self.assertIn("fablyn-reviewer working; 1 left queued", lines)
-        self.assertIn("fablyn-orchestrator blocked: a dialog is open; 1 left queued", lines)
-        self.assertNotIn("fablyn-dev idle; delivering 1", lines)  # no debounce
-        self.assertEqual(len(box(self.repo, "fablyn-reviewer", NEW)), 1)
+        self.assertIn("delivered 1 to sample-dev", lines)
+        self.assertIn("sample-reviewer working; 1 left queued", lines)
+        self.assertIn("sample-orchestrator blocked: a dialog is open; 1 left queued", lines)
+        self.assertNotIn("sample-dev idle; delivering 1", lines)  # no debounce
+        self.assertEqual(len(box(self.repo, "sample-reviewer", NEW)), 1)
         self.assertEqual([(e["kind"], e["via"]) for e in log_entries(self.repo)], [("delivered", "watch")])
 
     def test_d_holds_for_text_in_the_input_and_says_when_nothing_waits(self):
-        put(self.repo, "fablyn-dev", "Task A")
+        put(self.repo, "sample-dev", "Task A")
         fake_herdr.type_in(self.world, "w2:p2", "half typed")
-        self.world["behaviors"]["wait_results"] = {"fablyn-dev": ["timeout"] * 9}
+        self.world["behaviors"]["wait_results"] = {"sample-dev": ["timeout"] * 9}
         self.run_board(["d"])
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
-        self.assertIn("fablyn-dev idle; text in its input (w2:p2); press Ctrl-U there to clear it, 1 left queued",
+        self.assertEqual(self.prompts_to("sample-dev"), [])
+        self.assertIn("sample-dev idle; text in its input (w2:p2); press Ctrl-U there to clear it, 1 left queued",
                       self.watch_log())
-        os.remove(box_path(self.repo, "fablyn-dev"))
+        os.remove(box_path(self.repo, "sample-dev"))
         self.run_board(["d"])
         self.assertIn("nothing to deliver: no seat has a queue", self.footers())
 
@@ -779,7 +779,7 @@ class Keys(Strip):
         at = titles.index("watch.log \u00b7 any key returns to the board")
         log_view = self.screen.text(at)
         self.assertRegex(log_view[1], r"^\d\d:\d\d:\d\d  watching ")
-        self.assertTrue(titles[at + 1].startswith("fablyn \u00b7 watching"))
+        self.assertTrue(titles[at + 1].startswith("sample \u00b7 watching"))
 
     def test_question_mark_shows_the_keys_for_five_seconds(self):
         self.run_board(["?"], idle=40)
@@ -807,7 +807,7 @@ class Keys(Strip):
         self.assertIn((90, 6), [(widths(d)[0], len(d)) for d in self.screen.draws])
         last = self.screen.draws[-1]
         self.assertEqual((widths(last), len(last)), ([40], 1))
-        self.assertTrue(text(last)[0].startswith("fablyn-orche"))
+        self.assertTrue(text(last)[0].startswith("sample-orche"))
 
     def test_colours_follow_the_screen_and_no_color(self):
         self.blocked_orchestrator()
@@ -822,15 +822,15 @@ class Keys(Strip):
 
     def test_the_blocked_seat_is_read_and_nothing_is_typed(self):
         self.blocked_orchestrator()
-        put(self.repo, "fablyn-orchestrator", "for the blocked one", sender="fablyn-dev")
-        self.world["behaviors"]["wait_results"] = {"fablyn-orchestrator": ["timeout"] * 9}
+        put(self.repo, "sample-orchestrator", "for the blocked one", sender="sample-dev")
+        self.world["behaviors"]["wait_results"] = {"sample-orchestrator": ["timeout"] * 9}
         self.run_board(["d", "g"])
         self.assertIn('"Allow Bash(pnpm test)?"', self.screen.text(0)[1])
-        self.assertTrue(self.argvs("agent", "read", "fablyn-orchestrator"))
-        self.assertFalse(self.argvs("agent", "read", "fablyn-dev"))
+        self.assertTrue(self.argvs("agent", "read", "sample-orchestrator"))
+        self.assertFalse(self.argvs("agent", "read", "sample-dev"))
         self.assertFalse(self.argvs("agent", "prompt"))
         self.assertFalse(self.argvs("agent", "send-keys"))
-        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "fablyn-orchestrator"]])
+        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "sample-orchestrator"]])
         self.assertNotIn(SECRET, "\n".join(self.watch_log()))
 
 
@@ -964,9 +964,9 @@ class Harness(BoardCase):
     def test_focus_and_read_rules(self):
         watch_ = {"command": ["watch"]}
         listing = {"argv": ["agent", "list"], "exit": 0,
-                   "info": {"states": {"fablyn-orchestrator": "blocked", "fablyn-dev": "idle", "caller": "blocked"}}}
-        read_orch = {"argv": ["agent", "read", "fablyn-orchestrator", "--lines", "16"], "exit": 0, "info": {}}
-        focus = {"argv": ["agent", "focus", "fablyn-dev"], "exit": 0, "info": {}}
+                   "info": {"states": {"sample-orchestrator": "blocked", "sample-dev": "idle", "caller": "blocked"}}}
+        read_orch = {"argv": ["agent", "read", "sample-orchestrator", "--lines", "16"], "exit": 0, "info": {}}
+        focus = {"argv": ["agent", "focus", "sample-dev"], "exit": 0, "info": {}}
         self.write_log(watch_, listing, read_orch, {"key": "2"}, focus, {"key": "g"}, focus)
         self.assert_safety()  # the allowed shapes pass
         os.remove(self.log_path)
@@ -976,16 +976,16 @@ class Harness(BoardCase):
         self.assert_caught(watch_, {"key": "2"}, focus, focus)                       # one focus per key
         self.assert_caught(watch_, {"key": "2"}, {"command": ["watch"]}, focus)       # a key of another run
         self.assert_caught(watch_, read_orch)                                        # no agent list yet
-        self.assert_caught(watch_, listing, dict(read_orch, argv=["agent", "read", "fablyn-dev", "--lines", "16"]))
+        self.assert_caught(watch_, listing, dict(read_orch, argv=["agent", "read", "sample-dev", "--lines", "16"]))
         self.assert_caught(watch_, listing, dict(read_orch, argv=["agent", "read", "caller", "--lines", "16"]))
-        self.assert_caught(watch_, listing, {"argv": ["agent", "send-keys", "fablyn-orchestrator", "enter"],
+        self.assert_caught(watch_, listing, {"argv": ["agent", "send-keys", "sample-orchestrator", "enter"],
                                              "exit": 0, "info": {"keys": ["enter"]}})
         self.assert_caught({"command": ["status"]}, {"key": "2"}, focus)            # only go, the popup, the board
 
     def test_a_listed_state_is_the_one_that_counts(self):
-        listing = {"argv": ["agent", "list"], "exit": 0, "info": {"states": {"fablyn-orchestrator": "blocked"}}}
-        relisted = {"argv": ["agent", "list"], "exit": 0, "info": {"states": {"fablyn-orchestrator": "idle"}}}
-        read = {"argv": ["agent", "read", "fablyn-orchestrator", "--lines", "16"], "exit": 0, "info": {}}
+        listing = {"argv": ["agent", "list"], "exit": 0, "info": {"states": {"sample-orchestrator": "blocked"}}}
+        relisted = {"argv": ["agent", "list"], "exit": 0, "info": {"states": {"sample-orchestrator": "idle"}}}
+        read = {"argv": ["agent", "read", "sample-orchestrator", "--lines", "16"], "exit": 0, "info": {}}
         self.assert_caught({"command": ["watch"]}, listing, relisted, read)
         self.write_log({"command": ["watch"]}, relisted, listing, read)
         self.assert_safety()
@@ -995,7 +995,7 @@ class Harness(BoardCase):
         self.blocked_orchestrator()
         self.run_cli("status")
         call = next(c for c in self.calls() if c["argv"] == ["agent", "list"])
-        self.assertEqual(call["info"]["states"]["fablyn-orchestrator"], "blocked")
+        self.assertEqual(call["info"]["states"]["sample-orchestrator"], "blocked")
         self.assertEqual(call["info"]["states"]["caller"], "working")
 
 

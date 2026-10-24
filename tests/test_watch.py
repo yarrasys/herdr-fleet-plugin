@@ -89,76 +89,76 @@ class WatchCase(LiveFleet):
 
 class Waiters(WatchCase):
     def test_one_waiter_per_mailbox_and_a_batch_after_the_debounce(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        put(self.repo, "fablyn-dev", "Task B", sender="fablyn-reviewer")
-        put(self.repo, "fablyn-reviewer", "Review C")
+        put(self.repo, "sample-dev", "Task A")
+        put(self.repo, "sample-dev", "Task B", sender="sample-reviewer")
+        put(self.repo, "sample-reviewer", "Review C")
         self.status_of("w2:p3", "working")
-        self.behave(wait_results={"fablyn-dev": ["idle"], "fablyn-reviewer": ["timeout"] * 3})
+        self.behave(wait_results={"sample-dev": ["idle"], "sample-reviewer": ["timeout"] * 3})
         code, out, err = self.watch(cycles=3)
         self.assertEqual(code, 0, out + err)
         lines = events(out)
         self.assertRegex(lines[0], r"^watching .*fleet\.toml \(pid %d, debounce 5000 ms\); Ctrl-C stops$" % os.getpid())
-        self.assertEqual(lines[1:], ["waiting on fablyn-dev (2 queued)", "fablyn-dev idle; delivering 2",
-                                     "delivered 2 to fablyn-dev", "waiting on fablyn-reviewer (1 queued)", "stopped"])
+        self.assertEqual(lines[1:], ["waiting on sample-dev (2 queued)", "sample-dev idle; delivering 2",
+                                     "delivered 2 to sample-dev", "waiting on sample-reviewer (1 queued)", "stopped"])
         # one wait per pass for the working reviewer (a timeout ends the thread), none for the empty orchestrator
-        self.assertEqual(self.argvs("agent", "wait", "fablyn-dev"), [["agent", "wait", "fablyn-dev"] + WAIT])
-        self.assertEqual(self.argvs("agent", "wait", "fablyn-reviewer"), [["agent", "wait", "fablyn-reviewer"] + WAIT] * 3)
-        self.assertEqual(self.argvs("agent", "wait", "fablyn-orchestrator"), [])
-        (prompt,) = self.prompts_to("fablyn-dev")
-        self.assertRegex(prompt, r"^\[from fablyn-orchestrator at \d\d:\d\d %s\]\nTask A\n\n"
-                                 r"\[from fablyn-reviewer at \d\d:\d\d %s\]\nTask B$" % (SHORT, SHORT))
-        self.assertEqual(self.prompts_to("fablyn-reviewer"), [])
-        self.assertEqual((len(box(self.repo, "fablyn-dev", NEW)), len(box(self.repo, "fablyn-dev", CUR))), (0, 2))
-        self.assertEqual(len(box(self.repo, "fablyn-reviewer", NEW)), 1)
+        self.assertEqual(self.argvs("agent", "wait", "sample-dev"), [["agent", "wait", "sample-dev"] + WAIT])
+        self.assertEqual(self.argvs("agent", "wait", "sample-reviewer"), [["agent", "wait", "sample-reviewer"] + WAIT] * 3)
+        self.assertEqual(self.argvs("agent", "wait", "sample-orchestrator"), [])
+        (prompt,) = self.prompts_to("sample-dev")
+        self.assertRegex(prompt, r"^\[from sample-orchestrator at \d\d:\d\d %s\]\nTask A\n\n"
+                                 r"\[from sample-reviewer at \d\d:\d\d %s\]\nTask B$" % (SHORT, SHORT))
+        self.assertEqual(self.prompts_to("sample-reviewer"), [])
+        self.assertEqual((len(box(self.repo, "sample-dev", NEW)), len(box(self.repo, "sample-dev", CUR))), (0, 2))
+        self.assertEqual(len(box(self.repo, "sample-reviewer", NEW)), 1)
         self.assertEqual([(e["kind"], e["via"], e["delivery"]) for e in log_entries(self.repo)],
                          [("delivered", "watch", "sent")] * 2)
         note = self.world["notifications"][-1]
         self.assertEqual((note["title"], note["body"], note["sound"]),
-                         ("delivered 2 to fablyn-dev", "from fablyn-orchestrator (1), fablyn-reviewer (1)", "none"))
+                         ("delivered 2 to sample-dev", "from sample-orchestrator (1), sample-reviewer (1)", "none"))
         self.assertGreaterEqual(self.clock.slept, 5.0 + 3 * watch.CYCLE_S)
         self.assertFalse(os.path.exists(self.lock()))
 
     def test_the_debounce_recheck_backs_off_when_the_seat_went_working(self):
-        put(self.repo, "fablyn-dev", "Task A")
+        put(self.repo, "sample-dev", "Task A")
         # The first wait sees idle, but the seat starts working during the debounce.
-        self.behave(wait_results={"fablyn-dev": ["idle", "idle"]}, status_after_wait={"fablyn-dev": ["working"]})
+        self.behave(wait_results={"sample-dev": ["idle", "idle"]}, status_after_wait={"sample-dev": ["working"]})
         code, out, _ = self.watch("--debounce", "1500", cycles=2)
         self.assertEqual(code, 0)
-        self.assertEqual(events(out)[1:], ["waiting on fablyn-dev (1 queued)", "fablyn-dev idle; delivering 1",
-                                           "fablyn-dev working; still waiting", "fablyn-dev idle; delivering 1",
-                                           "delivered 1 to fablyn-dev", "stopped"])
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)  # never while working (tearDown checks the state)
-        gets = [c for c in self.calls() if c["argv"][:3] == ["agent", "get", "fablyn-dev"]]
+        self.assertEqual(events(out)[1:], ["waiting on sample-dev (1 queued)", "sample-dev idle; delivering 1",
+                                           "sample-dev working; still waiting", "sample-dev idle; delivering 1",
+                                           "delivered 1 to sample-dev", "stopped"])
+        self.assertEqual(len(self.prompts_to("sample-dev")), 1)  # never while working (tearDown checks the state)
+        gets = [c for c in self.calls() if c["argv"][:3] == ["agent", "get", "sample-dev"]]
         self.assertEqual(gets[0]["info"]["status"], "working")
         self.assertEqual(self.clock.slept, 1.5 * 2 + 2 * watch.CYCLE_S)
 
     def test_a_blocked_seat_is_never_prompted(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        self.behave(wait_results={"fablyn-dev": ["idle", "timeout"]}, status_after_wait={"fablyn-dev": ["blocked"]})
+        put(self.repo, "sample-dev", "Task A")
+        self.behave(wait_results={"sample-dev": ["idle", "timeout"]}, status_after_wait={"sample-dev": ["blocked"]})
         code, out, _ = self.watch(cycles=3)
         self.assertEqual(code, 0)
-        self.assertIn("fablyn-dev blocked: a dialog is open; still waiting", events(out))  # design 23.5
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 1)
-        self.assertEqual(len(self.argvs("agent", "wait", "fablyn-dev")), 4)  # idle, timeout, then one per pass
+        self.assertIn("sample-dev blocked: a dialog is open; still waiting", events(out))  # design 23.5
+        self.assertEqual(self.prompts_to("sample-dev"), [])
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 1)
+        self.assertEqual(len(self.argvs("agent", "wait", "sample-dev")), 4)  # idle, timeout, then one per pass
         self.assertNotIn("delivered", out)
 
     def test_fyi_only_mailboxes_get_no_waiter_and_fyis_ride_along(self):
-        put(self.repo, "fablyn-orchestrator", "FYI: round 3 clean", sender="fablyn-reviewer", fyi=True)
-        put(self.repo, "fablyn-dev", "FYI: build green", sender="fablyn-reviewer", fyi=True)
-        put(self.repo, "fablyn-dev", "Task A")
-        self.behave(wait_results={"fablyn-dev": ["idle"]})
+        put(self.repo, "sample-orchestrator", "FYI: parser tests pass", sender="sample-reviewer", fyi=True)
+        put(self.repo, "sample-dev", "FYI: build green", sender="sample-reviewer", fyi=True)
+        put(self.repo, "sample-dev", "Task A")
+        self.behave(wait_results={"sample-dev": ["idle"]})
         code, out, _ = self.watch(cycles=2)
         self.assertEqual(code, 0)
-        self.assertEqual(self.argvs("agent", "wait", "fablyn-orchestrator"), [])
-        self.assertEqual(self.prompts_to("fablyn-orchestrator"), [])
-        self.assertEqual(len(box(self.repo, "fablyn-orchestrator", NEW)), 1)
-        (prompt,) = self.prompts_to("fablyn-dev")
+        self.assertEqual(self.argvs("agent", "wait", "sample-orchestrator"), [])
+        self.assertEqual(self.prompts_to("sample-orchestrator"), [])
+        self.assertEqual(len(box(self.repo, "sample-orchestrator", NEW)), 1)
+        (prompt,) = self.prompts_to("sample-dev")
         self.assertIn("FYI: build green", prompt)
         self.assertIn("Task A", prompt)
 
     def test_nothing_queued_asks_herdr_nothing(self):
-        put(self.repo, "fablyn-dev", "FYI: only this", fyi=True)
+        put(self.repo, "sample-dev", "FYI: only this", fyi=True)
         before = len(self.calls())
         code, out, _ = self.watch(cycles=3)
         self.assertEqual(code, 0)
@@ -166,12 +166,12 @@ class Waiters(WatchCase):
 
     def test_an_absent_agent_gets_no_waiter_and_one_line(self):
         self.world["panes"]["w2:p3"]["agent"] = None
-        put(self.repo, "fablyn-reviewer", "Review C")
+        put(self.repo, "sample-reviewer", "Review C")
         code, out, _ = self.watch(cycles=4)
         self.assertEqual(code, 0)
-        self.assertEqual(events(out)[1:], ["fablyn-reviewer: absent, 1 left queued", "stopped"])
+        self.assertEqual(events(out)[1:], ["sample-reviewer: absent, 1 left queued", "stopped"])
         self.assertEqual(self.argvs("agent", "wait"), [])
-        self.assertEqual(len(box(self.repo, "fablyn-reviewer", NEW)), 1)
+        self.assertEqual(len(box(self.repo, "sample-reviewer", NEW)), 1)
         # looked for once per 30 s, not on every pass: preflight, then one list in 8 s of passes
         self.assertEqual(len(self.argvs("agent", "list")), 2)
         self.watch(cycles=17)  # 34 s: looked for again once
@@ -181,7 +181,7 @@ class Waiters(WatchCase):
         self.write_fleet(self.read_fleet() + '\n[[contacts]]\nname = "peer"\nmatch = { name = "peer-agent" }\n')
         fake_herdr.add_pane(self.world, "w2:p9", "w2", self.repo)
         fake_herdr.put_agent(self.world, "w2:p9", "claude", "peer-agent")
-        put(self.repo, "peer", "hello peer", sender="fablyn-dev")
+        put(self.repo, "peer", "hello peer", sender="sample-dev")
         self.behave(wait_results={"peer-agent": ["done"]})
         code, out, _ = self.watch(cycles=2)
         self.assertEqual(code, 0, out)
@@ -192,62 +192,62 @@ class Waiters(WatchCase):
 
 class Deliveries(WatchCase):
     def test_owner_is_notified_at_once_and_only_once(self):
-        put(self.repo, "owner", "Please approve the deploy", sender="fablyn-dev")
+        put(self.repo, "owner", "Please review the example", sender="sample-dev")
         code, out, _ = self.watch(cycles=3)
         self.assertEqual(code, 0)
         self.assertEqual(events(out)[1:], ["delivered 1 to owner (notification)", "stopped"])
         self.assertEqual(len(self.world["notifications"]), 1)
-        self.assertTrue(self.world["notifications"][0]["title"].startswith("message from fablyn-dev #"))
+        self.assertTrue(self.world["notifications"][0]["title"].startswith("message from sample-dev #"))
         self.assertEqual(len(box(self.repo, "owner", CUR)), 1)
         self.assertEqual([e["via"] for e in log_entries(self.repo)], ["notify"])
         self.assertEqual(self.argvs("agent", "wait"), [])
 
     def test_unconfirmed_is_logged_moved_and_never_redelivered(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        self.behave(prompt_errors={"fablyn-dev": "timeout"})
+        put(self.repo, "sample-dev", "Task A")
+        self.behave(prompt_errors={"sample-dev": "timeout"})
         code, out, _ = self.watch(cycles=3)
         self.assertEqual(code, 0)
-        self.assertTrue(any(line.startswith("unconfirmed fablyn-dev: herdr error timeout") for line in events(out)))
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
+        self.assertTrue(any(line.startswith("unconfirmed sample-dev: herdr error timeout") for line in events(out)))
+        self.assertEqual(len(self.prompts_to("sample-dev")), 1)
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
         self.assertEqual([e["delivery"] for e in log_entries(self.repo)], ["unconfirmed"])
-        self.assertEqual(self.world["notifications"][-1]["title"], "delivery to fablyn-dev unconfirmed")
+        self.assertEqual(self.world["notifications"][-1]["title"], "delivery to sample-dev unconfirmed")
         self.assertEqual(self.world["notifications"][-1]["sound"], "request")
 
     def test_a_failed_delivery_waits_a_minute_before_trying_again(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        self.behave(prompt_errors={"fablyn-dev": "internal_error"})
+        put(self.repo, "sample-dev", "Task A")
+        self.behave(prompt_errors={"sample-dev": "internal_error"})
         code, out, _ = self.watch(cycles=35)  # 70 s of passes
         self.assertEqual(code, 0)
-        failed = ("failed fablyn-dev: herdr error internal_error: prompt internal_error for fablyn-dev; "
+        failed = ("failed sample-dev: herdr error internal_error: prompt internal_error for sample-dev; "
                   "1 left queued, trying again in 60 s")
         self.assertEqual(events(out).count(failed), 2)  # at once, then once more after the minute
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 2)
-        self.assertEqual(self.world["notifications"][-1]["title"], "delivery to fablyn-dev failed")
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 1)
+        self.assertEqual(len(self.prompts_to("sample-dev")), 2)
+        self.assertEqual(self.world["notifications"][-1]["title"], "delivery to sample-dev failed")
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 1)
 
     def test_a_pointer_is_prompted_once_until_something_new_arrives(self):
-        put(self.repo, "fablyn-dev", "x" * (inbox.BATCH_CAP + 10))
+        put(self.repo, "sample-dev", "x" * (inbox.BATCH_CAP + 10))
         added = []
 
         def a_new_message_after_three_passes():
             if self.clock.passes == 3 and not added:
-                added.append(put(self.repo, "fablyn-dev", "a new task"))
+                added.append(put(self.repo, "sample-dev", "a new task"))
             return False
 
         self.clock.until = a_new_message_after_three_passes
         code, out, _ = self.watch(cycles=6)
         self.assertEqual(code, 0)
-        first, second = self.prompts_to("fablyn-dev")  # passes 2, 3, 5 and 6 are held: no pointer again
+        first, second = self.prompts_to("sample-dev")  # passes 2, 3, 5 and 6 are held: no pointer again
         self.assertRegex(first, r"^\[from herdr-fleet\] 1 message waiting \(oldest .*\); run: herdr-fleet inbox --read$")
         self.assertRegex(second, r"^\[from herdr-fleet\] 2 messages waiting")
         self.assertEqual(len(self.argvs("agent", "wait")), 2)
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 2)  # the seat reads them itself
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 2)  # the seat reads them itself
         self.assertEqual(log_entries(self.repo), [])  # a pointer is not a delivery
 
     def test_a_message_read_meanwhile_is_not_delivered(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        self.behave(wait_results={"fablyn-dev": ["idle"]})
+        put(self.repo, "sample-dev", "Task A")
+        self.behave(wait_results={"sample-dev": ["idle"]})
         original = watch.Watcher.queued
 
         def read_first(watcher, name):  # the seat ran `inbox --read` while the wait returned
@@ -258,8 +258,8 @@ class Deliveries(WatchCase):
         with mock.patch.object(watch.Watcher, "queued", read_first):
             code, out, _ = self.watch(cycles=2)
         self.assertEqual(code, 0)
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
-        self.assertEqual(events(out)[1:], ["waiting on fablyn-dev (1 queued)", "stopped"])
+        self.assertEqual(self.prompts_to("sample-dev"), [])
+        self.assertEqual(events(out)[1:], ["waiting on sample-dev (1 queued)", "stopped"])
 
 
 class Lock(WatchCase):
@@ -309,27 +309,27 @@ class Lock(WatchCase):
 
 class Once(WatchCase):
     def test_once_delivers_what_it_can_now_without_waiters_or_lock(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        put(self.repo, "fablyn-reviewer", "Review C")
-        put(self.repo, "fablyn-orchestrator", "FYI: x", fyi=True)
-        put(self.repo, "owner", "for you", sender="fablyn-dev")
+        put(self.repo, "sample-dev", "Task A")
+        put(self.repo, "sample-reviewer", "Review C")
+        put(self.repo, "sample-orchestrator", "FYI: x", fyi=True)
+        put(self.repo, "owner", "for you", sender="sample-dev")
         self.status_of("w2:p3", "working")
         with mock.patch.object(watch, "acquire", side_effect=AssertionError("--once takes no lock")):
             code, out, err = self.run_cli("watch", "--once")
         self.assertEqual(code, 0, err)
         lines = out.splitlines()
-        self.assertRegex(lines[0], r"^delivered 1 to fablyn-dev \(idle\), \d+ B$")
-        self.assertEqual(lines[1:], ["fablyn-reviewer: working, 1 left queued", "delivered 1 to owner (notification)"])
+        self.assertRegex(lines[0], r"^delivered 1 to sample-dev \(idle\), \d+ B$")
+        self.assertEqual(lines[1:], ["sample-reviewer: working, 1 left queued", "delivered 1 to owner (notification)"])
         self.assertEqual(self.argvs("agent", "wait"), [])
-        self.assertEqual(self.prompts_to("fablyn-orchestrator"), [])  # FYI only
+        self.assertEqual(self.prompts_to("sample-orchestrator"), [])  # FYI only
         self.assertEqual([(e["to"], e["via"]) for e in log_entries(self.repo)],
-                         [("fablyn-dev", "watch"), ("owner", "notify")])
-        self.assertEqual([n["title"] for n in self.world["notifications"]][0], "delivered 1 to fablyn-dev")
+                         [("sample-dev", "watch"), ("owner", "notify")])
+        self.assertEqual([n["title"] for n in self.world["notifications"]][0], "delivered 1 to sample-dev")
         self.assertEqual(self.clock.slept, 0)
         code, out, _ = self.run_cli("watch", "--once")
-        self.assertEqual((code, out.strip()), (0, "fablyn-reviewer: working, 1 left queued"))
+        self.assertEqual((code, out.strip()), (0, "sample-reviewer: working, 1 left queued"))
         self.status_of("w2:p3", "idle")
-        self.behave(prompt_errors={"fablyn-reviewer": "agent_prompt_stalled"})
+        self.behave(prompt_errors={"sample-reviewer": "agent_prompt_stalled"})
         self.assertEqual(self.run_cli("watch", "--once")[0], 1)  # as deliver: may not have arrived
 
     def test_once_with_nothing_to_deliver(self):
@@ -338,17 +338,17 @@ class Once(WatchCase):
 
 class RealThreads(LiveFleet):
     def test_waiters_in_threads_deliver_and_stop_cleanly(self):
-        put(self.repo, "fablyn-dev", "Task A")
-        put(self.repo, "fablyn-reviewer", "Review C")
-        self.world["behaviors"]["wait_results"] = {"fablyn-dev": ["idle"], "fablyn-reviewer": ["done"]}
-        done = lambda: not box(self.repo, "fablyn-dev", NEW) and not box(self.repo, "fablyn-reviewer", NEW)  # noqa
+        put(self.repo, "sample-dev", "Task A")
+        put(self.repo, "sample-reviewer", "Review C")
+        self.world["behaviors"]["wait_results"] = {"sample-dev": ["idle"], "sample-reviewer": ["done"]}
+        done = lambda: not box(self.repo, "sample-dev", NEW) and not box(self.repo, "sample-reviewer", NEW)  # noqa
         self.clock = StopClock(cycles=500, until=done, real=0.01)
         code, out, err = self.run_cli("watch", "--debounce", "0")
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
-        self.assertEqual(len(self.prompts_to("fablyn-reviewer")), 1)
-        self.assertIn("delivered 1 to fablyn-dev", out)
-        self.assertIn("delivered 1 to fablyn-reviewer", out)
+        self.assertEqual(len(self.prompts_to("sample-dev")), 1)
+        self.assertEqual(len(self.prompts_to("sample-reviewer")), 1)
+        self.assertIn("delivered 1 to sample-dev", out)
+        self.assertIn("delivered 1 to sample-reviewer", out)
         self.assertFalse(os.path.exists(os.path.join(self.repo, ".herdr", "watch.lock")))
         self.assertEqual([t for t in threading.enumerate() if t.name == "herdr-fleet-waiter" and t.is_alive()], [])
 
@@ -358,19 +358,19 @@ class Status(LiveFleet):
         data = json.loads(self.run_cli("status", "--json")[1])
         self.assertEqual(data["watcher"], {"running": False, "pid": None, "since": None})
         self.assertNotIn("watcher:", self.run_cli("status")[1])  # nothing queued: no line
-        put(self.repo, "fablyn-dev", "a")
-        put(self.repo, "fablyn-dev", "b")
+        put(self.repo, "sample-dev", "a")
+        put(self.repo, "sample-dev", "b")
         lines = self.run_cli("status")[1].splitlines()
         index = lines.index("watcher: not running")
-        self.assertRegex(lines[index + 1], r"^queued: fablyn-dev 2 \(oldest (<1m|\d+m)\)$")  # an age (20.8)
+        self.assertRegex(lines[index + 1], r"^queued: sample-dev 2 \(oldest (<1m|\d+m)\)$")  # an age (20.8)
         with open(os.path.join(self.repo, ".herdr", "watch.lock"), "w") as handle:
             json.dump({"pid": os.getpid(), "started": inbox.iso_local(inbox.now_utc()), "fleet": "x"}, handle)
         self.assertRegex(self.run_cli("status")[1], r"\nwatcher: running \(pid %d since \d\d:\d\d\)\nqueued: "
                          % os.getpid())
         data = json.loads(self.run_cli("status", "--json")[1])
         self.assertEqual((data["watcher"]["running"], data["watcher"]["pid"]), (True, os.getpid()))
-        self.assertEqual(data["queued"], {"fablyn-dev": 2})
-        self.assertIn("fablyn-dev", data["queued_oldest"])
+        self.assertEqual(data["queued"], {"sample-dev": 2})
+        self.assertIn("sample-dev", data["queued_oldest"])
         with open(os.path.join(self.repo, ".herdr", "watch.lock"), "w") as handle:
             json.dump({"pid": dead_pid(), "started": "2026-10-21T10:00:00+11:00"}, handle)
         self.assertIn("\nwatcher: not running\n", self.run_cli("status")[1])
@@ -388,16 +388,16 @@ class FakeWait(LiveFleet):
         return result
 
     def test_outcomes(self):
-        self.world["behaviors"]["wait_results"] = {"fablyn-dev": ["done", "blocked", "timeout", "not_found", "timeout"]}
-        code, out, _ = self.run_fake("agent", "wait", "fablyn-dev", *WAIT)
+        self.world["behaviors"]["wait_results"] = {"sample-dev": ["done", "blocked", "timeout", "not_found", "timeout"]}
+        code, out, _ = self.run_fake("agent", "wait", "sample-dev", *WAIT)
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["result"]["agent"]["agent_status"], "done")
         self.assertEqual(json.loads(out)["result"]["type"], "agent_info")
         for expected in ("timeout", "timeout", "agent_not_found"):  # blocked is not awaited: it times out
-            code, _, err = self.run_fake("agent", "wait", "fablyn-dev", *WAIT)
+            code, _, err = self.run_fake("agent", "wait", "sample-dev", *WAIT)
             self.assertEqual((code, json.loads(err)["error"]["code"]), (1, expected))
         self.assertEqual(self.world["panes"]["w2:p2"]["agent"]["agent_status"], "blocked")
-        code, _, err = self.run_fake("agent", "wait", "fablyn-dev", "--until", "idle")
+        code, _, err = self.run_fake("agent", "wait", "sample-dev", "--until", "idle")
         self.assertEqual(json.loads(err)["error"]["code"], "fake_wait_forever")
         info = [c["info"] for c in self.calls() if c["argv"][:2] == ["agent", "wait"]]
         self.assertEqual((info[0]["until"], info[0]["timeout"]), (["idle", "done"], "30000"))
@@ -416,9 +416,9 @@ class SafetyHookKnowsWatch(LiveFleet):
     def test_watch_runs_only_its_commands(self):
         self.check_fails(["watch"], ["agent", "start", "x", "--kind", "claude", "--pane", "w2:p9"], {"at_shell": True})
         self.check_fails(["watch"], ["pane", "current", "--current"])
-        self.check_fails(["watch"], ["agent", "wait", "fablyn-dev", "--until", "idle"])  # no endless wait
-        self.check_fails(["watch"], ["agent", "prompt", "fablyn-dev", "x"], {"target_status": "working"})
-        self.check_fails(["watch"], ["agent", "prompt", "fablyn-dev", "x"], {"target_status": "blocked"})
+        self.check_fails(["watch"], ["agent", "wait", "sample-dev", "--until", "idle"])  # no endless wait
+        self.check_fails(["watch"], ["agent", "prompt", "sample-dev", "x"], {"target_status": "working"})
+        self.check_fails(["watch"], ["agent", "prompt", "sample-dev", "x"], {"target_status": "blocked"})
 
     def test_hooks_and_inbox_hook(self):
         self.check_fails(["hooks", "install"], ["agent", "list"])

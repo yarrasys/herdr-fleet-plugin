@@ -20,8 +20,8 @@ from herdr_fleet import context_size
 
 SECRET = "TOP-SECRET-PROMPT-TEXT"
 TOOL = "rm -rf /secret/tool/call"
-ORCH_SESSION = "6e3695ad-375b-464e-ba43-1aa9fc13e401"
-DEV_SESSION = "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0"
+ORCH_SESSION = "00000000-0000-4000-8000-000000000001"
+DEV_SESSION = "00000000-0000-4000-8000-000000000002"
 
 
 def assistant(inp, create, read, out=342, when="2026-10-20T22:40:52.536Z", text=SECRET):
@@ -170,9 +170,9 @@ class StatusContext(LiveFleet):
         lines = out.splitlines()
         self.assertIn("CONTEXT", lines[1])
         rows = {l.split()[0]: l for l in lines[2:5]}
-        self.assertIn("183k (0 min)", rows["fablyn-orchestrator"])
-        self.assertIn("456k (0 min)", rows["fablyn-dev"])
-        self.assertRegex(rows["fablyn-reviewer"], r"\bidle\s+-\s")  # codex: not read in this version
+        self.assertIn("183k (0 min)", rows["sample-orchestrator"])
+        self.assertIn("456k (0 min)", rows["sample-dev"])
+        self.assertRegex(rows["sample-reviewer"], r"\bidle\s+-\s")  # codex: not read in this version
         data = json.loads(self.run_cli("status", "--json", "--context")[1])
         contexts = [s["context"] for s in data["seats"]]
         self.assertEqual(contexts[0], {"tokens": 183007, "at": self.recent, "source": "claude-transcript"})
@@ -213,11 +213,11 @@ class StatusContext(LiveFleet):
 
     def test_restart_hint_threshold(self):
         self.write_fleet("restart_hint_tokens = 450000\n" + self.read_fleet().replace(
-            'name = "fablyn-dev"', 'name = "fablyn-dev"\nnotes = "slice 4"'))
+            'name = "sample-dev"', 'name = "sample-dev"\nnotes = "slice 4"'))
         out = self.run_cli("status", "--context")[1]
         rows = {l.split()[0]: l for l in out.splitlines()[2:5]}
-        self.assertTrue(rows["fablyn-dev"].endswith("slice 4; consider restart"))
-        self.assertNotIn("consider restart", rows["fablyn-orchestrator"])
+        self.assertTrue(rows["sample-dev"].endswith("slice 4; consider restart"))
+        self.assertNotIn("consider restart", rows["sample-orchestrator"])
         data = json.loads(self.run_cli("status", "--json", "--context")[1])
         self.assertEqual([s["restart_hint"] for s in data["seats"]], [False, True, False])
         self.assertEqual(data["seats"][1]["notes"], "slice 4")

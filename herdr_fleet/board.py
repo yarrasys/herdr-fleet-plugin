@@ -222,7 +222,7 @@ def hold_reason(detail: str) -> str:
 
 def short_name(name: str, fleet) -> str:
     """A name as the debt cell shows it: a seat's label, else without the fleet's
-    ``<workspace>-`` prefix (``fablyn-orchestrator`` -> ``orchestrator``)."""
+    ``<workspace>-`` prefix (``sample-orchestrator`` -> ``orchestrator``)."""
     seat = fleet.seat(name)
     if seat is not None and seat.label:
         return seat.label
@@ -471,7 +471,7 @@ def doing_text(row: Row, width: int) -> str:
 
 
 def queue_text(row: Row, width: int) -> str:
-    """``2 queued, oldest 3m  #018934 "first line…"``, ``1 queued, holding: owner typing`` or ``–``."""
+    """``2 queued, oldest 3m  #103001 "first line…"``, ``1 queued, holding: owner typing`` or ``–``."""
     if not row.queued:
         return DASH
     head = "%d queued" % row.queued
@@ -494,7 +494,7 @@ def count_text(row: Row) -> str:
 
 
 def debt_text(row: Row, width: int) -> str:
-    """``owes orchestrator 2h #62437b`` or ``–``."""
+    """``owes orchestrator 2h #103002`` or ``–``."""
     if not row.debt_to:
         return DASH
     text = "owes %s %s" % (row.debt_shown or row.debt_to, short_age(row.debt_age))
@@ -642,7 +642,7 @@ def visible(board: Board, width: int, height: int) -> List[Row]:
 
 
 def owner_cell(board: Board) -> str:
-    """Design 25.3: ``owner: #bade2a 12:13 from winner-chronicles "1.28.1 is LIVE…"`` (the
+    """Design 25.3: ``owner: #103003 12:13 from partner-workspace "Example ready…"`` (the
     newest message to the owner, delivered or not), or ``owner: nothing``."""
     ref = board.owner_newest
     if ref is None:
@@ -1281,7 +1281,7 @@ class ContactPage(_Ringed):
     preselect = True
 
     def title(self) -> str:
-        """``↔ explain-channel · contact of this fleet · ○ idle 1m · w1C:pG`` (design 26.6)."""
+        """``↔ docs-channel · contact of this fleet · ○ idle 1m · w4:pG`` (design 26.6)."""
         pane = self.row.pane if self.row is not None and self.row.pane else "no pane"
         return DOT.join([CONTACT + self.name, "contact of this fleet", self.state_part(), pane])
 

@@ -276,7 +276,7 @@ def watch_once(ctx: Ctx) -> int:
 
 
 def notify_delivery(ctx: Ctx, name: str, drop: Drop) -> None:
-    """The owner's one-liner after a delivery to a seat: ``delivered 3 to fablyn-dev``."""
+    """The owner's one-liner after a delivery to a seat: ``delivered 3 to sample-dev``."""
     count = len(drop.carried)
     senders: Dict[str, int] = {}
     for message in drop.carried or drop.waiting:

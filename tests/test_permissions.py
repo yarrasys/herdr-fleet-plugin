@@ -43,9 +43,9 @@ class Doctor(FleetCase):
     def test_no_settings_warns_with_the_exact_entries(self):
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0, out)  # advisory: never fails
-        self.assertEqual(self.lines(out, "permissions fablyn-dev"), ["warn  permissions fablyn-dev: " + SUGGESTION])
-        self.assertEqual(self.lines(out, "permissions fablyn-reviewer"),
-                         ["skip  permissions fablyn-reviewer: not checked (codex)"])
+        self.assertEqual(self.lines(out, "permissions sample-dev"), ["warn  permissions sample-dev: " + SUGGESTION])
+        self.assertEqual(self.lines(out, "permissions sample-reviewer"),
+                         ["skip  permissions sample-reviewer: not checked (codex)"])
 
     def test_entries_from_all_three_files_count(self):
         self.write_file(".claude/settings.json", json.dumps({"permissions": {"allow": ["Bash(herdr agent:*)"]}}))
@@ -55,13 +55,13 @@ class Doctor(FleetCase):
             json.dump({"permissions": {"allow": ["Bash(herdr-fleet *)"]}}, handle)
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0)
-        self.assertIn("ok    permissions fablyn-orchestrator: herdr agent prompt/get/wait/read and herdr-fleet are "
+        self.assertIn("ok    permissions sample-orchestrator: herdr agent prompt/get/wait/read and herdr-fleet are "
                       "allowed", out)
 
     def test_partial_coverage_names_only_what_is_missing(self):
         self.write_file(".claude/settings.local.json", json.dumps({"permissions": {"allow": ["Bash(herdr agent:*)"]}}))
         out = self.run_cli("doctor")[1]
-        self.assertIn('warn  permissions fablyn-dev: add to .claude/settings.json permissions.allow: '
+        self.assertIn('warn  permissions sample-dev: add to .claude/settings.json permissions.allow: '
                       '"Bash(herdr-fleet:*)"', out)
 
     def test_unreadable_settings_warn(self):
@@ -81,7 +81,7 @@ class StatusColumns(LiveFleet):
                  ["checkout", "-q", "-b", "dev/export"])
         for args in steps:
             subprocess.run(git + args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.world["panes"]["w2:p2"].update(cwd=work)  # fablyn-dev runs in its worktree
+        self.world["panes"]["w2:p2"].update(cwd=work)  # sample-dev runs in its worktree
         data = json.loads(self.run_cli("status", "--json")[1])
         dev = data["seats"][1]
         self.assertEqual((dev["cwd"], dev["branch"]), (work, "dev/export"))
@@ -89,7 +89,7 @@ class StatusColumns(LiveFleet):
         out = self.run_cli("status")[1]
         self.assertIn("CWD", out)
         self.assertIn("BRANCH", out)
-        line = [l for l in out.splitlines() if l.startswith("fablyn-dev ")][0]
+        line = [l for l in out.splitlines() if l.startswith("sample-dev ")][0]
         self.assertIn("~/work/dev-tree", line)  # HOME is the test's temp dir
         self.assertIn("dev/export", line)
 

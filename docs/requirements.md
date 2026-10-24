@@ -1,116 +1,66 @@
-# herdr-fleet: requirements handover
+# Historical requirements
 
-Written 19 Oct 2026 by the Fablyn orchestrator session (Claude) for the session that will design and build this plugin with the owner. Brainstorm first; nothing here is decided unless it says so.
+This document records the original product requirements for herdr-fleet. It is historical context, not the current command reference. Deployment identities and organizational anecdotes have been removed; all names and paths below are synthetic. [The design](design.md) records the decisions and later amendments, and [the README](../README.md) describes current setup and behavior.
 
 ## The problem
 
-The owner runs a team of named coding agents in [herdr](https://herdr.dev) (0.9.4 on this machine) to build Fablyn (repo `~/work/yarrasys/projects/emberline`). There are three roles:
+A repository may use several coding agents with stable roles: an orchestrator coordinates work, a developer implements it, and a reviewer checks it independently. The roles may use different agent executables and native arguments. Maintaining pane layouts, names, readiness checks and briefings by hand makes it easy to start in the wrong pane, lose a role's identity or send a prompt while a dialog is open.
 
-| Name | Role |
-| --- | --- |
-| `fablyn-orchestrator` | designs, reviews, runs browser and server tests, merges, deploys |
-| `fablyn-dev` | builds on a branch in its own worktree |
-| `fablyn-reviewer` | reviews read-only |
+The plugin should turn a per-repository declaration into repeatable lifecycle operations while leaving task allocation and authorization with the owner. A model change is configuration; it must not silently broaden an agent's authority.
 
-Each role can be held by a different agent kind and model (Claude Code, Codex, …). The owner swaps them as token budgets run out; today `fablyn-dev` moves from Codex to Claude Opus 5.5.
+## Functional requirements
 
-Today the team is defined as a markdown table: emberline `docs/agent-team.md`, section "Team configuration". An agent turns that table into herdr commands by hand:
-- `herdr pane split`;
-- `herdr agent start <name> --kind <kind> --pane <id> -- <args>`;
-- `herdr agent rename`;
-- then a kickoff message per agent with `herdr agent prompt`.
+1. **Declare a team.** A fleet file specifies each seat's stable name, agent kind, opaque native arguments, working directory, kickoff template and layout preference. It can be reviewed with the repository's other configuration.
+2. **Bring it up.** Create or reuse a workspace, create only the necessary panes, start named agents through Herdr's agent interface, wait for readiness, and send briefings after the roster is complete. An already-live seat is not restarted.
+3. **Restart a seat.** When safe, quit it, start it again in the same pane and brief it with current project state. Refuse blocked/unknown seats and protect the caller's own agent.
+4. **Apply configuration drift.** Compare configured kind/arguments with available live evidence; restart only selected drifted seats. Treat externally adopted sessions conservatively.
+5. **Inspect state.** Show expected and live kinds, panes, lifecycle state, drift and integration diagnostics. Errors must identify the affected seat and leave other seats usable.
+6. **Stop cleanly.** Quit seats through their native quit command. Close only panes/workspaces recorded as created by the plugin and only when explicitly requested.
 
-Restarting one agent (quit it, start it again in its pane, re-brief it) is also manual. That is error-prone, and slow when the owner wants to restart everything.
+## Historical Herdr constraints
 
-**No existing plugin does this** (surveyed 19 Oct). Layout plugins run a command per pane but never give agents herdr names, and names are what agents use to message each other.
+The first implementation targeted Herdr 0.9.4. These observations explain design choices; use the installed CLI's `--help` for current syntax.
 
-| Plugin | What it does | Why it doesn't fit |
-| --- | --- | --- |
-| [yuk1ty/herdr-spreader](https://github.com/yuk1ty/herdr-spreader) | YAML workspace, tab and pane layouts with a command per pane (tmuxinator-style) | Rust build; config in the plugin's global config dir, or `--file` for the standalone CLI; no agent names |
-| [cloudmanic/herdr-plus](https://github.com/cloudmanic/herdr-plus) | TOML "Projects" templates in a global config dir | No agent names |
-| [eliasstravik/herdr-projects](https://github.com/eliasstravik/herdr-projects) | A whole task board with a Coordinator agent | Replaces the owner's workflow rather than configuring it |
-| [jbaham2/herdr-plugin](https://github.com/jbaham2/herdr-plugin) | A Claude Code plugin with herdr skills and `/herd` and `/herd-layout` | A different kind of tool; its storage format is undocumented |
+- A plugin is a directory with a `herdr-plugin.toml` manifest. Actions and pane entrypoints execute ordinary argv commands with invocation context and plugin config/state locations supplied by Herdr. See the [public plugin documentation](https://herdr.dev/docs/plugins/).
+- A named agent starts in an existing pane at an interactive shell prompt. A busy foreground process must not be replaced. Agent readiness can be delayed by shell startup or a trust dialog.
+- Names match `[a-z][a-z0-9_-]{0,31}` and are unique among live agents. Pane records do not provide an agent name; obtain identity from `agent get` or `agent list`.
+- Herdr's agent API provides start, prompt, wait, read and rename operations. Process information supplies evidence for a shell prompt and native argv. Agent stop/quit behavior remains specific to the agent kind.
+- A wait can be bounded and run in the Herdr server rather than making an agent poll. Resumed unnamed sessions can be adopted only after validating their kind and recorded pane.
+- Plugin action output is available through logs; notifications and plugin panes provide visible feedback.
 
-## What we want (draft, to brainstorm)
+## Safety requirements
 
-A herdr plugin plus a **per-repository fleet file**, checked into git, that declares a team of named agents. Any agent, Claude or Codex, can read the file and any of them can drive the plugin, so it must be vendor-neutral.
+- Never submit text to a blocked or unknown agent or answer a permission prompt on the owner's behalf. The later, narrowly scoped exit-confirmation and interrupt paths are specified in design sections 23.7 and 23.11; they are not general dialog automation.
+- Keep all agent text on the guarded agent-prompt path. The current presence check protects existing input in focused and unfocused panes.
+- Never run bare `herdr`; it launches or attaches the terminal UI.
+- Preserve running sessions, caller context and unowned panes. A dry run must not mutate state or move focus.
+- Merging, deployment, publishing and pushing require explicit owner authorization; a role name is not authorization.
 
-1. **Declare.** Each agent has:
-   - a name;
-   - a kind (`claude`, `codex`, …);
-   - start arguments (model, effort, …);
-   - a working directory;
-   - a role or kickoff prompt (inline or a file path);
-   - where it sits in the layout.
-2. **Up.** Create or reuse a workspace, split panes, and start each agent with `herdr agent start <name> --kind … --pane … -- <args>`. Wait until it's ready, then send its kickoff.
-3. **Restart one.** Quit the agent in its pane (only when it's idle or done, never while blocked). Start it again with the same name and pane, then send its kickoff plus a "where things stand" note.
-4. **Swap.** Change a role's kind or model in the file and apply it. The role keeps its name and pane; only that agent restarts.
-5. **Status.** For each fleet agent: name, kind, pane, state (`idle`/`working`/`blocked`/`done`), plus whether herdr's agent-state integrations are current (`herdr integration status`).
-6. **Down.** Stop the fleet cleanly.
+## Synthetic team example
 
-## Facts and constraints (herdr 0.9.4, checked 19 Oct)
-
-- **Plugin manifest.** `herdr-plugin.toml` at the plugin root: `id`, `name`, `version`, `min_herdr_version`, optional `description` and `platforms`.
-  - `[[build]]` runs on GitHub install, not on `plugin link`.
-  - `[[startup]]` runs one-shot after the session restores.
-  - `[[actions]]` take `id`, `title`, `contexts` and `command` (argv), and are invoked as `plugin.id.action`.
-  - `[[events]]` take `on` and `command`. `[[panes]]` take `placement`: overlay, popup, split, tab or zoomed.
-  - Use `HERDR_PLUGIN_CONFIG_DIR` and `HERDR_PLUGIN_STATE_DIR` for config and state. Call herdr through `HERDR_BIN_PATH` or `HERDR_SOCKET_PATH`.
-  - Plugins run as the user and are not sandboxed. Docs: https://herdr.dev/docs/plugins/
-  - Develop with `herdr plugin link <path>`, `herdr plugin action invoke <id>` and `herdr plugin log list`. Distribute with `herdr plugin install owner/repo`, tagging the GitHub repo `herdr-plugin` for the marketplace.
-- **`herdr agent start`.**
-  - The pane must be at its interactive shell prompt with nothing in the foreground.
-  - It returns once the agent is ready, or `agent_not_ready` if the agent is blocked at startup (the name stays reserved).
-  - Names match `[a-z][a-z0-9_-]{0,31}` and must be unique among live agents. A name is cleared when its agent exits.
-  - Supported kinds: `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `opencode`, `copilot`, `kimi`, `amp`, `grok` and more (see `herdr agent start --help`).
-- **Other agent commands:**
-  - `herdr agent prompt <name> "<text>"`;
-  - `herdr agent wait <name> --until done --until idle --until blocked --timeout <ms>` (milliseconds);
-  - `herdr agent read <name> --source visible|recent-unwrapped`;
-  - `herdr agent rename <pane> <name>`;
-  - `herdr agent list` (JSON).
-- **Panes and workspaces.** `herdr workspace create --cwd --label --env --focus` and `herdr pane split [--pane] --direction right|down --ratio --cwd --env`. Both return JSON containing the new ids.
-- **Safety rules the owner holds (must not break):**
-  - Never send keys or prompts to a `blocked` pane. It is showing a permission prompt, and Enter approves it.
-  - Never answer an agent's permission prompt and never edit an agent's permission settings. The owner does that.
-  - Don't run bare `herdr` (it attaches the TUI).
-
-## First user: the Fablyn team
-
-Something like this, as an illustration only; the format is open:
+The complete, runnable example lives in [examples/team](../examples/team). It supplies role templates within its own `.herdr/` tree. Its agent kinds are illustrative; install and authenticate the kinds you choose and provide available model arguments yourself.
 
 ```toml
-workspace = "fablyn"
-cwd = "~/work/yarrasys/projects/emberline"
+workspace = "sample"
+cwd = "."
 
 [[agents]]
-name = "fablyn-orchestrator"
+name = "sample-orchestrator"
 kind = "claude"
-args = ["--model", "claude-opus-5-5"]
-kickoff = "docs/agent-team.md#roles"
+args = []
+kickoff_text = "Read AGENTS.md if present. Coordinate the requested task; owner approval is required before merging, deploying or pushing."
 
 [[agents]]
-name = "fablyn-dev"
+name = "sample-dev"
 kind = "claude"
-args = ["--model", "claude-opus-5-5"]
+args = []
 
 [[agents]]
-name = "fablyn-reviewer"
+name = "sample-reviewer"
 kind = "codex"
-args = ["-m", "gpt-6-astra"]
+args = []
 ```
 
-## Non-goals
+## Non-goals and resolved questions
 
-- Not a task board or coordinator. The owner's loop (brief, build, review, fix, ship) stays as it is.
-- No automatic approval of anything, and no model or token management beyond start arguments.
-
-## Open questions for the brainstorm
-
-1. File name, format and discovery: `.herdr/fleet.toml`? TOML or YAML? Walk up from the cwd?
-2. Implementation language and build: a shell script needs no build step. Node, Go or Rust needs a toolchain, or prebuilt release binaries like herdr-plus.
-3. Layout: one tab with N panes, or reuse herdr-spreader's workspace/tab/pane model? Keep it minimal?
-4. Quitting an agent cleanly per kind (Claude `/exit`, Codex `/quit`, …), only when idle. Is there a herdr-native release or stop?
-5. Kickoffs: per-role prompt files with variables (repo, branch, "where things stand")? Where does the "where things stand" note come from, a STATE file the orchestrator keeps?
-6. Can it also ship as an agent skill, so a Claude or Codex orchestrator drives `up`, `restart` and `swap` itself?
-7. Name and repo: `herdr-fleet`? Licence?
+The plugin is not a task board, autonomous release system, credential manager or model-budget manager. It should work across agent vendors, use a small dependency footprint and keep owner interaction visible. Questions about format/discovery, implementation language, layout, per-kind quitting, briefing templates and state storage were resolved in design sections 1–15. Messaging and the visible watcher were added in later sections rather than assumed in these original requirements.

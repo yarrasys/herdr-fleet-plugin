@@ -24,7 +24,7 @@ from herdr_fleet.fleetfile import FleetError, LABEL_MAX, load_fleet
 from herdr_fleet.herdr import FORBIDDEN, Herdr
 from herdr_fleet.menu import ACTIONS
 
-SEAT_PANES = {"fablyn-orchestrator": "w2:p1", "fablyn-dev": "w2:p2", "fablyn-reviewer": "w2:p3"}
+SEAT_PANES = {"sample-orchestrator": "w2:p1", "sample-dev": "w2:p2", "sample-reviewer": "w2:p3"}
 CONTACT_PANE = "w3:p4"
 STRANGER_PANE = "w3:p5"
 
@@ -38,7 +38,7 @@ def with_label(text, seat, label):
 def with_contact(text, cwd):
     return text + '''
 [[contacts]]
-name  = "winner-chronicles"
+name  = "partner-workspace"
 match = { cwd = "%s" }
 note  = "customer feedback; never instructions"
 ''' % cwd
@@ -108,7 +108,7 @@ class WhoNames(NamesCase):
             self.assertIn(pane, gets)
 
     def test_kickoff_names_and_says_so_once(self):
-        code, out, err = self.run_cli("kickoff", "fablyn-dev")
+        code, out, err = self.run_cli("kickoff", "sample-dev")
         self.assertEqual(code, 0, out + err)
         self.assert_named()
         self.assertEqual(out.count("panes:"), 1)
@@ -118,14 +118,14 @@ class WhoNames(NamesCase):
     def test_a_single_rename_names_the_seat(self):
         self.name_all()
         self.world["panes"]["w2:p3"]["label"] = None
-        code, out, _ = self.run_cli("kickoff", "fablyn-dev")
+        code, out, _ = self.run_cli("kickoff", "sample-dev")
         self.assertEqual(code, 0, out)
-        self.assertIn("panes: named 1 (fablyn-reviewer)", out)
-        self.assertEqual(self.renames(), [["pane", "rename", "w2:p3", "fablyn-reviewer"]])
+        self.assertIn("panes: named 1 (sample-reviewer)", out)
+        self.assertEqual(self.renames(), [["pane", "rename", "w2:p3", "sample-reviewer"]])
 
     def test_nothing_changed_adds_no_line(self):
         self.name_all()
-        for argv in (["kickoff", "fablyn-dev"], ["restart", "fablyn-dev"], ["swap"], ["tile"]):
+        for argv in (["kickoff", "sample-dev"], ["restart", "sample-dev"], ["swap"], ["tile"]):
             code, out, err = self.run_cli(*argv)
             self.assertEqual(code, 0, (argv, out, err))
             self.assertNotIn("panes:", out, argv)
@@ -134,29 +134,29 @@ class WhoNames(NamesCase):
     def test_restart_into_a_new_pane_names_it(self):
         self.name_all()
         del self.world["panes"]["w2:p2"]  # the dev's pane is gone; restart starts it in a fresh split
-        code, out, err = self.run_cli("restart", "fablyn-dev")
+        code, out, err = self.run_cli("restart", "sample-dev")
         self.assertEqual(code, 0, out + err)
-        pane = self.pane_of("fablyn-dev")
+        pane = self.pane_of("sample-dev")
         self.assertNotEqual(pane, "w2:p2")
-        self.assertEqual(self.label(pane), "fablyn-dev")
-        self.assertIn("panes: named 1 (fablyn-dev)", out)
-        self.assertEqual(self.renames(), [["pane", "rename", pane, "fablyn-dev"]])
+        self.assertEqual(self.label(pane), "sample-dev")
+        self.assertIn("panes: named 1 (sample-dev)", out)
+        self.assertEqual(self.renames(), [["pane", "rename", pane, "sample-dev"]])
 
     def test_restart_in_place_keeps_the_name(self):
         self.name_all()
-        code, out, _ = self.run_cli("restart", "fablyn-dev")
+        code, out, _ = self.run_cli("restart", "sample-dev")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.pane_of("fablyn-dev"), "w2:p2")
-        self.assertEqual(self.label("w2:p2"), "fablyn-dev")
+        self.assertEqual(self.pane_of("sample-dev"), "w2:p2")
+        self.assertEqual(self.label("w2:p2"), "sample-dev")
         self.assertEqual(self.renames(), [])
 
     def test_swap_names_once_at_its_end(self):
         self.write_fleet(self.read_fleet().replace(
-            'name = "fablyn-dev"\nkind = "claude"\nargs = ["--model", "claude-opus-5-5"]',
-            'name = "fablyn-dev"\nkind = "claude"\nargs = ["--model", "claude-opus-6"]'))
+            'name = "sample-dev"\nkind = "claude"\nargs = ["--model", "claude-opus-5-5"]',
+            'name = "sample-dev"\nkind = "claude"\nargs = ["--model", "claude-opus-6"]'))
         code, out, err = self.run_cli("swap")
         self.assertEqual(code, 0, out + err)
-        self.assertIn("fablyn-dev: drifted", out)
+        self.assertIn("sample-dev: drifted", out)
         self.assertEqual(out.count("panes:"), 1)
         self.assertTrue(out.rstrip().endswith("panes: named 3 after their seats"), out)
         self.assertEqual(len(self.renames()), 3)
@@ -183,7 +183,7 @@ class UpNames(FleetCase):
         code, out, err = self.run_cli("up")
         self.assertEqual(code, 0, out + err)
         self.assertIn("panes: named 3 after their seats", out)
-        for seat in ("fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"):
+        for seat in ("sample-orchestrator", "sample-dev", "sample-reviewer"):
             pane = self.pane_of(seat)
             self.assertEqual(self.world["panes"][pane]["label"], seat)
         strip = self.read_state()["watch"]["pane_id"]
@@ -195,10 +195,10 @@ class UpNames(FleetCase):
         self.assertEqual(len(self.argvs("pane", "rename")), 3)
 
     def test_up_names_an_adopted_me_seat(self):
-        code, out, err = self.run_cli("up", "--me", "fablyn-orchestrator")
+        code, out, err = self.run_cli("up", "--me", "sample-orchestrator")
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(self.world["panes"][CALLER_PANE]["label"], "fablyn-orchestrator")
-        self.assertIn(["pane", "rename", CALLER_PANE, "fablyn-orchestrator"], self.argvs("pane", "rename"))
+        self.assertEqual(self.world["panes"][CALLER_PANE]["label"], "sample-orchestrator")
+        self.assertIn(["pane", "rename", CALLER_PANE, "sample-orchestrator"], self.argvs("pane", "rename"))
 
     def test_up_dry_run_renames_nothing(self):
         code, out, _ = self.run_cli("up", "--dry-run")
@@ -210,7 +210,7 @@ class UpNames(FleetCase):
 class DryRuns(NamesCase):
     def test_dry_runs_rename_nothing(self):
         self.write_fleet(self.read_fleet().replace('args = ["-m", "gpt-6-astra"]', 'args = ["-m", "gpt-7"]'))
-        for argv in (["restart", "fablyn-dev", "--dry-run"], ["swap", "--dry-run"], ["tile", "--dry-run"]):
+        for argv in (["restart", "sample-dev", "--dry-run"], ["swap", "--dry-run"], ["tile", "--dry-run"]):
             code, out, err = self.run_cli(*argv)
             self.assertEqual(code, 0, (argv, out, err))
             self.assertNotIn("panes:", out, argv)
@@ -223,40 +223,40 @@ class DryRuns(NamesCase):
 
 class LabelKey(NamesCase):
     def test_label_names_the_pane_and_nothing_else(self):
-        self.write_fleet(with_label(self.read_fleet(), "fablyn-orchestrator", '"ORCH"'))
+        self.write_fleet(with_label(self.read_fleet(), "sample-orchestrator", '"ORCH"'))
         code, out, _ = self.run_cli("status")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.label("w2:p1"), "ORCH")
-        self.assertIn("fablyn-orchestrator", out)  # listings keep the seat name
+        self.assertIn("sample-orchestrator", out)  # listings keep the seat name
         self.assertNotIn("ORCH", out)
         self.assertIn(["pane", "rename", "w2:p1", "ORCH"], self.renames())
-        code, out, _ = self.run_cli("kickoff", "fablyn-dev")
-        self.assertIn("[from herdr-fleet] You are fablyn-dev", self.prompts_to("fablyn-dev")[0])
-        self.assertNotIn("ORCH", self.prompts_to("fablyn-dev")[0])
+        code, out, _ = self.run_cli("kickoff", "sample-dev")
+        self.assertIn("[from herdr-fleet] You are sample-dev", self.prompts_to("sample-dev")[0])
+        self.assertNotIn("ORCH", self.prompts_to("sample-dev")[0])
 
     def test_a_pane_named_after_the_seat_is_renamed_to_its_label(self):
         self.name_all()
-        self.write_fleet(with_label(self.read_fleet(), "fablyn-dev", '"  Dev two  "'))
-        code, out, _ = self.run_cli("kickoff", "fablyn-dev")
+        self.write_fleet(with_label(self.read_fleet(), "sample-dev", '"  Dev two  "'))
+        code, out, _ = self.run_cli("kickoff", "sample-dev")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.label("w2:p2"), "Dev two")  # kept without surrounding blanks
-        self.assertIn("panes: named 1 (fablyn-dev)", out)
+        self.assertIn("panes: named 1 (sample-dev)", out)
 
     def test_wanted(self):
-        fleet = load_fleet(self.write_fleet(with_label(THREE_SEATS, "fablyn-dev", '"%s"' % ("x" * LABEL_MAX))))
-        self.assertEqual(labels.wanted(fleet.seat("fablyn-dev")), "x" * 40)
-        self.assertEqual(labels.wanted(fleet.seat("fablyn-reviewer")), "fablyn-reviewer")
-        self.assertIsNone(fleet.seat("fablyn-reviewer").label)
+        fleet = load_fleet(self.write_fleet(with_label(THREE_SEATS, "sample-dev", '"%s"' % ("x" * LABEL_MAX))))
+        self.assertEqual(labels.wanted(fleet.seat("sample-dev")), "x" * 40)
+        self.assertEqual(labels.wanted(fleet.seat("sample-reviewer")), "sample-reviewer")
+        self.assertIsNone(fleet.seat("sample-reviewer").label)
         self.assertEqual(fleet.warnings, [])  # `label` is a known seat key
 
     def errors(self, value):
-        path = self.write_fleet(with_label(THREE_SEATS, "fablyn-dev", value))
+        path = self.write_fleet(with_label(THREE_SEATS, "sample-dev", value))
         with self.assertRaises(FleetError) as caught:
             load_fleet(path)
         return "\n".join(caught.exception.errors)
 
     def test_invalid_labels(self):
-        where = "agents[1] (fablyn-dev).label: "
+        where = "agents[1] (sample-dev).label: "
         self.assertIn(where + "must not be empty", self.errors('""'))
         self.assertIn(where + "must not be empty", self.errors('"   "'))
         self.assertIn(where + "41 characters; at most 40", self.errors('"%s"' % ("y" * 41)))
@@ -266,7 +266,7 @@ class LabelKey(NamesCase):
         self.assertIn(where + "'-dev-' must not start with '-'", self.errors('"-dev-"'))
 
     def test_errors_are_reported_together(self):
-        text = with_label(with_label(THREE_SEATS, "fablyn-dev", '""'), "fablyn-reviewer", "7")
+        text = with_label(with_label(THREE_SEATS, "sample-dev", '""'), "sample-reviewer", "7")
         with self.assertRaises(FleetError) as caught:
             load_fleet(self.write_fleet(text))
         self.assertEqual(len(caught.exception.errors), 2)
@@ -282,7 +282,7 @@ class LabelKey(NamesCase):
 class OnlySeatPanes(NamesCase):
     def test_contacts_and_other_fleets_agents_are_never_renamed(self):
         self.add_contact_and_stranger()
-        for argv in (["status"], ["kickoff", "fablyn-dev"], ["tile"], ["up"]):
+        for argv in (["status"], ["kickoff", "sample-dev"], ["tile"], ["up"]):
             code, out, err = self.run_cli(*argv)
             self.assertIn(code, (0, 3), (argv, out, err))
         renamed = {argv[2] for argv in self.renames()}
@@ -319,12 +319,12 @@ class OnlySeatPanes(NamesCase):
 class FailedRename(NamesCase):
     def test_a_failed_rename_is_a_warning_and_the_command_goes_on(self):
         self.world["behaviors"]["rename_errors"] = {"w2:p2": "pane_rename_failed"}
-        code, out, err = self.run_cli("kickoff", "fablyn-dev")
+        code, out, err = self.run_cli("kickoff", "sample-dev")
         self.assertEqual(code, 0, out + err)  # the kickoff itself succeeded
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
+        self.assertEqual(len(self.prompts_to("sample-dev")), 1)
         self.assertIn("panes: could not name w2:p2: herdr error pane_rename_failed:", out)
         self.assertIn("panes: named 2 after their seats", out)
-        self.assertEqual(self.label("w2:p1"), "fablyn-orchestrator")
+        self.assertEqual(self.label("w2:p1"), "sample-orchestrator")
         self.assertIsNone(self.label("w2:p2"))
 
     def test_status_sends_a_failure_to_stderr_only(self):
@@ -336,11 +336,11 @@ class FailedRename(NamesCase):
 
     def test_a_failed_pane_get_is_a_warning_too(self):
         state = self.read_state()
-        del state["agents"]["fablyn-orchestrator"]  # so only the naming reads w2:p1
+        del state["agents"]["sample-orchestrator"]  # so only the naming reads w2:p1
         self.write_state(state)
         self.world["canned"].append({"prefix": ["pane", "get", "w2:p1"], "exit": 1,
                                      "stderr": {"error": {"code": "server_busy", "message": "try again"}}})
-        code, out, _ = self.run_cli("kickoff", "fablyn-dev")
+        code, out, _ = self.run_cli("kickoff", "sample-dev")
         self.assertEqual(code, 0, out)
         self.assertIn("panes: could not name w2:p1: herdr error server_busy: try again", out)
 
@@ -357,11 +357,11 @@ class DownClears(NamesCase):
         return [argv for argv in self.renames() if "--clear" in argv]
 
     def test_a_pane_left_at_a_shell_loses_its_name(self):
-        code, out, err = self.run_cli("down", "fablyn-dev")
+        code, out, err = self.run_cli("down", "sample-dev")
         self.assertEqual(code, 0, out + err)
         self.assertEqual(self.clears(), [["pane", "rename", "w2:p2", "--clear"]])
         self.assertIsNone(self.label("w2:p2"))
-        self.assertEqual(self.label("w2:p1"), "fablyn-orchestrator")  # not taken down: kept
+        self.assertEqual(self.label("w2:p1"), "sample-orchestrator")  # not taken down: kept
 
     def test_a_closed_pane_needs_nothing_and_a_kept_one_is_cleared(self):
         code, out, err = self.run_cli("down", "--close-panes")
@@ -373,26 +373,26 @@ class DownClears(NamesCase):
 
     def test_a_pane_without_a_name_is_left_alone(self):
         self.world["panes"]["w2:p2"]["label"] = None
-        code, out, _ = self.run_cli("down", "fablyn-dev")
+        code, out, _ = self.run_cli("down", "sample-dev")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.clears(), [])
 
     def test_a_refused_seat_keeps_its_name(self):
         self.status_of("w2:p2", "blocked")
-        code, out, _ = self.run_cli("down", "fablyn-dev")
+        code, out, _ = self.run_cli("down", "sample-dev")
         self.assertEqual(code, 3, out)
         self.assertEqual(self.clears(), [])
-        self.assertEqual(self.label("w2:p2"), "fablyn-dev")
+        self.assertEqual(self.label("w2:p2"), "sample-dev")
 
     def test_a_failed_clear_is_a_warning(self):
         self.world["behaviors"]["rename_errors"] = {"w2:p2": "pane_rename_failed"}
-        code, out, _ = self.run_cli("down", "fablyn-dev")
+        code, out, _ = self.run_cli("down", "sample-dev")
         self.assertEqual(code, 0, out)
         self.assertIn("panes: could not clear the name of w2:p2: herdr error pane_rename_failed", out)
 
     def test_down_never_names(self):
         self.world["panes"]["w2:p1"]["label"] = None
-        code, out, _ = self.run_cli("down", "fablyn-dev")
+        code, out, _ = self.run_cli("down", "sample-dev")
         self.assertEqual(code, 0, out)
         self.assertEqual([argv for argv in self.renames() if "--clear" not in argv], [])
 
@@ -413,10 +413,10 @@ class DoctorLine(NamesCase):
         self.world["panes"]["w2:p1"]["label"] = "claude"
         code, line = self.doctor_line()
         self.assertEqual(code, 0)
-        self.assertEqual(line, "info  pane names: 2 seats unnamed (fablyn-dev, fablyn-orchestrator); "
+        self.assertEqual(line, "info  pane names: 2 seats unnamed (sample-dev, sample-orchestrator); "
                                "run herdr-fleet status")
-        self.world["panes"]["w2:p1"]["label"] = "fablyn-orchestrator"
-        self.assertEqual(self.doctor_line()[1], "info  pane names: 1 seat unnamed (fablyn-dev); run herdr-fleet status")
+        self.world["panes"]["w2:p1"]["label"] = "sample-orchestrator"
+        self.assertEqual(self.doctor_line()[1], "info  pane names: 1 seat unnamed (sample-dev); run herdr-fleet status")
 
     def test_every_live_seat_named(self):
         self.assertEqual(self.run_cli("status")[0], 0)
@@ -429,9 +429,9 @@ class DoctorLine(NamesCase):
 
     def test_a_label_is_what_doctor_expects(self):
         self.name_all()
-        self.write_fleet(with_label(self.read_fleet(), "fablyn-reviewer", '"REV"'))
+        self.write_fleet(with_label(self.read_fleet(), "sample-reviewer", '"REV"'))
         self.assertEqual(self.doctor_line()[1],
-                         "info  pane names: 1 seat unnamed (fablyn-reviewer); run herdr-fleet status")
+                         "info  pane names: 1 seat unnamed (sample-reviewer); run herdr-fleet status")
 
 
 # -- 22.2: go ------------------------------------------------------------------------------------
@@ -452,25 +452,25 @@ class Go(NamesCase):
 
     def test_a_seat(self):
         self.status_of("w2:p1", "working")
-        code, out, err = self.run_cli("go", "fablyn-orchestrator")
+        code, out, err = self.run_cli("go", "sample-orchestrator")
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(out, "focused fablyn-orchestrator (w2:p1, working)\n")
-        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "fablyn-orchestrator"]])
+        self.assertEqual(out, "focused sample-orchestrator (w2:p1, working)\n")
+        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "sample-orchestrator"]])
         self.assertEqual(self.focused(), ["w2:p1"])
         self.assertEqual(self.world["workspaces"]["w2"]["active_tab_id"], "w2:t1")
 
     def test_a_done_seat_is_reported_done_and_herdr_marks_it_seen(self):
         self.status_of("w2:p2", "done")
-        code, out, _ = self.run_cli("go", "fablyn-dev")
+        code, out, _ = self.run_cli("go", "sample-dev")
         self.assertEqual(code, 0, out)
-        self.assertEqual(out, "focused fablyn-dev (w2:p2, done)\n")
+        self.assertEqual(out, "focused sample-dev (w2:p2, done)\n")
         self.assertEqual(self.world["panes"]["w2:p2"]["agent"]["agent_status"], "idle")
 
     def test_a_contact_by_its_pane(self):
         self.add_contact_and_stranger()
-        code, out, err = self.run_cli("go", "winner-chronicles")
+        code, out, err = self.run_cli("go", "partner-workspace")
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(out, "focused winner-chronicles (%s, idle)\n" % CONTACT_PANE)
+        self.assertEqual(out, "focused partner-workspace (%s, idle)\n" % CONTACT_PANE)
         self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", CONTACT_PANE]])
         self.assertEqual(self.focused(), [CONTACT_PANE])
 
@@ -483,17 +483,17 @@ class Go(NamesCase):
 
     def test_an_absent_seat(self):
         self.world["panes"]["w2:p2"]["agent"] = None
-        code, out, _ = self.run_cli("go", "fablyn-dev")
+        code, out, _ = self.run_cli("go", "sample-dev")
         self.assertEqual(code, 3)
-        self.assertEqual(out, "fablyn-dev is absent; nothing to focus\n")
+        self.assertEqual(out, "sample-dev is absent; nothing to focus\n")
         self.assertEqual(self.argvs("agent", "focus"), [])
 
     def test_an_absent_contact(self):
         self.add_contact_and_stranger()
         self.world["panes"][CONTACT_PANE]["agent"] = None
-        code, out, _ = self.run_cli("go", "winner-chronicles")
+        code, out, _ = self.run_cli("go", "partner-workspace")
         self.assertEqual(code, 3)
-        self.assertRegex(out, r"^winner-chronicles is absent \(no live agent matches cwd .*\); nothing to focus\n$")
+        self.assertRegex(out, r"^partner-workspace is absent \(no live agent matches cwd .*\); nothing to focus\n$")
         self.assertEqual(self.argvs("agent", "focus"), [])
 
     def test_an_unknown_name_and_owner_are_usage_errors(self):
@@ -508,7 +508,7 @@ class Go(NamesCase):
     def test_go_writes_nothing(self):
         before = self.snapshot()
         self.status_of("w2:p2", "blocked")
-        self.assertEqual(self.run_cli("go", "fablyn-dev")[0], 0)
+        self.assertEqual(self.run_cli("go", "sample-dev")[0], 0)
         self.assertEqual(self.snapshot(), before)  # no state_seen, no log, no new file
         self.assertNotIn("state_seen", json.dumps(self.read_state()))
         self.assertEqual(self.renames(), [])
@@ -517,19 +517,19 @@ class Go(NamesCase):
     def test_go_takes_fleet_and_needs_herdr(self):
         elsewhere = os.path.join(self.tmp, "elsewhere")
         os.makedirs(elsewhere)
-        code, out, _ = self.run_cli("go", "fablyn-dev", "--fleet", os.path.join(self.repo, ".herdr", "fleet.toml"),
+        code, out, _ = self.run_cli("go", "sample-dev", "--fleet", os.path.join(self.repo, ".herdr", "fleet.toml"),
                                     cwd=elsewhere)
         self.assertEqual(code, 0, out)
         env = dict(self.env)
         del env["HERDR_ENV"], env["HERDR_BIN_PATH"]
-        code, _, err = self.run_cli("go", "fablyn-dev", env=env)
+        code, _, err = self.run_cli("go", "sample-dev", env=env)
         self.assertEqual(code, 1)
         self.assertIn("not running inside Herdr", err)
 
     def test_a_failed_focus_is_an_error(self):
         self.world["canned"].append({"prefix": ["agent", "focus"], "exit": 1,
                                      "stderr": {"error": {"code": "focus_failed", "message": "no ui"}}})
-        code, _, err = self.run_cli("go", "fablyn-dev")
+        code, _, err = self.run_cli("go", "sample-dev")
         self.assertEqual(code, 1)
         self.assertIn("herdr error focus_failed: no ui", err)
 
@@ -546,10 +546,10 @@ class PopupGo(NamesCase):
     def test_one_seat_no_confirmation_no_enter(self):
         code, out, err = self.run_cli("menu", stdin="2\n%s\n" % self.GO)
         self.assertEqual(code, 0, out + err)
-        self.assertTrue(out.endswith("focused fablyn-dev (w2:p2, idle)\n"), out)
+        self.assertTrue(out.endswith("focused sample-dev (w2:p2, idle)\n"), out)
         self.assertNotIn("Run go", out)
         self.assertNotIn("Press Enter to close.", out)
-        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "fablyn-dev"]])
+        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "sample-dev"]])
 
     def test_all_seats_is_refused_and_the_action_asked_again(self):
         code, out, _ = self.run_cli("menu", stdin="a\n%s\nq\n" % self.GO)
@@ -568,7 +568,7 @@ class PopupGo(NamesCase):
         self.world["panes"]["w2:p2"]["agent"] = None
         code, out, _ = self.run_cli("menu", stdin="2\n%s\n\n" % self.GO)
         self.assertEqual(code, 3)
-        self.assertIn("fablyn-dev is absent; nothing to focus", out)
+        self.assertIn("sample-dev is absent; nothing to focus", out)
         self.assertTrue(out.endswith("Press Enter to close. "), out)
         self.assertEqual(self.argvs("agent", "focus"), [])
 
@@ -588,9 +588,9 @@ class MenuGo(NamesCase):
         self.assertEqual(code, 0, out)
         lines = out.splitlines()
         self.assertTrue(lines[0].startswith("Fleet "), out)
-        self.assertRegex(lines[1], r"^  1\) fablyn-orchestrator\s+claude\s+idle\s+w2:p1$")
-        self.assertRegex(lines[3], r"^  3\) fablyn-reviewer\s+codex\s+idle\s+w2:p3$")
-        self.assertRegex(lines[4], r"^  c1\) winner-chronicles\s+contact\s+idle\s+w3:p4$")
+        self.assertRegex(lines[1], r"^  1\) sample-orchestrator\s+claude\s+idle\s+w2:p1$")
+        self.assertRegex(lines[3], r"^  3\) sample-reviewer\s+codex\s+idle\s+w2:p3$")
+        self.assertRegex(lines[4], r"^  c1\) partner-workspace\s+contact\s+idle\s+w3:p4$")
         self.assertNotIn("a) all seats", out)
         self.assertNotIn("stranger", out)
         self.assertIn("Go to (number, c1-c1, or q to quit): ", out)
@@ -599,13 +599,13 @@ class MenuGo(NamesCase):
     def test_a_seat(self):
         code, out, _ = self.run_cli("menu", "--go", stdin="3\n")
         self.assertEqual(code, 0, out)
-        self.assertTrue(out.endswith("focused fablyn-reviewer (w2:p3, idle)\n"), out)
-        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "fablyn-reviewer"]])
+        self.assertTrue(out.endswith("focused sample-reviewer (w2:p3, idle)\n"), out)
+        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "sample-reviewer"]])
 
     def test_a_contact(self):
         code, out, _ = self.run_cli("menu", "--go", stdin="c1\n")
         self.assertEqual(code, 0, out)
-        self.assertTrue(out.endswith("focused winner-chronicles (w3:p4, idle)\n"), out)
+        self.assertTrue(out.endswith("focused partner-workspace (w3:p4, idle)\n"), out)
         self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", CONTACT_PANE]])
 
     def test_q_enter_and_end_of_input_close(self):
@@ -617,11 +617,11 @@ class MenuGo(NamesCase):
         self.world["panes"]["w2:p2"]["agent"] = None
         code, out, _ = self.run_cli("menu", "--go", stdin="2\nc9\nx\n1\n")
         self.assertEqual(code, 0, out)
-        self.assertIn("fablyn-dev is absent; nothing to focus", out)
+        self.assertIn("sample-dev is absent; nothing to focus", out)
         self.assertIn("Not a choice: c9", out)
         self.assertIn("Not a choice: x", out)
-        self.assertTrue(out.endswith("focused fablyn-orchestrator (w2:p1, idle)\n"), out)
-        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "fablyn-orchestrator"]])
+        self.assertTrue(out.endswith("focused sample-orchestrator (w2:p1, idle)\n"), out)
+        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "sample-orchestrator"]])
 
     def test_without_contacts(self):
         self.write_fleet(THREE_SEATS)
@@ -653,16 +653,16 @@ class Client(unittest.TestCase):
             return 0, json.dumps({"result": {"pane": {"pane_id": "w1:p2", "label": "x"}}}), ""
 
         herdr = Herdr("herdr", runner)
-        self.assertEqual(herdr.pane_rename("w1:p2", "fablyn-dev")["pane_id"], "w1:p2")
+        self.assertEqual(herdr.pane_rename("w1:p2", "sample-dev")["pane_id"], "w1:p2")
         herdr.pane_clear_name("w1:p2")
-        herdr.agent_focus("fablyn-dev")
-        self.assertEqual(seen, [["pane", "rename", "w1:p2", "fablyn-dev"], ["pane", "rename", "w1:p2", "--clear"],
-                                ["agent", "focus", "fablyn-dev"]])
+        herdr.agent_focus("sample-dev")
+        self.assertEqual(seen, [["pane", "rename", "w1:p2", "sample-dev"], ["pane", "rename", "w1:p2", "--clear"],
+                                ["agent", "focus", "sample-dev"]])
         self.assertNotIn(("pane", "rename"), FORBIDDEN)
         self.assertNotIn(("agent", "focus"), FORBIDDEN)
 
     def test_summary(self):
-        self.assertEqual(labels.summary(["fablyn-designer"]), "named 1 (fablyn-designer)")
+        self.assertEqual(labels.summary(["sample-designer"]), "named 1 (sample-designer)")
         self.assertEqual(labels.summary(["a", "b", "c", "d"]), "named 4 after their seats")
 
 
@@ -673,8 +673,8 @@ class Harness(NamesCase):
         self.assert_rename(command, argv, info)
 
     def test_rename_rules(self):
-        good = {"seat": "fablyn-dev", "wanted": "fablyn-dev", "label": "fablyn-dev", "fleet_known": True}
-        self.check(["status"], ["pane", "rename", "w2:p2", "fablyn-dev"], good)
+        good = {"seat": "sample-dev", "wanted": "sample-dev", "label": "sample-dev", "fleet_known": True}
+        self.check(["status"], ["pane", "rename", "w2:p2", "sample-dev"], good)
         for command, info in ((["send"], good),                                  # not a naming command
                               (["status"], dict(good, seat=None)),               # no seat in that pane
                               (["status"], dict(good, label="dev")),             # not the wanted name
@@ -690,20 +690,20 @@ class Harness(NamesCase):
         log = os.path.join(self.tmp, "calls.jsonl")
         with open(log, "a") as handle:
             handle.write(json.dumps({"command": ["status"]}) + "\n")
-            handle.write(json.dumps({"argv": ["agent", "focus", "fablyn-dev"], "exit": 0, "info": {}}) + "\n")
+            handle.write(json.dumps({"argv": ["agent", "focus", "sample-dev"], "exit": 0, "info": {}}) + "\n")
         with self.assertRaises(AssertionError):
             self.assert_safety()
         os.remove(log)
 
     def test_the_fake_judges_seats_from_the_fleet_file(self):
-        self.write_fleet(with_label(self.read_fleet(), "fablyn-dev", '"DEV"'))
+        self.write_fleet(with_label(self.read_fleet(), "sample-dev", '"DEV"'))
         self.assertEqual(fake_herdr.fleet_names(os.path.join(self.repo, ".herdr", "fleet.toml")),
-                         {"fablyn-orchestrator": "fablyn-orchestrator", "fablyn-dev": "DEV",
-                          "fablyn-reviewer": "fablyn-reviewer"})
+                         {"sample-orchestrator": "sample-orchestrator", "sample-dev": "DEV",
+                          "sample-reviewer": "sample-reviewer"})
         self.assertEqual(fake_herdr.fleet_names(os.path.join(self.tmp, "missing.toml")), {})
         self.run_cli("status")
         call = next(c for c in self.calls() if c["argv"][:4] == ["pane", "rename", "w2:p2", "DEV"])
-        self.assertEqual((call["info"]["seat"], call["info"]["wanted"]), ("fablyn-dev", "DEV"))
+        self.assertEqual((call["info"]["seat"], call["info"]["wanted"]), ("sample-dev", "DEV"))
 
 
 if __name__ == "__main__":

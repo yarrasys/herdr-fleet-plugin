@@ -147,14 +147,14 @@ class Guard(LiveFleet):
         self.assertEqual(self.guard("w2:p3", "codex")[0], "owner typing in w2:p3")
 
     def test_antigravity(self):
-        fake_herdr.put_agent(self.world, "w2:p3", "agy", "fablyn-reviewer")
+        fake_herdr.put_agent(self.world, "w2:p3", "agy", "sample-reviewer")
         fake_herdr.focus(self.world, "w2:p3")
         self.assertIsNone(self.guard("w2:p3", "agy")[0])
         fake_herdr.set_screen(self.world, "w2:p3", AGY_TYPED)
         self.assertEqual(self.guard("w2:p3", "agy")[0], "owner typing in w2:p3")
 
     def test_an_unknown_kind_passes_without_a_call(self):
-        fake_herdr.put_agent(self.world, "w2:p3", "pi", "fablyn-reviewer")
+        fake_herdr.put_agent(self.world, "w2:p3", "pi", "sample-reviewer")
         fake_herdr.focus(self.world, "w2:p3")
         fake_herdr.type_in(self.world, "w2:p3", "typed")
         self.assertEqual(self.guard("w2:p3", "pi"), (None, []))
@@ -162,12 +162,12 @@ class Guard(LiveFleet):
     def test_safe_prompt_runs_the_guard_after_the_state_check(self):
         fake_herdr.focus(self.world, "w2:p2")
         fake_herdr.type_in(self.world, "w2:p2", "half typed")
-        outcome = safe_prompt(self.client(), "fablyn-dev", "hello")
+        outcome = safe_prompt(self.client(), "sample-dev", "hello")
         self.assertEqual((outcome.ok, outcome.status, outcome.detail), (False, "typing", TYPING))
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        self.assertEqual(self.prompts_to("sample-dev"), [])
         self.status_of("w2:p2", "blocked")  # a blocked seat is refused before any screen is read
         before = len(self.calls())
-        outcome = safe_prompt(self.client(), "fablyn-dev", "hello")
+        outcome = safe_prompt(self.client(), "sample-dev", "hello")
         self.assertEqual(outcome.status, "blocked")
         self.assertEqual([c["argv"][:2] for c in self.calls()[before:]], [["agent", "get"]])
 
@@ -175,10 +175,10 @@ class Guard(LiveFleet):
         fake_herdr.focus(self.world, "w2:p2")
         self.world["canned"] = [{"prefix": ["pane", "read"], "exit": 1,
                                  "stderr": {"error": {"code": "pane_not_found", "message": "gone"}}}]
-        outcome = safe_prompt(self.client(), "fablyn-dev", "hello")
+        outcome = safe_prompt(self.client(), "sample-dev", "hello")
         self.assertEqual(outcome.status, "error")
         self.assertIn("presence check", outcome.detail)
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        self.assertEqual(self.prompts_to("sample-dev"), [])
 
 
 class Doctor(FleetCase):
@@ -204,7 +204,7 @@ class Doctor(FleetCase):
 
 
 class OwnerTyping(LiveFleet):
-    """The owner is in fablyn-dev's pane (w2:p2) with text half typed."""
+    """The owner is in sample-dev's pane (w2:p2) with text half typed."""
 
     def setUp(self):
         super().setUp()
@@ -220,125 +220,125 @@ class OwnerTyping(LiveFleet):
             return handle.read().split("\n\n", 1)[0].splitlines()
 
     def test_send_queues_on_refusal(self):
-        code, out, _ = self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "ping")
+        code, out, _ = self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "ping")
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(idle, %s\) %s, position 1 of 1$"
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(idle, %s\) %s, position 1 of 1$"
                          % (TYPING, SHORT))
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
-        self.assertIn("queued_by: refusal", self.header("fablyn-dev"))
+        self.assertEqual(self.prompts_to("sample-dev"), [])
+        self.assertIn("queued_by: refusal", self.header("sample-dev"))
         (entry,) = log_entries(self.repo)
         self.assertEqual((entry["kind"], entry["delivery"]), ("send", "queued"))
         self.clear()  # the owner submitted or deleted the line: the next delivery goes
         code, out, _ = self.run_cli("deliver")
-        self.assertRegex(out.strip(), r"^delivered 1 to fablyn-dev \(idle\), \d+ B$")
-        self.assertIn("ping", self.prompts_to("fablyn-dev")[0])
+        self.assertRegex(out.strip(), r"^delivered 1 to sample-dev \(idle\), \d+ B$")
+        self.assertIn("ping", self.prompts_to("sample-dev")[0])
 
     def test_send_now_is_refused(self):
-        code, out, _ = self.run_cli("send", "--now", "fablyn-dev", "ping")
+        code, out, _ = self.run_cli("send", "--now", "sample-dev", "ping")
         self.assertEqual(code, 1)
-        self.assertEqual(out.strip(), "refused fablyn-dev (idle, %s): nothing sent" % TYPING)
+        self.assertEqual(out.strip(), "refused sample-dev (idle, %s): nothing sent" % TYPING)
         (entry,) = log_entries(self.repo)
         self.assertEqual(entry["delivery"], "refused")
-        self.assertEqual(box(self.repo, "fablyn-dev", CUR), [entry["id"]])
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
+        self.assertEqual(box(self.repo, "sample-dev", CUR), [entry["id"]])
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
         self.status_of("w2:p2", "working")
-        code, out, _ = self.run_cli("send", "--now", "fablyn-dev", "ping again")
-        self.assertEqual((code, out.strip()), (1, "refused fablyn-dev (working, %s): nothing sent" % TYPING))
+        code, out, _ = self.run_cli("send", "--now", "sample-dev", "ping again")
+        self.assertEqual((code, out.strip()), (1, "refused sample-dev (working, %s): nothing sent" % TYPING))
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
     def test_other_targets_of_the_same_send_still_go(self):
-        code, out, _ = self.run_cli("send", "fablyn-dev", "fablyn-reviewer", "standup")
+        code, out, _ = self.run_cli("send", "sample-dev", "sample-reviewer", "standup")
         self.assertEqual(code, 0)
         lines = out.splitlines()
-        self.assertTrue(lines[0].startswith("queued in herdr-fleet for fablyn-dev (idle, %s)" % TYPING), lines)
-        self.assertRegex(lines[1], r"^sent to fablyn-reviewer \(idle\), \d+ B$")
+        self.assertTrue(lines[0].startswith("queued in herdr-fleet for sample-dev (idle, %s)" % TYPING), lines)
+        self.assertRegex(lines[1], r"^sent to sample-reviewer \(idle\), \d+ B$")
 
     def test_deliver_and_watch_once_leave_the_queue(self):
-        put(self.repo, "fablyn-dev", "one")
-        put(self.repo, "fablyn-dev", "two")
-        for argv in (["deliver"], ["deliver", "fablyn-dev"], ["watch", "--once"]):
+        put(self.repo, "sample-dev", "one")
+        put(self.repo, "sample-dev", "two")
+        for argv in (["deliver"], ["deliver", "sample-dev"], ["watch", "--once"]):
             with self.subTest(argv=argv):
                 code, out, _ = self.run_cli(*argv)
-                self.assertEqual((code, out.strip()), (0, "fablyn-dev: %s, 2 left queued" % TYPING))
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 2)
+                self.assertEqual((code, out.strip()), (0, "sample-dev: %s, 2 left queued" % TYPING))
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 2)
         self.assertEqual(self.argvs("agent", "prompt"), [])
         self.assertEqual(self.world["notifications"], [])
 
     def test_deliver_now_is_held_too(self):
-        put(self.repo, "fablyn-dev", "one")
+        put(self.repo, "sample-dev", "one")
         self.status_of("w2:p2", "working")
-        code, out, _ = self.run_cli("deliver", "fablyn-dev", "--now")
-        self.assertEqual((code, out.strip()), (0, "fablyn-dev: %s, 1 left queued" % TYPING))
+        code, out, _ = self.run_cli("deliver", "sample-dev", "--now")
+        self.assertEqual((code, out.strip()), (0, "sample-dev: %s, 1 left queued" % TYPING))
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
     def test_the_flush_before_send_is_held(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "first")
+        self.run_cli("send", "sample-dev", "first")
         self.status_of("w2:p2", "idle")
-        code, out, _ = self.run_cli("send", "--queue", "fablyn-dev", "second")
+        code, out, _ = self.run_cli("send", "--queue", "sample-dev", "second")
         self.assertEqual(code, 0)
         lines = out.splitlines()
-        self.assertRegex(lines[0], r"^queued in herdr-fleet for fablyn-dev \(idle\) %s, position 2 of 2$" % SHORT)
-        self.assertEqual(lines[1], "fablyn-dev: %s, 1 left queued" % TYPING)
+        self.assertRegex(lines[0], r"^queued in herdr-fleet for sample-dev \(idle\) %s, position 2 of 2$" % SHORT)
+        self.assertEqual(lines[1], "sample-dev: %s, 1 left queued" % TYPING)
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
     def test_restart_swap_and_down_refuse_like_a_blocked_seat(self):
-        code, out, _ = self.run_cli("restart", "fablyn-dev")
+        code, out, _ = self.run_cli("restart", "sample-dev")
         self.assertEqual(code, 3, out)
-        self.assertIn("fablyn-dev: refused - %s" % TYPING, out)
-        code, out, _ = self.run_cli("down", "fablyn-dev")
+        self.assertIn("sample-dev: refused - %s" % TYPING, out)
+        code, out, _ = self.run_cli("down", "sample-dev")
         self.assertEqual(code, 3, out)
-        self.assertIn("fablyn-dev: refused - %s" % TYPING, out)
+        self.assertIn("sample-dev: refused - %s" % TYPING, out)
         self.write_fleet(self.read_fleet().replace(
-            'name = "fablyn-dev"\nkind = "claude"\nargs = ["--model", "claude-opus-5-5"]',
-            'name = "fablyn-dev"\nkind = "claude"\nargs = ["--model", "claude-opus-6"]'))
-        code, out, _ = self.run_cli("swap", "fablyn-dev")
+            'name = "sample-dev"\nkind = "claude"\nargs = ["--model", "claude-opus-5-5"]',
+            'name = "sample-dev"\nkind = "claude"\nargs = ["--model", "claude-opus-6"]'))
+        code, out, _ = self.run_cli("swap", "sample-dev")
         self.assertEqual(code, 3, out)
-        self.assertIn("fablyn-dev: refused - %s" % TYPING, out)
+        self.assertIn("sample-dev: refused - %s" % TYPING, out)
         self.assertEqual(self.argvs("agent", "prompt"), [])  # no quit command typed into the owner's line
         self.assertEqual(self.argvs("agent", "start"), [])
-        self.assertEqual(self.pane_of("fablyn-dev"), "w2:p2")
+        self.assertEqual(self.pane_of("sample-dev"), "w2:p2")
 
     def test_down_quits_the_others(self):
         code, out, _ = self.run_cli("down")
         self.assertEqual(code, 3, out)
-        self.assertIn("fablyn-dev: refused - %s" % TYPING, out)
-        self.assertEqual(self.prompts_to("fablyn-orchestrator"), ["/exit"])
-        self.assertEqual(self.prompts_to("fablyn-reviewer"), ["/quit"])
+        self.assertIn("sample-dev: refused - %s" % TYPING, out)
+        self.assertEqual(self.prompts_to("sample-orchestrator"), ["/exit"])
+        self.assertEqual(self.prompts_to("sample-reviewer"), ["/quit"])
 
     def test_kickoff_of_a_live_seat_is_refused(self):
-        code, out, _ = self.run_cli("kickoff", "fablyn-dev", "fablyn-reviewer")
+        code, out, _ = self.run_cli("kickoff", "sample-dev", "sample-reviewer")
         self.assertEqual(code, 3, out)
-        self.assertIn("fablyn-dev: not briefed - %s" % TYPING, out)
-        self.assertIn("fablyn-reviewer: briefed", out)
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        self.assertIn("sample-dev: not briefed - %s" % TYPING, out)
+        self.assertIn("sample-reviewer: briefed", out)
+        self.assertEqual(self.prompts_to("sample-dev"), [])
 
     def test_dry_runs_say_would_hold(self):
-        code, out, _ = self.run_cli("send", "--dry-run", "fablyn-dev", "ping")
-        self.assertEqual((code, out.strip()), (0, "would queue in herdr-fleet for fablyn-dev (idle); would hold: %s"
+        code, out, _ = self.run_cli("send", "--dry-run", "sample-dev", "ping")
+        self.assertEqual((code, out.strip()), (0, "would queue in herdr-fleet for sample-dev (idle); would hold: %s"
                                                % TYPING))
-        code, out, _ = self.run_cli("send", "--dry-run", "--now", "fablyn-dev", "ping")
-        self.assertEqual(out.strip(), "would refuse fablyn-dev (idle): nothing sent; would hold: %s" % TYPING)
-        put(self.repo, "fablyn-dev", "one")
+        code, out, _ = self.run_cli("send", "--dry-run", "--now", "sample-dev", "ping")
+        self.assertEqual(out.strip(), "would refuse sample-dev (idle): nothing sent; would hold: %s" % TYPING)
+        put(self.repo, "sample-dev", "one")
         code, out, _ = self.run_cli("deliver", "--dry-run")
-        self.assertEqual(out.strip(), "fablyn-dev: would hold: %s, 1 left queued" % TYPING)
-        code, out, _ = self.run_cli("restart", "--dry-run", "fablyn-dev")
-        self.assertIn("fablyn-dev: plan - would hold: %s (the quit is refused while the owner types there)" % TYPING,
+        self.assertEqual(out.strip(), "sample-dev: would hold: %s, 1 left queued" % TYPING)
+        code, out, _ = self.run_cli("restart", "--dry-run", "sample-dev")
+        self.assertIn("sample-dev: plan - would hold: %s (the quit is refused while the owner types there)" % TYPING,
                       out)
         self.assertNotIn("agent start", out)
         self.assertEqual(self.argvs("agent", "prompt"), [])
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 1)
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 1)
 
     def test_a_dialog_on_screen_holds_like_text(self):
         fake_herdr.show_dialog(self.world, "w2:p2")
-        code, out, _ = self.run_cli("send", "fablyn-dev", "ping")
+        code, out, _ = self.run_cli("send", "sample-dev", "ping")
         self.assertIn("(idle, %s)" % TYPING, out)
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
     def test_a_seat_the_owner_only_looks_at_is_delivered_to(self):
         self.clear()
-        code, out, _ = self.run_cli("send", "fablyn-dev", "ping")
-        self.assertRegex(out.strip(), r"^sent to fablyn-dev \(idle\), \d+ B$")
+        code, out, _ = self.run_cli("send", "sample-dev", "ping")
+        self.assertRegex(out.strip(), r"^sent to sample-dev \(idle\), \d+ B$")
         (prompt,) = [c for c in self.calls() if c["argv"][:2] == ["agent", "prompt"]]
         self.assertFalse(prompt["info"]["owner_typing"])
         kinds = [c["argv"][:2] for c in self.calls()]
@@ -346,23 +346,23 @@ class OwnerTyping(LiveFleet):
 
     def test_text_left_in_a_pane_the_owner_left_holds_too(self):  # design 23.11 (21.2 let it merge)
         fake_herdr.focus(self.world, "w2:p1")  # the owner clicked into the orchestrator's pane
-        code, out, _ = self.run_cli("send", "fablyn-dev", "ping")
+        code, out, _ = self.run_cli("send", "sample-dev", "ping")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(idle, %s\) %s, position 1 of 1$"
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(idle, %s\) %s, position 1 of 1$"
                          % (re.escape(IN_INPUT), SHORT))
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        self.assertEqual(self.prompts_to("sample-dev"), [])
 
 
 class KickoffAfterStart(FleetCase):
     def test_a_seat_started_in_the_pane_the_owner_looks_at_is_briefed(self):
-        self.write_fleet('workspace = "fablyn"\n[[agents]]\nname = "fablyn-dev"\nkind = "claude"\n')
+        self.write_fleet('workspace = "sample"\n[[agents]]\nname = "sample-dev"\nkind = "claude"\n')
         self.fleet_ws()
         fake_herdr.focus(self.world, "w2:p1")
-        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "fablyn", "created_workspace": False,
-                          "agents": {"fablyn-dev": {"pane_id": "w2:p1", "created_pane": False}}})
+        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "sample", "created_workspace": False,
+                          "agents": {"sample-dev": {"pane_id": "w2:p1", "created_pane": False}}})
         code, out, err = self.run_cli("up", "--no-watch")
         self.assertEqual(code, 0, out + err)
-        self.assertIn("fablyn-dev: briefed", out)
+        self.assertIn("sample-dev: briefed", out)
         kinds = [c["argv"][:2] for c in self.calls()]
         start = kinds.index(["agent", "start"])
         self.assertEqual(kinds[start:].count(["pane", "read"]), 1)  # the guard ran, and passed
@@ -392,7 +392,7 @@ class HoldClock(StopClock):
 class WatcherHold(WatchCase):
     def setUp(self):
         super().setUp()
-        put(self.repo, "fablyn-dev", "Task A")
+        put(self.repo, "sample-dev", "Task A")
         fake_herdr.focus(self.world, "w2:p2")
         fake_herdr.type_in(self.world, "w2:p2", "half typed by the owner")
 
@@ -411,13 +411,13 @@ class WatcherHold(WatchCase):
 
     def test_holds_until_the_owner_clears_the_line_then_delivers(self):
         self.at_hold(3, lambda w: fake_herdr.type_in(w, "w2:p2", ""))
-        self.behave(wait_results={"fablyn-dev": ["idle"]})
+        self.behave(wait_results={"sample-dev": ["idle"]})
         code, out, err = self.watch(cycles=1)
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(events(out)[1:], ["waiting on fablyn-dev (1 queued)", "fablyn-dev idle; delivering 1",
-                                           "fablyn-dev idle; %s, holding 1" % TYPING,
-                                           "delivered 1 to fablyn-dev", "stopped"])
-        (prompt,) = self.prompts_to("fablyn-dev")
+        self.assertEqual(events(out)[1:], ["waiting on sample-dev (1 queued)", "sample-dev idle; delivering 1",
+                                           "sample-dev idle; %s, holding 1" % TYPING,
+                                           "delivered 1 to sample-dev", "stopped"])
+        (prompt,) = self.prompts_to("sample-dev")
         self.assertIn("Task A", prompt)
         self.assertEqual(self.clock.holds, 3)
         self.assertEqual(self.clock.slept, 5.0 + 3 * watch.HOLD_RECHECK_S + watch.CYCLE_S)
@@ -432,11 +432,11 @@ class WatcherHold(WatchCase):
             if n == 4:
                 self.edit_world(lambda w: fake_herdr.type_in(w, "w2:p2", ""))
         self.clock = HoldClock(change)
-        self.behave(wait_results={"fablyn-dev": ["idle"]})
+        self.behave(wait_results={"sample-dev": ["idle"]})
         code, out, _ = self.watch(cycles=1)
-        self.assertEqual(events(out)[1:], ["waiting on fablyn-dev (1 queued)", "fablyn-dev idle; delivering 1",
-                                           "fablyn-dev idle; %s, holding 1" % TYPING,
-                                           "delivered 1 to fablyn-dev", "stopped"])
+        self.assertEqual(events(out)[1:], ["waiting on sample-dev (1 queued)", "sample-dev idle; delivering 1",
+                                           "sample-dev idle; %s, holding 1" % TYPING,
+                                           "delivered 1 to sample-dev", "stopped"])
         self.assertEqual(self.clock.holds, 4)
         looks = [c["argv"][:2] for c in self.calls() if c["argv"][:2] in (["pane", "get"], ["pane", "read"])]
         # the delivery and looks 1, 2 (focused: read, get), looks 3 (not focused: read, get), look 4 and the
@@ -448,34 +448,34 @@ class WatcherHold(WatchCase):
             fake_herdr.type_in(world, "w2:p2", "")  # the owner submitted the line: the seat works
             world["panes"]["w2:p2"]["agent"]["agent_status"] = "working"
         self.at_hold(1, change)
-        self.behave(wait_results={"fablyn-dev": ["idle", "idle"]})
+        self.behave(wait_results={"sample-dev": ["idle", "idle"]})
         code, out, _ = self.watch(cycles=1)
         self.assertEqual(code, 0)
-        self.assertEqual(events(out)[1:], ["waiting on fablyn-dev (1 queued)", "fablyn-dev idle; delivering 1",
-                                           "fablyn-dev idle; %s, holding 1" % TYPING, "fablyn-dev working; waiting",
-                                           "fablyn-dev idle; delivering 1", "delivered 1 to fablyn-dev", "stopped"])
-        self.assertEqual(self.argvs("agent", "wait", "fablyn-dev"), [["agent", "wait", "fablyn-dev"] + WAIT] * 2)
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
+        self.assertEqual(events(out)[1:], ["waiting on sample-dev (1 queued)", "sample-dev idle; delivering 1",
+                                           "sample-dev idle; %s, holding 1" % TYPING, "sample-dev working; waiting",
+                                           "sample-dev idle; delivering 1", "delivered 1 to sample-dev", "stopped"])
+        self.assertEqual(self.argvs("agent", "wait", "sample-dev"), [["agent", "wait", "sample-dev"] + WAIT] * 2)
+        self.assertEqual(len(self.prompts_to("sample-dev")), 1)
 
     def test_messages_read_meanwhile_end_the_hold(self):
         def change(world):  # the seat read its own inbox during the hold
-            for name in os.listdir(os.path.join(self.repo, ".herdr", "inbox", "fablyn-dev", NEW)):
-                os.rename(os.path.join(self.repo, ".herdr", "inbox", "fablyn-dev", NEW, name),
-                          os.path.join(self.repo, ".herdr", "inbox", "fablyn-dev", CUR, name))
+            for name in os.listdir(os.path.join(self.repo, ".herdr", "inbox", "sample-dev", NEW)):
+                os.rename(os.path.join(self.repo, ".herdr", "inbox", "sample-dev", NEW, name),
+                          os.path.join(self.repo, ".herdr", "inbox", "sample-dev", CUR, name))
         self.at_hold(2, change)
-        self.behave(wait_results={"fablyn-dev": ["idle"]})
+        self.behave(wait_results={"sample-dev": ["idle"]})
         code, out, _ = self.watch(cycles=1)
         self.assertEqual(events(out)[-1], "stopped")
-        self.assertNotIn("delivered 1 to fablyn-dev", events(out))
+        self.assertNotIn("delivered 1 to sample-dev", events(out))
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
     def test_the_hold_has_no_cap(self):
         self.at_hold(40, lambda w: fake_herdr.type_in(w, "w2:p2", ""))
-        self.behave(wait_results={"fablyn-dev": ["idle"]})
+        self.behave(wait_results={"sample-dev": ["idle"]})
         code, out, _ = self.watch(cycles=1)
-        self.assertIn("delivered 1 to fablyn-dev", events(out))
+        self.assertIn("delivered 1 to sample-dev", events(out))
         self.assertEqual(self.clock.holds, 40)
-        self.assertEqual(events(out).count("fablyn-dev idle; %s, holding 1" % TYPING), 1)  # said once
+        self.assertEqual(events(out).count("sample-dev idle; %s, holding 1" % TYPING), 1)  # said once
 
 
 # -- 21.1: a working seat gets text only from --now ------------------------------------------------
@@ -488,63 +488,63 @@ class WorkingSeats(LiveFleet):
         for flag, outcome in self.MODES.items():
             with self.subTest(flag=flag):
                 self.status_of("w2:p2", "working")
-                before = len(self.prompts_to("fablyn-dev"))
-                code, out, _ = self.run_cli("send", *([flag] if flag else []), "fablyn-dev", "go %s" % flag)
+                before = len(self.prompts_to("sample-dev"))
+                code, out, _ = self.run_cli("send", *([flag] if flag else []), "sample-dev", "go %s" % flag)
                 self.assertEqual(code, 0, out)
-                prompted = len(self.prompts_to("fablyn-dev")) - before
+                prompted = len(self.prompts_to("sample-dev")) - before
                 if outcome == "sent":
                     self.assertEqual(prompted, 1)
-                    self.assertTrue(out.startswith("sent to fablyn-dev (%s)" % place("working")), out)
+                    self.assertTrue(out.startswith("sent to sample-dev (%s)" % place("working")), out)
                 else:
                     self.assertEqual(prompted, 0)
-                    self.assertTrue(out.startswith("queued in herdr-fleet for fablyn-dev (working"), out)
+                    self.assertTrue(out.startswith("queued in herdr-fleet for sample-dev (working"), out)
 
     def test_now_carries_the_queue_in_front_and_urgent_says_it_cannot_reorder(self):
         self.status_of("w2:p2", "working")
-        self.run_cli("send", "fablyn-dev", "first")
-        code, out, _ = self.run_cli("send", "--now", "--urgent", "fablyn-dev", "second")
+        self.run_cli("send", "sample-dev", "first")
+        code, out, _ = self.run_cli("send", "--now", "--urgent", "sample-dev", "second")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^sent to fablyn-dev \(%s\) with 1 queued, \d+ B; %s$"
+        self.assertRegex(out.strip(), r"^sent to sample-dev \(%s\) with 1 queued, \d+ B; %s$"
                          % (WORKING, re.escape(URGENT_TYPED)))
-        (prompt,) = self.prompts_to("fablyn-dev")
+        (prompt,) = self.prompts_to("sample-dev")
         self.assertLess(prompt.index("second"), prompt.index("first"))  # urgent first, in the mailbox only
 
     def test_the_flush_goes_only_with_a_delivery_to_an_idle_or_done_seat(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "on refusal")
+        self.run_cli("send", "sample-dev", "on refusal")
         self.status_of("w2:p2", "working")
-        for argv in (["--queue", "fablyn-dev", "queued"], ["--fyi", "fablyn-dev", "fyi"],
-                     ["--when-ready", "100", "fablyn-dev", "ready?"]):
+        for argv in (["--queue", "sample-dev", "queued"], ["--fyi", "sample-dev", "fyi"],
+                     ["--when-ready", "100", "sample-dev", "ready?"]):
             with self.subTest(argv=argv):
                 code, out, _ = self.run_cli("send", *argv)
                 self.assertEqual(code, 0)
                 self.assertEqual(len(out.strip().splitlines()), 1, out)
         self.assertEqual(self.argvs("agent", "prompt"), [])
         self.status_of("w2:p2", "done")
-        code, out, _ = self.run_cli("send", "fablyn-dev", "now it is done")
-        self.assertRegex(out.strip(), r"^sent to fablyn-dev \(done\) with 4 queued, \d+ B$")
+        code, out, _ = self.run_cli("send", "sample-dev", "now it is done")
+        self.assertRegex(out.strip(), r"^sent to sample-dev \(done\) with 4 queued, \d+ B$")
 
     def test_deliver_leaves_a_working_seats_refusal_mailbox_queued(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "on refusal")
+        self.run_cli("send", "sample-dev", "on refusal")
         self.status_of("w2:p2", "working")
-        for argv in (["deliver"], ["deliver", "fablyn-dev"], ["watch", "--once"]):
+        for argv in (["deliver"], ["deliver", "sample-dev"], ["watch", "--once"]):
             with self.subTest(argv=argv):
-                self.assertEqual(self.run_cli(*argv)[1].strip(), "fablyn-dev: working, 1 left queued")
+                self.assertEqual(self.run_cli(*argv)[1].strip(), "sample-dev: working, 1 left queued")
         self.assertEqual(self.argvs("agent", "prompt"), [])
-        code, out, _ = self.run_cli("deliver", "fablyn-dev", "--now")
-        self.assertRegex(out.strip(), r"^delivered 1 to fablyn-dev \(%s\), \d+ B$" % WORKING)
+        code, out, _ = self.run_cli("deliver", "sample-dev", "--now")
+        self.assertRegex(out.strip(), r"^delivered 1 to sample-dev \(%s\), \d+ B$" % WORKING)
 
     def test_a_seat_that_turned_working_before_the_prompt_keeps_the_message(self):
         working = {"id": "cli:agent:get", "result": {"type": "agent_info", "agent": {
-            "agent": "claude", "agent_status": "working", "name": "fablyn-dev", "pane_id": "w2:p2"}}}
+            "agent": "claude", "agent_status": "working", "name": "sample-dev", "pane_id": "w2:p2"}}}
         # idle when send looks, working when safe_prompt looks again
         idle = json.loads(json.dumps(working).replace('"working"', '"idle"'))
-        self.world["canned"] = [{"prefix": ["agent", "get", "fablyn-dev"], "stdout": idle, "times": 1},
-                                {"prefix": ["agent", "get", "fablyn-dev"], "stdout": working, "times": 1}]
-        code, out, _ = self.run_cli("send", "fablyn-dev", "ping")
+        self.world["canned"] = [{"prefix": ["agent", "get", "sample-dev"], "stdout": idle, "times": 1},
+                                {"prefix": ["agent", "get", "sample-dev"], "stdout": working, "times": 1}]
+        code, out, _ = self.run_cli("send", "sample-dev", "ping")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 1 of 1; lands "
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(working\) %s, position 1 of 1; lands "
                                       r"at its next idle, or now with --now$" % SHORT)
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
@@ -552,11 +552,11 @@ class WorkingSeats(LiveFleet):
 class NoWorkingWaits(WatchCase):
     def test_no_until_working_wait_anywhere(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "on refusal")
+        self.run_cli("send", "sample-dev", "on refusal")
         self.status_of("w2:p3", "blocked")
-        self.run_cli("send", "--queue", "fablyn-reviewer", "queued")
-        self.behave(wait_results={"fablyn-dev": ["working", "working", "timeout"],
-                                  "fablyn-reviewer": ["working", "timeout", "timeout"]})
+        self.run_cli("send", "--queue", "sample-reviewer", "queued")
+        self.behave(wait_results={"sample-dev": ["working", "working", "timeout"],
+                                  "sample-reviewer": ["working", "timeout", "timeout"]})
         code, out, _ = self.watch(cycles=3)
         self.assertEqual(code, 0)
         waits = self.argvs("agent", "wait")
@@ -572,8 +572,8 @@ class NoWorkingWaits(WatchCase):
 
 class Harness(LiveFleet):
     def test_a_prompt_to_the_pane_the_owner_types_in_fails_every_test(self):
-        prompt = ["agent", "prompt", "fablyn-dev", "hi"]
-        for command in (["send", "--now", "fablyn-dev", "hi"], ["kickoff", "fablyn-dev"], ["watch"]):
+        prompt = ["agent", "prompt", "sample-dev", "hi"]
+        for command in (["send", "--now", "sample-dev", "hi"], ["kickoff", "sample-dev"], ["watch"]):
             with self.subTest(command=command):
                 with open(self.log_path, "w") as handle:
                     handle.write(json.dumps({"command": command}) + "\n")
@@ -584,12 +584,12 @@ class Harness(LiveFleet):
         os.remove(self.log_path)
 
     def test_typed_ahead_allowed_only_for_now(self):
-        prompt = ["agent", "prompt", "fablyn-dev", "hi"]
-        self.assertTrue(typed_ahead_allowed(["send", "--now", "fablyn-dev", "hi"], prompt, {}))
-        self.assertTrue(typed_ahead_allowed(["deliver", "fablyn-dev", "--now"], prompt, {}))
-        for command in (["send", "fablyn-dev", "hi"], ["deliver"], ["watch"], ["kickoff", "fablyn-dev"],
-                        ["restart", "fablyn-dev"]):
-            self.assertFalse(typed_ahead_allowed(command, prompt, {"refusal_boxes": ["fablyn-dev"]}), command)
+        prompt = ["agent", "prompt", "sample-dev", "hi"]
+        self.assertTrue(typed_ahead_allowed(["send", "--now", "sample-dev", "hi"], prompt, {}))
+        self.assertTrue(typed_ahead_allowed(["deliver", "sample-dev", "--now"], prompt, {}))
+        for command in (["send", "sample-dev", "hi"], ["deliver"], ["watch"], ["kickoff", "sample-dev"],
+                        ["restart", "sample-dev"]):
+            self.assertFalse(typed_ahead_allowed(command, prompt, {"refusal_boxes": ["sample-dev"]}), command)
 
     def test_the_fake_records_owner_typing(self):
         self.status_of("w2:p2", "idle")

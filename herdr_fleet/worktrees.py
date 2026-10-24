@@ -75,7 +75,7 @@ def parse_porcelain(text: str) -> List[Worktree]:
 
 def _realpath_glob(pattern: str) -> str:
     """The glob with its wildcard-free leading directories resolved through symlinks,
-    so ``/tmp/fablyn-*`` also matches the ``/private/tmp/fablyn-x`` git prints on macOS."""
+    so ``/tmp/sample-*`` also matches the ``/private/tmp/sample-x`` git prints on macOS."""
     parts = pattern.split(os.sep)
     fixed: List[str] = []
     for part in parts[:-1]:

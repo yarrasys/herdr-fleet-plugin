@@ -1,6 +1,6 @@
-# .herdr/fleet.toml  — the Fablyn team, as an example (design.md section 2).
+# .herdr/fleet.toml  — the Sample team, as an example (design.md section 2).
 # Copy this file to <repo>/.herdr/fleet.toml and commit it.
-workspace  = "fablyn"            # optional: reuse the workspace with this label, else create it.
+workspace  = "sample"            # optional: reuse the workspace with this label, else create it.
                                  # Absent: use the workspace the command was invoked from.
 cwd        = "."                 # optional default agent cwd, relative to the repo root. Default ".".
 state_note = ".herdr/STATE.md"     # optional: file the orchestrator keeps; its contents fill {state}.
@@ -9,45 +9,45 @@ kickoff    = ".herdr/kickoff/default.md"   # optional default kickoff template (
 [layout]
 mode      = "grid"               # chain (default): each seat splits from the previous one;
                                  # grid: the seats fill an even grid, column-major in file order
-top       = "fablyn-orchestrator"  # grid only: this seat gets a band across the whole width,
+top       = "sample-orchestrator"  # grid only: this seat gets a band across the whole width,
                                  # above the grid of the other seats (the watcher strip stays at the bottom)
 # top_ratio = 0.3                # the band's share of the tab's height, 0.1 to 0.6
 # columns = 2                    # grid only; default ceil(sqrt(seats placed)): 3 seats -> 2 + 1
 direction = "right"              # chain: split direction between seats. grid: first split off your pane
 ratio     = 0.5                  # chain: split ratio. grid: share your pane keeps when it is not a seat
 
-# Seats start in file order and are briefed in file order once all are up.
-# herdup's rule is to put the orchestrator last so it is briefed last, with
-# the complete roster; this example keeps it first, as in the design.
+# The top seat starts first; kickoffs remain in file order after all seats are up.
+# The role templates are generic starting points. Adapt them to project guidance
+# and obtain explicit owner authorization before merging, deploying or pushing.
 
 [[agents]]
-name    = "fablyn-orchestrator"  # herdr agent name: [a-z][a-z0-9_-]{0,31}, unique in the file
+name    = "sample-orchestrator"  # herdr agent name: [a-z][a-z0-9_-]{0,31}, unique in the file
 kind    = "claude"               # a kind from `herdr agent start --help`
-args    = ["--model", "claude-opus-5-5"]   # passed after `--` to herdr agent start
+args    = []                     # add native arguments for models available to your account
 cwd     = "."                    # optional, relative to repo root, or absolute, or ~/…
 # split = "right"                # chain mode only: overrides [layout].direction for this seat
 # ratio = 0.5                    # chain mode only: overrides [layout].ratio for this seat
 # from  = "<an earlier seat>"    # chain mode only: split from that seat's pane, not the previous one
-env     = { FABLYN_ROLE = "orchestrator" }  # optional, injected with --env on the pane
+env     = { SAMPLE_ROLE = "orchestrator" }  # optional, injected with --env on the pane
 kickoff = ".herdr/kickoff/orchestrator.md"    # optional template path; or kickoff_text = "inline"
 quit    = "/exit"                # optional override of the per-kind quit command
-notes   = "Needs localhost for Playwright and the Miniflare vitest files."  # shown in status only
+notes   = "Coordinates the sample team; publishing actions require explicit owner authorization."  # shown in status only
 
 [[agents]]
-name    = "fablyn-dev"
+name    = "sample-dev"
 kind    = "claude"
-args    = ["--model", "claude-opus-5-5"]
+args    = []                     # add native arguments for models available to your account
 kickoff = ".herdr/kickoff/dev.md"
 
 [[agents]]
-name    = "fablyn-reviewer"
+name    = "sample-reviewer"
 kind    = "codex"
-args    = ["-m", "gpt-6-astra"]
+args    = []                     # add native arguments for models available to your account
 kickoff = ".herdr/kickoff/reviewer.md"
 
 [[agents]]
-name    = "fablyn-designer"
+name    = "sample-designer"
 kind    = "claude"
-args    = ["--model", "claude-opus-5-5"]
+args    = []                     # add native arguments for models available to your account
 kickoff = ".herdr/kickoff/designer.md"
-notes   = "Designs flows, screens and visual rules; reviews stills. Read-only on code; writes under docs/design/."
+notes   = "Produces design proposals and reviews UI output; edits design documents only when requested."

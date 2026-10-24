@@ -30,10 +30,10 @@ from herdr_fleet import tui
 B = board
 DOT = " \u00b7 "
 HHMM = r"\d\d:\d\d"
-WINNER = "winner-chronicles"
+WINNER = "partner-workspace"
 CONTACT_FLEET = THREE_SEATS + '''
 [[contacts]]
-name = "winner-chronicles"
+name = "partner-workspace"
 match = { cwd = "%s" }
 '''
 
@@ -45,7 +45,7 @@ class PageCase(Strip):
     def setUp(self):
         super().setUp()
         self.world["behaviors"]["wait_results"] = {n: ["timeout"] * 40 for n in
-                                                   ("fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer")}
+                                                   ("sample-orchestrator", "sample-dev", "sample-reviewer")}
 
     def page(self, keys, size=(162, 20), idle=6, **kwargs):
         return self.run_board(keys, size=size, idle=idle, **kwargs)
@@ -92,21 +92,21 @@ class Navigation(PageCase):
         self.assertEqual(code, 0, err)
         kinds = []
         for title in self.titles():
-            kind = "seat" if title.startswith("fablyn-dev" + DOT) else "board" if title.startswith("fablyn" + DOT) \
+            kind = "seat" if title.startswith("sample-dev" + DOT) else "board" if title.startswith("sample" + DOT) \
                 else "?"
             if not kinds or kinds[-1] != kind:
                 kinds.append(kind)
         self.assertEqual(kinds, ["board", "seat", "board", "seat", "board", "seat", "board"])
         self.assertIn("Ctrl-C stops the watcher", self.footers())  # q on the board itself
         self.assertFalse(self.argvs("agent", "focus"))  # Enter opens a page; it focuses nothing
-        page = self.draw_titled("fablyn-dev" + DOT)
-        self.assertEqual(page[0], "fablyn-dev \u00b7 \u25cb idle <1m \u00b7 claude \u00b7 w2:p2")
+        page = self.draw_titled("sample-dev" + DOT)
+        self.assertEqual(page[0], "sample-dev \u00b7 \u25cb idle <1m \u00b7 claude \u00b7 w2:p2")
         self.assertIn("Esc back \u00b7 \u2191\u2193 scroll \u00b7 \u2190\u2192 seat", page[-1])  # cut from the right
 
     def test_number_keys_open_pages(self):
         self.page(["3", "esc", "9"])
-        self.assertTrue(self.draw_titled("fablyn-reviewer" + DOT)[0].startswith(
-            "fablyn-reviewer \u00b7 \u25cb idle <1m \u00b7 codex \u00b7 w2:p3"))
+        self.assertTrue(self.draw_titled("sample-reviewer" + DOT)[0].startswith(
+            "sample-reviewer \u00b7 \u25cb idle <1m \u00b7 codex \u00b7 w2:p3"))
         self.assertIn("no seat 9 on the board", self.footers())
         self.assertFalse(self.argvs("agent", "focus"))
 
@@ -116,25 +116,25 @@ class Navigation(PageCase):
         order = []
         for title in self.titles():
             name = title.split(DOT, 1)[0].replace("\u2194 ", "")
-            if name != "fablyn" and (not order or order[-1] != name):
+            if name != "sample" and (not order or order[-1] != name):
                 order.append(name)
-        self.assertEqual(order, ["fablyn-orchestrator", WINNER, "fablyn-reviewer", WINNER, "fablyn-orchestrator",
-                                 "fablyn-dev"])
-        self.assertEqual(self.draw_titled("\u2194 " + WINNER + DOT)[0], "\u2194 winner-chronicles \u00b7 contact of "
+        self.assertEqual(order, ["sample-orchestrator", WINNER, "sample-reviewer", WINNER, "sample-orchestrator",
+                                 "sample-dev"])
+        self.assertEqual(self.draw_titled("\u2194 " + WINNER + DOT)[0], "\u2194 partner-workspace \u00b7 contact of "
                          "this fleet \u00b7 \u25cb idle <1m \u00b7 w3:p4")  # design 26.6
 
     def test_g_focuses_from_the_board_and_from_a_seat_page(self):
         self.page(["g", "2", "g", "esc", "g"])
-        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "fablyn-orchestrator"],
-                                                        ["agent", "focus", "fablyn-dev"],
-                                                        ["agent", "focus", "fablyn-orchestrator"]])
+        self.assertEqual(self.argvs("agent", "focus"), [["agent", "focus", "sample-orchestrator"],
+                                                        ["agent", "focus", "sample-dev"],
+                                                        ["agent", "focus", "sample-orchestrator"]])
 
     def test_z_zooms_the_strip_through_its_own_pane(self):
         code, _, err = self.page(["z", "2", "z"])
         self.assertEqual(code, 0, err)
         self.assertEqual(self.argvs("pane", "zoom"), [["pane", "zoom", "w1:p1", "--toggle"]] * 2)
         self.assertFalse(self.world["panes"]["w1:p1"].get("zoomed"))  # zoomed, then back
-        self.assertTrue(self.draw_titled("fablyn-dev" + DOT))  # z works on a page too
+        self.assertTrue(self.draw_titled("sample-dev" + DOT))  # z works on a page too
 
     def test_z_without_a_pane_id_uses_the_strip_the_state_file_records(self):
         fake_herdr.add_pane(self.world, "w2:p9", "w2", self.repo, created=True)
@@ -161,13 +161,13 @@ class Navigation(PageCase):
         for title in self.titles():
             if not titles or titles[-1] != title:
                 titles.append(title)
-        heads = [t.split(DOT)[0] if not t.startswith("fablyn" + DOT) else
+        heads = [t.split(DOT)[0] if not t.startswith("sample" + DOT) else
                  ("fleet" if t.endswith(DOT + "fleet") else "board") for t in titles]
-        self.assertEqual(heads, ["board", "fablyn-dev", "board", "fleet", "board", "owner", "board"])
+        self.assertEqual(heads, ["board", "sample-dev", "board", "fleet", "board", "owner", "board"])
         self.assertFalse(self.argvs("agent", "focus"))  # a click opens; it never focuses
 
     def test_the_owner_cell_is_where_its_text_is(self):
-        model = B.Board(fleet="fablyn", watching=60)
+        model = B.Board(fleet="sample", watching=60)
         left, _, (start, end) = B.header_layout(model, 162)
         self.assertEqual(left[start:end], "owner: nothing")
         self.assertEqual(B.hit_test(model, 162, 6, 0, start), ("owner",))
@@ -181,40 +181,40 @@ class Navigation(PageCase):
 
 class SeatPages(PageCase):
     def busy_dev(self):
-        """fablyn-dev: working on a task, two messages queued (one on refusal), owing the
+        """sample-dev: working on a task, two messages queued (one on refusal), owing the
         orchestrator a reply and owed one by the reviewer, a kickoff in its past."""
         self.status_of("w2:p2", "working")
         fake_herdr.set_title(self.world, "w2:p2", "vitest run")
-        messages.append(self.repo, messages.make_entry("herdr-fleet", "fablyn-dev", "kickoff", "you are fablyn-dev",
+        messages.append(self.repo, messages.make_entry("herdr-fleet", "sample-dev", "kickoff", "you are sample-dev",
                                                        time=inbox.iso_local(ago(minutes=30))))
-        self.asked = self.message("fablyn-orchestrator", "fablyn-dev", "ROUND 1: please review", minutes=20)
-        self.owed = self.message("fablyn-dev", "fablyn-reviewer", "check the ocean tick", minutes=15)
-        self.first = self.message("fablyn-orchestrator", "fablyn-dev", "two 1.30.4 items\nthe rect floor", minutes=4,
+        self.asked = self.message("sample-orchestrator", "sample-dev", "Please review this patch", minutes=20)
+        self.owed = self.message("sample-dev", "sample-reviewer", "check parser output", minutes=15)
+        self.first = self.message("sample-orchestrator", "sample-dev", "Review parser tests\nthe parser branch", minutes=4,
                                   box_=NEW, delivery="queued", queued_by="refusal")
-        self.second = self.message("fablyn-orchestrator", "fablyn-dev", "and bump the registry", minutes=3,
+        self.second = self.message("sample-orchestrator", "sample-dev", "then report test results", minutes=3,
                                    box_=NEW, delivery="queued", queued_by="queue")
 
     def test_the_sections(self):
         self.busy_dev()
         self.page(["2"])
-        page = self.draw_titled("fablyn-dev" + DOT)
-        self.assertEqual(page[0], "fablyn-dev \u00b7 \u25cf working <1m \u00b7 claude \u00b7 w2:p2")
+        page = self.draw_titled("sample-dev" + DOT)
+        self.assertEqual(page[0], "sample-dev \u00b7 \u25cf working <1m \u00b7 claude \u00b7 w2:p2")
         body = page[1:-1]
         labels = [line[:10].strip() for line in body if line[:10].strip()]
         self.assertEqual(labels, ["doing", "queue", "debts", "recent"])
         self.assertEqual(body[0], "doing     vitest run")
-        self.assertRegex(body[1], r'^queue     #%s %s from fablyn-orchestrator \[on refusal\]  "two 1\.30\.4 items"$'
+        self.assertRegex(body[1], r'^queue     #%s %s from sample-orchestrator \[on refusal\]  "Review parser tests"$'
                          % (inbox.short_of(self.first), HHMM))
-        self.assertRegex(body[2], r'^          #%s %s from fablyn-orchestrator \[queued\]  "and bump the registry"$'
+        self.assertRegex(body[2], r'^          #%s %s from sample-orchestrator \[queued\]  "then report test results"$'
                          % (inbox.short_of(self.second), HHMM))
-        self.assertRegex(body[3], r'^debts     owes fablyn-orchestrator since %s \(#%s\)  "ROUND 1: please review"$'
+        self.assertRegex(body[3], r'^debts     owes sample-orchestrator since %s \(#%s\)  "Please review this patch"$'
                          % (HHMM, inbox.short_of(self.asked)))
-        self.assertRegex(body[4], r'^          owed by fablyn-reviewer since %s \(#%s\)  "check the ocean tick"$'
+        self.assertRegex(body[4], r'^          owed by sample-reviewer since %s \(#%s\)  "check parser output"$'
                          % (HHMM, inbox.short_of(self.owed)))
         recent = [line[10:] for line in body[5:] if line]
-        self.assertRegex(recent[0], r'^%s \u2190 fablyn-orchestrator #%s queued  "and bump the registry"$'
+        self.assertRegex(recent[0], r'^%s \u2190 sample-orchestrator #%s queued  "then report test results"$'
                          % (HHMM, inbox.short_of(self.second)))
-        self.assertRegex(recent[2], r'^%s \u2192 fablyn-reviewer #%s sent  "check the ocean tick"$'
+        self.assertRegex(recent[2], r'^%s \u2192 sample-reviewer #%s sent  "check parser output"$'
                          % (HHMM, inbox.short_of(self.owed)))
         self.assertRegex(recent[-1], r"^%s kickoff$" % HHMM)
         self.assertFalse(self.argvs("agent", "read"))  # no screen without p
@@ -223,9 +223,9 @@ class SeatPages(PageCase):
         fake_herdr.set_screen(self.world, "w2:p1", PERMISSION)
         self.status_of("w2:p1", "blocked")
         self.page(["3", "esc", "1"])
-        reviewer = self.draw_titled("fablyn-reviewer" + DOT)
+        reviewer = self.draw_titled("sample-reviewer" + DOT)
         self.assertEqual([line for line in reviewer[1:-1] if line], [])  # nothing to show
-        orch = self.draw_titled("fablyn-orchestrator" + DOT)
+        orch = self.draw_titled("sample-orchestrator" + DOT)
         self.assertEqual(orch[1:5], ["dialog    Allow Bash(pnpm test)?", "          \u276f 1. Yes",
                                      "          2. Yes, and don't ask again for pnpm test commands",
                                      "          3. No, and tell Claude what to do differently"])
@@ -233,10 +233,10 @@ class SeatPages(PageCase):
 
     def test_scrolling(self):
         for minute in range(30, 5, -1):
-            self.message("fablyn-orchestrator", "fablyn-reviewer", "note %d" % minute, minutes=minute, fyi=True)
+            self.message("sample-orchestrator", "sample-reviewer", "note %d" % minute, minutes=minute, fyi=True)
         self.page(["3"] + ["down"] * 7 + ["pagedown", "pageup"], size=(162, 8))
         draws = [self.screen.text(i) for i in range(len(self.screen.draws)) if self.titles()[i].startswith(
-            "fablyn-reviewer" + DOT)]
+            "sample-reviewer" + DOT)]
         self.assertEqual(draws[0][1][:10], "recent    ")  # the top of the page
         self.assertRegex(draws[0][1], r'"note 6"$')    # newest first
         tops = [re.search(r'"(note \d+)"', d[1]).group(1) for d in draws]
@@ -251,8 +251,8 @@ class SeatPages(PageCase):
         fake_herdr.set_screen(self.world, "w2:p2", "\u23fa ran the tests\n  12 passed\n" + fake_herdr.prompt_screen(
             "claude"))
         self.page(["2", "p", "esc", "2"])
-        self.assertEqual(self.argvs("agent", "read"), [["agent", "read", "fablyn-dev", "--lines", "12"]])
-        with_screen = self.draw_titled("fablyn-dev" + DOT, last=False)
+        self.assertEqual(self.argvs("agent", "read"), [["agent", "read", "sample-dev", "--lines", "12"]])
+        with_screen = self.draw_titled("sample-dev" + DOT, last=False)
         shown = [i for i in range(len(self.screen.draws)) if any(
             line.startswith("screen    ") for line in self.screen.text(i))]
         self.assertTrue(shown)
@@ -261,41 +261,41 @@ class SeatPages(PageCase):
         self.assertEqual(lines[at], "screen    \u23fa ran the tests")
         self.assertEqual(lines[at + 1], "            12 passed")
         self.assertTrue(with_screen)
-        reopened = self.draw_titled("fablyn-dev" + DOT)  # the last draw: the page opened again
+        reopened = self.draw_titled("sample-dev" + DOT)  # the last draw: the page opened again
         self.assertFalse(any(line.startswith("screen") for line in reopened))
 
     def test_a_acks_the_selected_debt(self):
         self.busy_dev()
         self.page(["2", "a", "down", "down", "a", "y"])  # the first queued message starts selected
         self.assertIn("select a debt with \u2191 and \u2193 first", self.footers())
-        self.assertTrue(any(re.match(r"^ack #%s \(fablyn-dev owes fablyn-orchestrator \d+m\)\? y/n$"
+        self.assertTrue(any(re.match(r"^ack #%s \(sample-dev owes sample-orchestrator \d+m\)\? y/n$"
                                      % inbox.short_of(self.asked), f) for f in self.footers()), self.footers())
         (ack,) = [e for e in log_entries(self.repo) if e["kind"] == "ack"]
         self.assertEqual((ack["id"], ack["by"], ack["reason"], ack["from"]),
-                         (self.asked, "owner", "from the board", "fablyn-dev"))
-        page = self.draw_titled("fablyn-dev" + DOT)
-        self.assertFalse(any("owes fablyn-orchestrator" in line for line in page))  # settled, on the reload
+                         (self.asked, "owner", "from the board", "sample-dev"))
+        page = self.draw_titled("sample-dev" + DOT)
+        self.assertFalse(any("owes sample-orchestrator" in line for line in page))  # settled, on the reload
         self.assertFalse(self.argvs("agent", "prompt"))
 
 
 class Deliver(PageCase):
     def queued(self, to):
-        return self.message("fablyn-orchestrator" if to != "fablyn-orchestrator" else "fablyn-dev", to, "a task",
+        return self.message("sample-orchestrator" if to != "sample-orchestrator" else "sample-dev", to, "a task",
                             box_=NEW, delivery="queued", queued_by="refusal")
 
     def test_d_delivers_an_idle_seats_queue_at_once(self):
-        ident = self.queued("fablyn-reviewer")
+        ident = self.queued("sample-reviewer")
         self.page(["3", "d"])
-        self.assertEqual(len(self.prompts_to("fablyn-reviewer")), 1)
-        self.assertEqual(box(self.repo, "fablyn-reviewer", NEW), [])
-        self.assertIn("delivered 1 to fablyn-reviewer", self.watch_log())
-        self.assertNotIn("fablyn-reviewer idle; delivering 1", self.watch_log())  # no debounce
-        page = self.draw_titled("fablyn-reviewer" + DOT)
+        self.assertEqual(len(self.prompts_to("sample-reviewer")), 1)
+        self.assertEqual(box(self.repo, "sample-reviewer", NEW), [])
+        self.assertIn("delivered 1 to sample-reviewer", self.watch_log())
+        self.assertNotIn("sample-reviewer idle; delivering 1", self.watch_log())  # no debounce
+        page = self.draw_titled("sample-reviewer" + DOT)
         self.assertFalse(any(line.startswith("queue") for line in page))
         self.assertTrue(any("delivered via watch" in line and inbox.short_of(ident) in line for line in page))
 
     def test_every_reason_d_gives_for_not_delivering(self):
-        for name, pane in (("fablyn-dev", "w2:p2"), ("fablyn-orchestrator", "w2:p1")):
+        for name, pane in (("sample-dev", "w2:p2"), ("sample-orchestrator", "w2:p1")):
             self.queued(name)
         self.status_of("w2:p2", "working")
         self.status_of("w2:p1", "blocked")
@@ -310,16 +310,16 @@ class Deliver(PageCase):
         self.page(["2", "d"])
         self.assertIn("owner typing", self.footers())
         self.world["panes"]["w2:p3"]["agent"] = None
-        self.queued("fablyn-reviewer")
+        self.queued("sample-reviewer")
         self.page(["3", "d"])
         self.assertIn("absent: its next kickoff carries the queue", self.footers())
         self.page(["1", "esc", "o", "esc", "2", "right", "right", "right", "d"])
-        self.assertFalse(self.prompts_to("fablyn-dev") + self.prompts_to("fablyn-orchestrator")
-                         + self.prompts_to("fablyn-reviewer"))
+        self.assertFalse(self.prompts_to("sample-dev") + self.prompts_to("sample-orchestrator")
+                         + self.prompts_to("sample-reviewer"))
 
     def test_nothing_queued(self):
         self.page(["2", "d"])
-        self.assertIn("nothing queued for fablyn-dev", self.footers())
+        self.assertIn("nothing queued for sample-dev", self.footers())
 
 
 # -- 25.3: the fleet, owner and contact pages -------------------------------------------------------------
@@ -327,20 +327,20 @@ class Deliver(PageCase):
 
 class OtherPages(PageCase):
     def test_the_fleet_page(self):
-        self.message("fablyn-orchestrator", "fablyn-dev", "please review", minutes=50)
-        self.message("fablyn-orchestrator", "fablyn-dev", "queued work", box_=NEW, delivery="queued",
+        self.message("sample-orchestrator", "sample-dev", "please review", minutes=50)
+        self.message("sample-orchestrator", "sample-dev", "queued work", box_=NEW, delivery="queued",
                      queued_by="queue")
         code, _, err = self.page(["up", "enter"], size=(162, 24))
         self.assertEqual(code, 0, err)
-        page = self.draw_titled("fablyn" + DOT + "fleet")
+        page = self.draw_titled("sample" + DOT + "fleet")
         self.assertEqual(page[1], "fleet file  %s" % os.path.join(self.repo, ".herdr", "fleet.toml"))
-        self.assertEqual(page[2], "workspace   fablyn (w2)")
+        self.assertEqual(page[2], "workspace   sample (w2)")
         self.assertEqual(page[3], "layout      chain")  # design 26.7: mode, and `top` when set
         self.assertRegex(page[4], r"^watcher     pid %d \u00b7 up <1m \u00b7 lock \.herdr/watch\.lock since %s$"
                          % (os.getpid(), HHMM))
         self.assertEqual(page[5], "waiting on  nothing")  # waits time out at once on the fake
-        self.assertIn("awaiting: fablyn-dev owes fablyn-orchestrator for 50m", "\n".join(page))
-        self.assertIn("queued: fablyn-dev 1", page)
+        self.assertIn("awaiting: sample-dev owes sample-orchestrator for 50m", "\n".join(page))
+        self.assertIn("queued: sample-dev 1", page)
         self.assertIn("drift, worktrees, hooks and doctor's checks: herdr-fleet status, herdr-fleet doctor", page)
         at = next(i for i, line in enumerate(page) if line.startswith("\u2500\u2500 .herdr/watch.log"))
         self.assertRegex(page[at + 1], r"^\d\d:\d\d:\d\d  watching ")
@@ -348,46 +348,46 @@ class OtherPages(PageCase):
         self.assertFalse(self.argvs("pane", "process-info"))  # drift is not read (invariant 22)
 
     def test_the_owner_page_and_its_cell(self):
-        old = self.message("fablyn-dev", "owner", "1.28.0 shipped", minutes=40)
-        fyi = self.message("fablyn-reviewer", "owner", "FYI: review done", minutes=20, fyi=True)
+        old = self.message("sample-dev", "owner", "Example saved", minutes=40)
+        fyi = self.message("sample-reviewer", "owner", "FYI: review done", minutes=20, fyi=True)
         messages.append(self.repo, {"time": inbox.iso_local(ago(minutes=10)), "from": WINNER, "to": "owner",
                                     "kind": "send", "bytes": 9, "first_line": "an old one", "delivery": "sent"})
         code, _, err = self.page(["o", "a", "y", "down", "a", "down", "enter"], size=(162, 12))
         self.assertEqual(code, 0, err)
         board_draw = self.screen.text(0)
-        self.assertRegex(board_draw[0], r'owner: %s from winner-chronicles "an old one"' % HHMM)  # the newest
+        self.assertRegex(board_draw[0], r'owner: %s from partner-workspace "an old one"' % HHMM)  # the newest
         page = self.draw_titled("owner" + DOT, last=False)
         self.assertEqual(page[0], "owner \u00b7 3 messages")
-        self.assertRegex(page[1], r'^%s \(no id\) from winner-chronicles sent  "an old one"$' % HHMM)
-        self.assertRegex(page[2], r'^%s #%s from fablyn-reviewer sent  "FYI: review done"$' % (HHMM,
+        self.assertRegex(page[1], r'^%s \(no id\) from partner-workspace sent  "an old one"$' % HHMM)
+        self.assertRegex(page[2], r'^%s #%s from sample-reviewer sent  "FYI: review done"$' % (HHMM,
                                                                                                inbox.short_of(fyi)))
-        self.assertRegex(page[3], r'^%s #%s from fablyn-dev sent, owed  "1\.28\.0 shipped"$' % (HHMM,
+        self.assertRegex(page[3], r'^%s #%s from sample-dev sent, owed  "Example saved"$' % (HHMM,
                                                                                                 inbox.short_of(old)))
         self.assertIn("a message without an id: ack it by name (herdr-fleet ack NAME)", self.footers())
         self.assertIn("#%s: nothing owed (an FYI, answered, or not delivered)" % inbox.short_of(fyi), self.footers())
         self.assertFalse([e for e in log_entries(self.repo) if e["kind"] == "ack"])
         body = self.draw_titled("#%s" % inbox.short_of(old))
-        self.assertRegex(body[0], r"^#%s \u00b7 %s \u00b7 fablyn-dev \u2192 owner \u00b7 sent \u00b7 14 B$"
+        self.assertRegex(body[0], r"^#%s \u00b7 %s \u00b7 sample-dev \u2192 owner \u00b7 sent \u00b7 13 B$"
                          % (inbox.short_of(old), HHMM))
-        self.assertEqual(body[1], "1.28.0 shipped")
+        self.assertEqual(body[1], "Example saved")
 
     def test_acking_an_owner_debt(self):
-        old = self.message("fablyn-dev", "owner", "1.28.0 shipped", minutes=40)
+        old = self.message("sample-dev", "owner", "Example saved", minutes=40)
         self.page(["o", "down", "a", "y"])
         (ack,) = [e for e in log_entries(self.repo) if e["kind"] == "ack"]
-        self.assertEqual((ack["id"], ack["from"], ack["to"], ack["by"]), (old, "owner", "fablyn-dev", "owner"))
+        self.assertEqual((ack["id"], ack["from"], ack["to"], ack["by"]), (old, "owner", "sample-dev", "owner"))
 
     def test_a_contact_page(self):
         self.contact()
-        sent = self.message("fablyn-dev", WINNER, "your 1.28 build is live", minutes=9)
-        got = self.message(WINNER, "fablyn-dev", "thanks, verified", minutes=4)
+        sent = self.message("sample-dev", WINNER, "the example is ready", minutes=9)
+        got = self.message(WINNER, "sample-dev", "thanks, verified", minutes=4)
         self.page(["down", "down", "down", "enter", "enter"], size=(162, 12))  # the newest message preselected
         page = self.draw_titled("\u2194 " + WINNER + DOT, last=False)
-        self.assertEqual(page[0], "\u2194 winner-chronicles \u00b7 contact of this fleet \u00b7 \u25cb idle <1m "
+        self.assertEqual(page[0], "\u2194 partner-workspace \u00b7 contact of this fleet \u00b7 \u25cb idle <1m "
                                   "\u00b7 w3:p4")
-        self.assertRegex(page[1], r'^messages  %s \u2192 fablyn-dev #%s sent  "thanks, verified"$'
+        self.assertRegex(page[1], r'^messages  %s \u2192 sample-dev #%s sent  "thanks, verified"$'
                          % (HHMM, inbox.short_of(got)))
-        self.assertRegex(page[2], r'^          %s \u2190 fablyn-dev #%s sent  "your 1\.28 build is live"$'
+        self.assertRegex(page[2], r'^          %s \u2190 sample-dev #%s sent  "the example is ready"$'
                          % (HHMM, inbox.short_of(sent)))
         self.assertTrue(page[-1].endswith(B.HINTS_CONTACT))
         body = self.draw_titled("#%s" % inbox.short_of(got))
@@ -400,13 +400,13 @@ class OtherPages(PageCase):
 class Bodies(PageCase):
     def test_a_stored_body_long_and_scrolled(self):
         text = "\n".join("line %02d of the review" % n for n in range(1, 41)) + "\n"
-        ident = self.message("fablyn-orchestrator", "fablyn-dev", text, box_=NEW, delivery="queued",
+        ident = self.message("sample-orchestrator", "sample-dev", text, box_=NEW, delivery="queued",
                              queued_by="refusal")
         self.page(["2", "enter", "down", "down", "pagedown", "pagedown", "pageup", "esc", "esc"],
                   size=(100, 8))
         title = "#%s" % inbox.short_of(ident)
         draws = [self.screen.text(i) for i in range(len(self.screen.draws)) if self.titles()[i].startswith(title)]
-        self.assertRegex(draws[0][0], r"^#%s \u00b7 %s \u00b7 fablyn-orchestrator \u2192 fablyn-dev \u00b7 queued "
+        self.assertRegex(draws[0][0], r"^#%s \u00b7 %s \u00b7 sample-orchestrator \u2192 sample-dev \u00b7 queued "
                          r"\(on refusal\) \u00b7 \d+ B$" % (inbox.short_of(ident), HHMM))
         firsts = [d[1] for d in draws]
         self.assertEqual(firsts[0], "line 01 of the review")
@@ -414,22 +414,22 @@ class Bodies(PageCase):
         self.assertIn("line 15 of the review", firsts)   # two pages further (six lines a page)
         self.assertIn("line 09 of the review", firsts)   # and one back
         self.assertTrue(draws[0][-1].endswith(B.HINTS_BODY))
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [ident])  # reading it moved nothing
-        self.assertTrue(self.titles()[-1].startswith("fablyn" + DOT))   # two Esc: back on the board
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [ident])  # reading it moved nothing
+        self.assertTrue(self.titles()[-1].startswith("sample" + DOT))   # two Esc: back on the board
 
     def test_a_body_line_is_cut_never_wrapped(self):
-        self.message("fablyn-orchestrator", "fablyn-dev", "x" * 300, box_=NEW, delivery="queued", queued_by="queue")
+        self.message("sample-orchestrator", "sample-dev", "x" * 300, box_=NEW, delivery="queued", queued_by="queue")
         self.page(["2", "enter"], size=(60, 8))
         body = self.screen.text()
         self.assertEqual(body[1], "x" * 59 + "\u2026")
 
     def test_a_log_only_message(self):
-        messages.append(self.repo, {"time": inbox.iso_local(ago(minutes=8)), "from": "fablyn-orchestrator",
-                                    "to": "fablyn-dev", "kind": "send", "bytes": 20, "first_line": "from before 0.6",
+        messages.append(self.repo, {"time": inbox.iso_local(ago(minutes=8)), "from": "sample-orchestrator",
+                                    "to": "sample-dev", "kind": "send", "bytes": 20, "first_line": "from before 0.6",
                                     "delivery": "sent"})
         self.page(["2", "down", "enter"])  # its debt is preselected; the recent entry below it
         body = self.screen.text()
-        self.assertRegex(body[0], r"^\(no id\) \u00b7 %s \u00b7 fablyn-orchestrator \u2192 fablyn-dev \u00b7 sent$"
+        self.assertRegex(body[0], r"^\(no id\) \u00b7 %s \u00b7 sample-orchestrator \u2192 sample-dev \u00b7 sent$"
                          % HHMM)
         self.assertEqual(body[1:3], ["from before 0.6", "(no stored body)"])
 
@@ -439,7 +439,7 @@ class Bodies(PageCase):
 
 class Hints(unittest.TestCase):
     def test_hints_are_cut_from_the_right_at_every_breakpoint(self):
-        footer = B.Footer(event=B.Event("08:02", "delivered 2 to fablyn-dev"))
+        footer = B.Footer(event=B.Event("08:02", "delivered 2 to sample-dev"))
         for hints in (B.HINTS_BOARD, B.HINTS_SEAT, B.HINTS_BODY, B.HINTS_FLEET, B.HINTS_OWNER, B.HINTS_CONTACT):
             items = hints.split(DOT)
             for width in (162, 120, 90, 60, 40, 20):
@@ -456,8 +456,8 @@ class Hints(unittest.TestCase):
                     self.assertTrue(shown.startswith("08:02 deliv"))
         self.assertEqual(B.fit_hints(B.HINTS_SEAT, 25), "Esc back \u00b7 \u2191\u2193 scroll")
         self.assertEqual(B.fit_hints(B.HINTS_SEAT, 3), "")
-        notice = B.footer_spans(40, B.Footer(notice="ack #62437b (a owes b 2h)? y/n"), B.HINTS_BOARD, 0, True)
-        self.assertEqual("".join(t for t, _ in notice).rstrip(), "ack #62437b (a owes b 2h)? y/n")  # no hints
+        notice = B.footer_spans(40, B.Footer(notice="ack #103002 (a owes b 2h)? y/n"), B.HINTS_BOARD, 0, True)
+        self.assertEqual("".join(t for t, _ in notice).rstrip(), "ack #103002 (a owes b 2h)? y/n")  # no hints
 
     def test_the_view_hints_are_25_1s(self):
         self.assertEqual(B.HINTS_BOARD, "Enter open \u00b7 g go \u00b7 a ack \u00b7 d deliver \u00b7 z zoom \u00b7 "
@@ -486,11 +486,11 @@ class Harness(PageCase):
 
     def test_read_zoom_and_focus_rules(self):
         watch_ = {"command": ["watch"]}
-        idle = {"argv": ["agent", "list"], "exit": 0, "info": {"states": {"fablyn-dev": "idle"}}}
-        read = {"argv": ["agent", "read", "fablyn-dev", "--lines", "12"], "exit": 0, "info": {}}
+        idle = {"argv": ["agent", "list"], "exit": 0, "info": {"states": {"sample-dev": "idle"}}}
+        read = {"argv": ["agent", "read", "sample-dev", "--lines", "12"], "exit": 0, "info": {}}
         zoom = {"argv": ["pane", "zoom", "w1:p1", "--toggle"], "exit": 0, "info": {"own": True}}
         strip = {"argv": ["pane", "zoom", "w2:p9", "--toggle"], "exit": 0, "info": {"plugin": "watch"}}
-        focus = {"argv": ["agent", "focus", "fablyn-dev"], "exit": 0, "info": {}}
+        focus = {"argv": ["agent", "focus", "sample-dev"], "exit": 0, "info": {}}
         self.write_log(watch_, idle, {"key": "p"}, read, {"key": "z"}, zoom, {"key": "z"}, strip,
                        {"key": "g"}, focus, {"key": "3"}, focus)
         self.assert_safety()  # the allowed shapes pass
@@ -520,14 +520,14 @@ class Polish(PageCase):
         first = self.screen.draws[0]
         self.assertTrue(all("reverse" in style for _, style in first[1]))     # the first seat row
         self.assertFalse(any("reverse" in style for _, style in first[0]))    # not the header
-        self.assertTrue(self.titles()[-1].startswith("fablyn-dev" + DOT))
+        self.assertTrue(self.titles()[-1].startswith("sample-dev" + DOT))
 
     def test_pages_open_with_their_first_entry_selected(self):
         self.contact()
-        queued = self.message("fablyn-orchestrator", "fablyn-dev", "a queued task", box_=NEW, delivery="queued",
+        queued = self.message("sample-orchestrator", "sample-dev", "a queued task", box_=NEW, delivery="queued",
                               queued_by="refusal")
-        to_owner = self.message("fablyn-dev", "owner", "for you", minutes=2)
-        said = self.message(WINNER, "fablyn-dev", "from the contact", minutes=1)
+        to_owner = self.message("sample-dev", "owner", "for you", minutes=2)
+        said = self.message(WINNER, "sample-dev", "from the contact", minutes=1)
         self.page(["2", "enter", "esc", "esc", "o", "enter", "esc", "esc", "down", "down", "down", "enter", "enter"])
         opened = [t.split(DOT)[0] for t in self.titles() if t.startswith("#")]
         self.assertEqual(sorted(set(opened), key=opened.index),

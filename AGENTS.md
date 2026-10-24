@@ -12,12 +12,16 @@ A herdr plugin that starts and manages a team of named coding agents from a per-
 
 ## Build and test
 
-There is no build step. Run the tests under both interpreters before handing work back:
+There is no build step. Run the suite with an available Python below 3.11 and one at or above 3.11 before handing work back; substitute their absolute paths when needed:
 
 ```bash
-/usr/bin/python3 -m unittest discover -s tests -v            # 3.9, vendored tomli
-/opt/homebrew/bin/python3.12 -m unittest discover -s tests -v
-/usr/bin/python3 -m compileall -q herdr_fleet bin/herdr-fleet
+python3.9 -m unittest discover -s tests -v    # vendored tomli
+python3.12 -m unittest discover -s tests -v   # standard-library tomllib
+python3 -m compileall -q herdr_fleet bin/herdr-fleet
 ```
 
 Tests use the fake herdr in `tests/fake_herdr.py`; never point them at a live herdr. `tests/support.py` checks every test's call log against the safety invariants of design section 7, so a new scenario is automatically a safety test (since 0.11.0 it also fails a `pane rename` of a pane that hosts no seat or to a name other than that seat's, and an `agent focus` not run by `go` or `menu`; since 0.12.0 any `agent send-keys` but one `enter` from restart, swap or down right after an `agent read` that showed the highlighted exit confirmation, the kind's interrupt keys from `interrupt` to a seat working at its last `agent get` whose screen it read, or one `ctrl+u` from `interrupt` after an `agent read` that showed text in the input, and any from watch, menu, deliver or a dry run, and any `agent prompt` to a pane whose prompt line held text, focused or not; script it with `fake_herdr.exit_dialog_on_quit`, `show_exit_dialog`, `interrupt_results` and `restore_prompt_on_interrupt`; since 0.13.0 an `agent focus` from `watch` that does not follow a `g` or a number key replayed by the fake screen, a `pane zoom` that does not follow a `z` or is not on the strip's own pane, one per key, and an `agent read` from `watch` of anything but a seat whose state at the command's last `agent list` was `blocked`, unless right after a `p`; drive the board with `tui.FakeScreen(keys, on_key=self.log_key)`, `watch.is_terminal` and `tui.open_screen` patched, as `tests/test_section24.py` and `tests/test_section25.py` do); only prompts issued by `send --now` and `deliver --now` may reach a `working` agent (`support.typed_ahead_allowed`), and no prompt may reach a pane the fake recorded as the owner's with text on its prompt line or no prompt line on screen (`owner_typing`; script it with `fake_herdr.focus`, `type_in` and `show_dialog`). For manual validation, follow the current scratch-fleet workflow in `docs/testing.md`; historical release evidence lives in `docs/design.md`. Live smoke tests are run by the designer or owner, never by the test suite. For starter examples or contact-capacity changes, follow design section 27 and `tests/test_section27.py`: seats and contacts share board capacity and every hidden row counts in `+N more`.
+
+## Public examples and publication
+
+For example, fixture or documentation changes, use the synthetic `examples/team` identifiers and paths. Review the whole tracked tree for deployment details and copied operational text (design section 28). The root `.herdr/` is local development configuration; leave its files on disk and keep it outside the public tree. Preserve public package identity, upstream credits and licence attribution. Current-tree checks do not sanitize old Git history or authorize publication.

@@ -12,12 +12,12 @@ python3 -m unittest discover -s tests -v
 python3 -m compileall -q herdr_fleet bin/herdr-fleet
 ```
 
-Python 3.8 or newer is supported. Exercise both a Python below 3.11 (vendored `tomli`) and one at or above 3.11 (`tomllib`) when available. On the maintainer's Mac, all three of these are required before a handover:
+Python 3.8 or newer is supported. Exercise both a Python below 3.11 (vendored `tomli`) and one at or above 3.11 (`tomllib`) when available. For a handover, exercise both parsing paths when these interpreters are available (or use their equivalent absolute paths):
 
 ```bash
-/usr/bin/python3 -m unittest discover -s tests -v
-/opt/homebrew/bin/python3.12 -m unittest discover -s tests -v
-/usr/bin/python3 -m compileall -q herdr_fleet bin/herdr-fleet
+python3.9 -m unittest discover -s tests -v
+python3.12 -m unittest discover -s tests -v
+python3 -m compileall -q herdr_fleet bin/herdr-fleet
 ```
 
 Quote the actual test count, failures/skips, interpreter and command from each run. Compilation is a separate exit-status check, not another test count. Test duration depends on the machine and subprocess workload; use the measured result rather than a fixed estimate.

@@ -22,36 +22,36 @@ from herdr_fleet.fleetfile import TOP_RATIO, FleetError, load_fleet
 from herdr_fleet.layout import STRIP, band_plan, band_ratio, describe_shape, is_top_band, placeholder
 from herdr_fleet.scaffold import STARTER_FLEET
 
-TOP = "fablyn-orchestrator"
-TOP_LAYOUT = '[layout]\nmode = "grid"\ntop = "fablyn-orchestrator"\n'
-NO_LABEL = FOUR_SEATS.replace('workspace = "fablyn"\n', "")
+TOP = "sample-orchestrator"
+TOP_LAYOUT = '[layout]\nmode = "grid"\ntop = "sample-orchestrator"\n'
+NO_LABEL = FOUR_SEATS.replace('workspace = "sample"\n', "")
 # The orchestrator last in the file (herdup's rule), with an env of its own: the band does not
 # depend on where the top seat sits in the file.
 TOP_LAST = """
-workspace = "fablyn"
+workspace = "sample"
 
 [[agents]]
-name = "fablyn-dev"
+name = "sample-dev"
 kind = "claude"
 args = ["--model", "claude-opus-5-5"]
 
 [[agents]]
-name = "fablyn-reviewer"
+name = "sample-reviewer"
 kind = "codex"
 args = ["-m", "gpt-6-astra"]
 
 [[agents]]
-name = "fablyn-designer"
+name = "sample-designer"
 kind = "claude"
 args = ["--model", "claude-opus-5-5"]
 
 [[agents]]
-name = "fablyn-orchestrator"
+name = "sample-orchestrator"
 kind = "claude"
 args = ["--model", "claude-opus-5-5"]
-env = { FABLYN_ROLE = "orchestrator" }
+env = { SAMPLE_ROLE = "orchestrator" }
 """
-EXAMPLE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "fablyn", ".herdr",
+EXAMPLE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "team", ".herdr",
                        "fleet.toml")
 
 
@@ -109,8 +109,8 @@ class BandPlan(unittest.TestCase):
     def test_order_strip_then_the_grids_first_seat_then_the_grid(self):
         plan = band_plan(TOP, [TOP, "dev", "reviewer", "designer"], None, 0.3, 0.2)
         self.assertEqual([(s.seat, s.source, s.direction, s.ratio) for s in plan], [
-            (STRIP, "<pane of fablyn-orchestrator>", "down", 0.8),
-            ("dev", "<pane of fablyn-orchestrator>", "down", 0.375),
+            (STRIP, "<pane of sample-orchestrator>", "down", 0.8),
+            ("dev", "<pane of sample-orchestrator>", "down", 0.375),
             ("designer", "<pane of dev>", "right", 0.5),
             ("reviewer", "<pane of dev>", "down", 0.5),
         ])
@@ -118,7 +118,7 @@ class BandPlan(unittest.TestCase):
     def test_without_a_strip_the_band_keeps_top_ratio_itself(self):
         plan = band_plan(TOP, ["dev", "reviewer"], None, 0.3, None)
         self.assertEqual([(s.seat, s.source, s.ratio) for s in plan],
-                         [("dev", "<pane of fablyn-orchestrator>", 0.3), ("reviewer", "<pane of dev>", 0.5)])
+                         [("dev", "<pane of sample-orchestrator>", 0.3), ("reviewer", "<pane of dev>", 0.5)])
 
     def test_the_top_seat_alone_is_a_band_and_an_empty_grid(self):
         self.assertEqual(band_plan(TOP, [TOP], None, 0.3, 0.2), [layout.Split(STRIP, placeholder(TOP), "down", 0.8)])
@@ -133,12 +133,12 @@ class BandPlan(unittest.TestCase):
         self.assertEqual(layout.clamp_ratio(0.05), 0.1)
 
     def test_describe_shape(self):
-        names = [TOP, "fablyn-dev", "fablyn-reviewer", "fablyn-designer"]
+        names = [TOP, "sample-dev", "sample-reviewer", "sample-designer"]
         self.assertEqual(describe_shape(names, None, top=TOP),
-                         "top: fablyn-orchestrator, then 3 seats in 2 columns (2+1)")
+                         "top: sample-orchestrator, then 3 seats in 2 columns (2+1)")
         self.assertEqual(describe_shape(names[1:], 3, top=TOP),
-                         "top: fablyn-orchestrator, then 3 seats in 3 columns (1+1+1)")
-        self.assertEqual(describe_shape([TOP], None, top=TOP), "top: fablyn-orchestrator, then no other seats")
+                         "top: sample-orchestrator, then 3 seats in 3 columns (1+1+1)")
+        self.assertEqual(describe_shape([TOP], None, top=TOP), "top: sample-orchestrator, then no other seats")
         self.assertEqual(describe_shape(names, None), "4 seats in 2 columns (2+2)")  # unchanged without top
 
     def test_is_top_band(self):
@@ -171,18 +171,18 @@ class FleetFile(GridCase):
         self.assertEqual((fleet.top, fleet.top_ratio), (None, 0.3))
 
     def test_unknown_seat_is_an_error(self):
-        text = self.errors(grid_fleet(FOUR_SEATS, '[layout]\nmode = "grid"\ntop = "fablyn-boss"\n'))
-        self.assertIn("layout.top: 'fablyn-boss' is not a seat in this file (seats: fablyn-orchestrator, fablyn-dev, "
-                      "fablyn-reviewer, fablyn-designer)", text)
+        text = self.errors(grid_fleet(FOUR_SEATS, '[layout]\nmode = "grid"\ntop = "sample-boss"\n'))
+        self.assertIn("layout.top: 'sample-boss' is not a seat in this file (seats: sample-orchestrator, sample-dev, "
+                      "sample-reviewer, sample-designer)", text)
         code, _, err = self.run_cli("up")
         self.assertEqual(code, 2)
         self.assertIn("is not a seat in this file", err)
         self.assertEqual(self.argvs("workspace", "create"), [])
 
     def test_chain_mode_is_an_error(self):
-        text = self.errors(grid_fleet(FOUR_SEATS, '[layout]\ntop = "fablyn-orchestrator"\n'))
+        text = self.errors(grid_fleet(FOUR_SEATS, '[layout]\ntop = "sample-orchestrator"\n'))
         self.assertIn('layout.top needs mode = "grid"', text)
-        text = self.errors(grid_fleet(FOUR_SEATS, '[layout]\nmode = "chain"\ntop = "fablyn-orchestrator"\n'))
+        text = self.errors(grid_fleet(FOUR_SEATS, '[layout]\nmode = "chain"\ntop = "sample-orchestrator"\n'))
         self.assertIn('layout.top needs mode = "grid"', text)
 
     def test_top_ratio_follows_the_ratio_grammar_and_is_clamped(self):
@@ -201,13 +201,13 @@ class FleetFile(GridCase):
         self.assertIsNone(fleet.top)
 
     def test_top_with_one_seat_gives_a_band_and_an_empty_grid(self):
-        fleet = self.load(grid_fleet('workspace = "fablyn"\n\n[[agents]]\nname = "fablyn-orchestrator"\n'
+        fleet = self.load(grid_fleet('workspace = "sample"\n\n[[agents]]\nname = "sample-orchestrator"\n'
                                      'kind = "claude"\n', TOP_LAYOUT))
         self.assertEqual(fleet.top, TOP)
         code, out, err = self.run_cli("up")
         self.assertEqual(code, 0, out + err)
         root = self.read_state()["workspace_id"] + ":p1"
-        self.assertIn("layout: grid - top: fablyn-orchestrator, then no other seats in %s" % root, out)
+        self.assertIn("layout: grid - top: sample-orchestrator, then no other seats in %s" % root, out)
         self.assertEqual(self.argvs("pane", "split"), [])
         cells = fake_herdr.geometry(self.world, self.world["panes"][root]["tab_id"])[0]
         self.assertEqual(cells[root], (0, 0, 200, 40))
@@ -250,18 +250,18 @@ class FreshWorkspace(BandCase):
         ws = self.read_state()["workspace_id"]
         root, strip = ws + ":p1", self.strip()
         create = self.argvs("workspace", "create")[0]
-        self.assertIn("FABLYN_ROLE=orchestrator", create)        # the root pane got the top seat's env
+        self.assertIn("SAMPLE_ROLE=orchestrator", create)        # the root pane got the top seat's env
         self.assertEqual(self.pane_of(TOP), root)
         self.assertFalse(self.read_state()["agents"][TOP]["created_pane"])
         # the strip from the root before any seat, resized to 20%, then the grid's first seat from the root
         self.assertEqual(self.argvs("plugin", "pane", "open")[0][10], root)
         self.assertLess(self.index("pane", "resize"), self.index("pane", "split"))
-        dev, reviewer, designer = (self.pane_of(n) for n in ("fablyn-dev", "fablyn-reviewer", "fablyn-designer"))
+        dev, reviewer, designer = (self.pane_of(n) for n in ("sample-dev", "sample-reviewer", "sample-designer"))
         self.assertEqual([a[2:7] for a in self.argvs("pane", "split")], [
             [root, "--direction", "down", "--ratio", "0.375"],
             [dev, "--direction", "right", "--ratio", "0.5"],
             [dev, "--direction", "down", "--ratio", "0.5"]])
-        self.assertIn("layout: grid - top: fablyn-orchestrator, then 3 seats in 2 columns (2+1) in %s" % root, out)
+        self.assertIn("layout: grid - top: sample-orchestrator, then 3 seats in 2 columns (2+1) in %s" % root, out)
         cells = self.cells(root)
         self.assertEqual(cells[root], (0, 0, 200, 15))           # 30% of 50 rows, the whole width
         self.assertEqual(cells[strip], (0, 40, 200, 10))         # 20% at the bottom
@@ -270,9 +270,9 @@ class FreshWorkspace(BandCase):
         self.assertEqual(cells[designer], (100, 15, 100, 25))
         # the top seat starts first; kickoffs stay in file order
         self.assertEqual([a[2] for a in self.argvs("agent", "start")],
-                         [TOP, "fablyn-dev", "fablyn-reviewer", "fablyn-designer"])
+                         [TOP, "sample-dev", "sample-reviewer", "sample-designer"])
         self.assertEqual([a[2] for a in self.argvs("agent", "prompt")],
-                         ["fablyn-dev", "fablyn-reviewer", "fablyn-designer", TOP])
+                         ["sample-dev", "sample-reviewer", "sample-designer", TOP])
         self.assertNotIn("run herdr-fleet tile", out)
         self.assertEqual(self.argvs("pane", "move"), [])
 
@@ -286,7 +286,7 @@ class FreshWorkspace(BandCase):
         cells = self.cells(root)
         self.assertEqual(cells[root], (0, 0, 200, 20))           # round(38 * 0.5333) = 20 rows: 40%
         self.assertEqual(cells[self.strip()], (0, 38, 200, 12))  # 25%
-        for name in ("fablyn-dev", "fablyn-reviewer", "fablyn-designer"):
+        for name in ("sample-dev", "sample-reviewer", "sample-designer"):
             x, y, w, h = cells[self.pane_of(name)]
             self.assertEqual((y, h), (20, 18), name)
 
@@ -297,7 +297,7 @@ class FreshWorkspace(BandCase):
         self.assertEqual(self.argvs("pane", "split")[0][2:7], [root, "--direction", "down", "--ratio", "0.3"])
         cells = self.cells(root)
         self.assertEqual(cells[root], (0, 0, 200, 15))
-        self.assertEqual(cells[self.pane_of("fablyn-designer")], (100, 15, 100, 35))
+        self.assertEqual(cells[self.pane_of("sample-designer")], (100, 15, 100, 35))
 
     def test_a_ratio_herdr_would_clamp_is_warned_about(self):
         self.write_fleet(grid_fleet(TOP_LAST, TOP_LAYOUT + "top_ratio = 0.6\n\n[watch]\nratio = 0.4\n"))
@@ -311,26 +311,26 @@ class FreshWorkspace(BandCase):
         code, out, _ = self.run_cli("up", "--dry-run")
         self.assertEqual(code, 0, out)
         lines = out.splitlines()
-        plans = [line for line in lines if line.startswith(("watcher: plan", "fablyn-"))]
+        plans = [line for line in lines if line.startswith(("watcher: plan", "sample-"))]
         self.assertTrue(plans[0].startswith("watcher: plan - herdr plugin pane open"))
-        self.assertIn("--target-pane '<root pane of fablyn>'", plans[0])
-        self.assertTrue(plans[1].startswith("fablyn-dev: plan - herdr pane split '<root pane of fablyn>' "
+        self.assertIn("--target-pane '<root pane of sample>'", plans[0])
+        self.assertTrue(plans[1].startswith("sample-dev: plan - herdr pane split '<root pane of sample>' "
                                             "--direction down --ratio 0.375"))
-        self.assertTrue(plans[2].startswith("fablyn-designer: plan - herdr pane split '<pane of fablyn-dev>' "
+        self.assertTrue(plans[2].startswith("sample-designer: plan - herdr pane split '<pane of sample-dev>' "
                                             "--direction right --ratio 0.5"))
-        self.assertTrue(plans[4].startswith("fablyn-orchestrator: plan - herdr agent start fablyn-orchestrator "
-                                            "--kind claude --pane '<root pane of fablyn>'"))
-        self.assertIn("layout: grid - top: fablyn-orchestrator, then 3 seats in 2 columns (2+1) in "
-                      "<root pane of fablyn>", out)
+        self.assertTrue(plans[4].startswith("sample-orchestrator: plan - herdr agent start sample-orchestrator "
+                                            "--kind claude --pane '<root pane of sample>'"))
+        self.assertIn("layout: grid - top: sample-orchestrator, then 3 seats in 2 columns (2+1) in "
+                      "<root pane of sample>", out)
         for prefix in (("workspace", "create"), ("pane", "split"), ("plugin", "pane"), ("agent", "start")):
             self.assertEqual(self.argvs(*prefix), [])
 
     def test_top_not_placed_in_this_run(self):
-        code, out, err = self.run_cli("up", "fablyn-dev", "fablyn-reviewer")
+        code, out, err = self.run_cli("up", "sample-dev", "sample-reviewer")
         self.assertEqual(code, 0, out + err)
         root = self.read_state()["workspace_id"] + ":p1"
-        self.assertEqual(self.pane_of("fablyn-dev"), root)
-        self.assertIn("layout: top seat fablyn-orchestrator is not placed in this run; placed without the band", out)
+        self.assertEqual(self.pane_of("sample-dev"), root)
+        self.assertIn("layout: top seat sample-orchestrator is not placed in this run; placed without the band", out)
         self.assertIn("layout: grid - 2 seats in 2 columns (1+1) in %s" % root, out)
         self.assertIsNone(self.pane_of(TOP))
 
@@ -339,7 +339,7 @@ class FreshWorkspace(BandCase):
         code, out, _ = self.run_cli("status")
         self.assertEqual(code, 0, out)
         root = self.read_state()["workspace_id"] + ":p1"
-        self.assertRegex(out, r"\nfablyn-orchestrator +claude +claude +%s +idle " % root)
+        self.assertRegex(out, r"\nsample-orchestrator +claude +claude +%s +idle " % root)
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0, out)
         self.assertIn("ok    fleet file", out)
@@ -359,7 +359,7 @@ class Me(BandCase):
         self.assertEqual(self.argvs("pane", "resize")[0][2:], ["--pane", CALLER_PANE, "--direction", "down",
                                                                 "--amount", "0.3"])
         self.assertLess(self.index("pane", "resize"), self.index("pane", "split"))
-        dev = self.pane_of("fablyn-dev")
+        dev = self.pane_of("sample-dev")
         self.assertEqual([a[2:7] for a in self.argvs("pane", "split")], [
             [CALLER_PANE, "--direction", "down", "--ratio", "0.375"],   # no side share (14.4) with top
             [dev, "--direction", "right", "--ratio", "0.5"],
@@ -368,16 +368,16 @@ class Me(BandCase):
         self.assertEqual(cells[CALLER_PANE], (0, 0, 200, 15))
         self.assertEqual(cells[strip], (0, 40, 200, 10))
         self.assertEqual(cells[dev], (0, 15, 100, 12))
-        self.assertEqual(cells[self.pane_of("fablyn-designer")], (100, 15, 100, 25))
+        self.assertEqual(cells[self.pane_of("sample-designer")], (100, 15, 100, 25))
         self.assertNotIn(CALLER_PANE, [a[a.index("--pane") + 1] for a in self.argvs("agent", "start")])
         self.assertEqual(self.prompts_to(TOP), [])
         self.assertEqual(self.layout_lines(out),
-                         ["layout: grid - top: fablyn-orchestrator, then 3 seats in 2 columns (2+1) in %s"
+                         ["layout: grid - top: sample-orchestrator, then 3 seats in 2 columns (2+1) in %s"
                           % CALLER_PANE])
 
     def test_me_on_the_top_seat_inside_the_labelled_workspace(self):
         self.write_fleet(top_fleet(FOUR_SEATS))
-        self.world["workspaces"]["w1"]["label"] = "fablyn"  # the owner's orchestrator runs in the fleet's workspace
+        self.world["workspaces"]["w1"]["label"] = "sample"  # the owner's orchestrator runs in the fleet's workspace
         code, out, err = self.run_cli("up", "--me", TOP)
         self.assertEqual(code, 0, out + err)
         self.assertEqual(self.argvs("workspace", "create"), [])
@@ -387,35 +387,35 @@ class Me(BandCase):
         self.assertNotIn("run herdr-fleet tile", out)
 
     def test_me_on_another_seat_keeps_14_4_and_says_top_was_not_applied(self):
-        code, out, err = self.run_cli("up", "--me", "fablyn-dev")
+        code, out, err = self.run_cli("up", "--me", "sample-dev")
         self.assertEqual(code, 0, out + err)
         self.assertEqual(self.argvs("pane", "split")[0][2:7], [CALLER_PANE, "--direction", "right", "--ratio", "0.5"])
-        self.assertIn("layout: top needs the fleet's own workspace or --me fablyn-orchestrator", out)
+        self.assertIn("layout: top needs the fleet's own workspace or --me sample-orchestrator", out)
         self.assertIn("layout: grid - 3 seats in 2 columns (2+1)", out)
         self.assertNotIn("run herdr-fleet tile", out)
 
     def test_me_on_another_seat_with_a_workspace_up_creates_gets_the_band_there(self):
         self.write_fleet(top_fleet(FOUR_SEATS))
-        code, out, err = self.run_cli("up", "--me", "fablyn-dev")
+        code, out, err = self.run_cli("up", "--me", "sample-dev")
         self.assertEqual(code, 0, out + err)
         root = self.read_state()["workspace_id"] + ":p1"
         self.assertEqual(self.pane_of(TOP), root)
-        self.assertIn("layout: grid - top: fablyn-orchestrator, then 2 seats in 2 columns (1+1) in %s" % root, out)
+        self.assertIn("layout: grid - top: sample-orchestrator, then 2 seats in 2 columns (1+1) in %s" % root, out)
         self.assertNotIn("top needs", out)
         self.assertEqual(self.cells(root)[root], (0, 0, 200, 15))
-        self.assertEqual(self.pane_of("fablyn-dev"), CALLER_PANE)  # you stay where you are (15, --join)
+        self.assertEqual(self.pane_of("sample-dev"), CALLER_PANE)  # you stay where you are (15, --join)
 
     def test_without_me_beside_the_caller_top_is_not_applied(self):
         code, out, err = self.run_cli("up")
         self.assertEqual(code, 0, out + err)
-        self.assertIn("layout: top needs the fleet's own workspace or --me fablyn-orchestrator", out)
+        self.assertIn("layout: top needs the fleet's own workspace or --me sample-orchestrator", out)
         self.assertIn("layout: grid - 4 seats in 2 columns (2+2)", out)
 
     def test_me_on_the_top_seat_without_an_agent(self):
         self.world["panes"][CALLER_PANE].update(agent=None, procs=[dict(fake_herdr.SHELL)])
         code, out, _ = self.run_cli("up", "--me", TOP)
         self.assertEqual(code, 3, out)
-        self.assertIn("layout: top seat fablyn-orchestrator is not placed in this run; placed without the band", out)
+        self.assertIn("layout: top seat sample-orchestrator is not placed in this run; placed without the band", out)
         self.assertEqual(self.argvs("pane", "split")[0][2:5], [CALLER_PANE, "--direction", "right"])
 
     def test_me_on_the_top_seat_outside_the_fleets_workspace(self):
@@ -423,7 +423,7 @@ class Me(BandCase):
         root = self.fleet_ws()
         code, out, _ = self.run_cli("up", "--me", TOP)
         self.assertEqual(code, 0, out)
-        self.assertIn("layout: top seat fablyn-orchestrator is not in the fleet's workspace; placed without the "
+        self.assertIn("layout: top seat sample-orchestrator is not in the fleet's workspace; placed without the "
                       "band", out)
         self.assertEqual(self.argvs("pane", "split")[0][2:5], [root, "--direction", "right"])
         self.assertEqual(self.argvs("pane", "move"), [])
@@ -437,7 +437,7 @@ class Me(BandCase):
         self.assertEqual(self.last_report_line(out), "layout: run herdr-fleet tile for the top band")
         code, out, err = self.run_cli("tile")
         self.assertEqual(code, 0, out + err)
-        self.assertIn("fablyn-orchestrator: kept - anchors the layout in %s" % me, out)
+        self.assertIn("sample-orchestrator: kept - anchors the layout in %s" % me, out)
         cells = self.cells(me)
         self.assertEqual(cells[me], (0, 0, 200, 15))
         self.assertEqual(cells[self.strip()], (0, 40, 200, 10))
@@ -476,7 +476,7 @@ class ExistingLayout(BandCase):
 
     def test_a_strip_opened_later_goes_under_the_grid_not_the_band(self):
         self.run_cli("up", "--no-watch")  # the orchestrator is last in the file
-        designer = self.pane_of("fablyn-designer")
+        designer = self.pane_of("sample-designer")
         code, out, _ = self.run_cli("up")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.argvs("plugin", "pane", "open")[0][10], designer)
@@ -488,7 +488,7 @@ class ExistingLayout(BandCase):
         top = self.pane_of(TOP)
         self.world["panes"][top].update(agent=None, procs=[dict(fake_herdr.SHELL)])
         self.write_fleet(top_fleet(TOP_LAST))
-        code, out, _ = self.run_cli("up", "fablyn-dev")
+        code, out, _ = self.run_cli("up", "sample-dev")
         self.assertEqual(code, 0, out)
         self.assertNotIn("run herdr-fleet tile", out)
         self.assertEqual(self.layout_lines(out), [])
@@ -499,10 +499,10 @@ class Tile(BandCase):
 
     def setUp(self):
         super().setUp()
-        self.fleet_ws("w2", "fablyn")
+        self.fleet_ws("w2", "sample")
         # dev in the root pane, the orchestrator third, the strip under the designer: a mess
-        for pane, kind, name in (("w2:p1", "claude", "fablyn-dev"), ("w2:p2", "codex", "fablyn-reviewer"),
-                                 ("w2:p3", "claude", TOP), ("w2:p4", "claude", "fablyn-designer")):
+        for pane, kind, name in (("w2:p1", "claude", "sample-dev"), ("w2:p2", "codex", "sample-reviewer"),
+                                 ("w2:p3", "claude", TOP), ("w2:p4", "claude", "sample-designer")):
             if pane not in self.world["panes"]:
                 fake_herdr.add_pane(self.world, pane, "w2", self.repo, created=True)
             fake_herdr.put_agent(self.world, pane, kind, name, args=ARGS)
@@ -512,7 +512,7 @@ class Tile(BandCase):
         fake_herdr.add_pane(self.world, "w2:p5", "w2", self.repo, created=True)
         self.world["panes"]["w2:p5"].update(plugin="watch",
                                             split={"from": "w2:p4", "direction": "down", "ratio": "0.5"})
-        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "fablyn", "agents": {},
+        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "sample", "agents": {},
                           "watch": {"pane_id": "w2:p5", "created_pane": True, "started": "2026-10-24T10:00:00+11:00"}})
 
     def moves(self):
@@ -532,10 +532,10 @@ class Tile(BandCase):
             ["pane", "move", "w2:p5"] + park, back("w2:p5", "down", "w2:p3", "0.8"),   # the strip first
             back("w2:p1", "down", "w2:p3", "0.375"),                                  # the grid's first seat
             back("w2:p4", "right", "w2:p1", "0.5"), back("w2:p2", "down", "w2:p1", "0.5")])
-        self.assertIn("layout: grid - top: fablyn-orchestrator, then 3 seats in 2 columns (2+1) in tab w2:t1", out)
-        self.assertIn("fablyn-orchestrator: kept - anchors the layout in w2:p3", out)
-        self.assertIn("watcher: moved - below fablyn-orchestrator (w2:p3), ratio 0.8", out)
-        self.assertIn("fablyn-dev: moved - below fablyn-orchestrator (w2:p3), ratio 0.375", out)
+        self.assertIn("layout: grid - top: sample-orchestrator, then 3 seats in 2 columns (2+1) in tab w2:t1", out)
+        self.assertIn("sample-orchestrator: kept - anchors the layout in w2:p3", out)
+        self.assertIn("watcher: moved - below sample-orchestrator (w2:p3), ratio 0.8", out)
+        self.assertIn("sample-dev: moved - below sample-orchestrator (w2:p3), ratio 0.375", out)
         cells = self.cells("w2:p3")
         self.assertEqual(cells["w2:p3"], (0, 0, 200, 15))
         self.assertEqual(cells["w2:p5"], (0, 40, 200, 10))
@@ -551,14 +551,14 @@ class Tile(BandCase):
         self.assertEqual(code, 0, out)
         plans = [line for line in out.splitlines() if ": plan - " in line]
         self.assertEqual([line.split(":")[0] for line in plans],
-                         ["watcher", "fablyn-dev", "fablyn-designer", "fablyn-reviewer"])
+                         ["watcher", "sample-dev", "sample-designer", "sample-reviewer"])
         self.assertIn("--target-pane w2:p3 --ratio 0.8", plans[0])
         self.assertTrue(plans[1].endswith("herdr pane move w2:p1 --tab w2:t1 --split down --target-pane w2:p3 "
                                           "--ratio 0.375 --no-focus"))
         self.assertEqual(self.moves(), [])
 
     def test_without_a_strip_the_band_keeps_top_ratio(self):
-        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "fablyn", "agents": {}})
+        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "sample", "agents": {}})
         del self.world["panes"]["w2:p5"]
         code, out, err = self.run_cli("tile")
         self.assertEqual(code, 0, out + err)
@@ -572,9 +572,9 @@ class Tile(BandCase):
         self.world["panes"]["w2:p3"].update(agent=None, procs=[dict(fake_herdr.SHELL)])
         code, out, err = self.run_cli("tile")
         self.assertEqual(code, 0, out + err)
-        self.assertIn("layout: top seat fablyn-orchestrator is not live; tiled without the band", out)
+        self.assertIn("layout: top seat sample-orchestrator is not live; tiled without the band", out)
         self.assertIn("layout: grid - 3 seats in 2 columns (2+1) in tab w2:t1", out)
-        self.assertIn("fablyn-dev: kept - anchors the layout in w2:p1", out)
+        self.assertIn("sample-dev: kept - anchors the layout in w2:p1", out)
         self.assertIn(["pane", "move", "w2:p5", "--tab", "w2:t1", "--split", "down", "--target-pane", "w2:p1",
                        "--ratio", "0.8", "--no-focus"], self.moves())
 
@@ -583,15 +583,15 @@ class Tile(BandCase):
         self.world["panes"]["w2:p3"].update(workspace_id="w3", tab_id="w3:t1")
         code, out, _ = self.run_cli("tile")
         self.assertEqual(code, 0, out)
-        self.assertIn("fablyn-orchestrator: elsewhere - in workspace w3, not w2; left alone", out)
-        self.assertIn("layout: top seat fablyn-orchestrator is in workspace w3; tiled without the band", out)
+        self.assertIn("sample-orchestrator: elsewhere - in workspace w3, not w2; left alone", out)
+        self.assertIn("layout: top seat sample-orchestrator is in workspace w3; tiled without the band", out)
 
     def test_the_top_seat_alone(self):
         for pane in ("w2:p1", "w2:p2", "w2:p4"):
             self.world["panes"][pane].update(agent=None, procs=[dict(fake_herdr.SHELL)])
         code, out, _ = self.run_cli("tile")
         self.assertEqual(code, 0, out)
-        self.assertIn("layout: grid - top: fablyn-orchestrator, then no other seats in tab w2:t1", out)
+        self.assertIn("layout: grid - top: sample-orchestrator, then no other seats in tab w2:t1", out)
         self.assertEqual([m[2] for m in self.moves()], ["w2:p5", "w2:p5"])
 
 
@@ -603,9 +603,9 @@ class StatusAndDoctorUnchanged(GridCase):
 
     def setUp(self):
         super().setUp()
-        self.fleet_ws("w2", "fablyn")
-        for pane, kind, name in (("w2:p1", "claude", TOP), ("w2:p2", "claude", "fablyn-dev"),
-                                 ("w2:p3", "codex", "fablyn-reviewer")):
+        self.fleet_ws("w2", "sample")
+        for pane, kind, name in (("w2:p1", "claude", TOP), ("w2:p2", "claude", "sample-dev"),
+                                 ("w2:p3", "codex", "sample-reviewer")):
             if pane not in self.world["panes"]:
                 fake_herdr.add_pane(self.world, pane, "w2", self.repo, created=True)
             fake_herdr.put_agent(self.world, pane, kind, name, args=ARGS if kind == "claude" else ["-m", "gpt-6-astra"])
@@ -623,7 +623,7 @@ class StatusAndDoctorUnchanged(GridCase):
     def test_status(self):
         plain, band = self.run_both("status")
         self.assertEqual(plain, band)
-        self.assertIn("fablyn-orchestrator", band[1])
+        self.assertIn("sample-orchestrator", band[1])
 
     def test_status_json(self):
         plain, band = self.run_both("status", "--json")

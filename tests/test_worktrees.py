@@ -34,7 +34,7 @@ class Worktrees(GitCase):
         self.git("worktree", "add", "-q", "-b", "slice/locked", self.wt["wt-locked"])
         self.git("worktree", "lock", "--reason", "on a stick", self.wt["wt-locked"])
         self.write_fleet(self.read_fleet().replace(
-            'name = "fablyn-dev"', 'name = "fablyn-dev"\nworktrees = ["%s/wt-new*", "%s/wt-detached"]'
+            'name = "sample-dev"', 'name = "sample-dev"\nworktrees = ["%s/wt-new*", "%s/wt-detached"]'
             % (self.real, self.tmp)))  # the second glob uses the unresolved temp path
 
     def short(self, path):
@@ -56,8 +56,8 @@ class Worktrees(GitCase):
         main_row = rows[os.path.realpath(self.repo)]
         self.assertRegex(main_row, r"\bmain\s+0 min\s+1 changed\s+yes\s+main$")  # SEAT: main, unclaimed
         self.assertRegex(rows[self.wt["wt-merged"]], r"slice/merged\s+0 min\s+clean\s+yes$")
-        self.assertRegex(rows[self.wt["wt-new"]], r"slice/new\s+\d+ w\s+2 changed\s+no\s+fablyn-dev$")
-        self.assertRegex(rows[self.wt["wt-detached"]], r"detached @%s\s+0 min\s+clean\s+yes\s+fablyn-dev$"
+        self.assertRegex(rows[self.wt["wt-new"]], r"slice/new\s+\d+ w\s+2 changed\s+no\s+sample-dev$")
+        self.assertRegex(rows[self.wt["wt-detached"]], r"detached @%s\s+0 min\s+clean\s+yes\s+sample-dev$"
                          % self.main_sha[:7])
         self.assertRegex(rows[self.wt["wt-gone"]], r"slice/gone\s+-\s+missing, prunable\s+yes$")
         self.assertRegex(rows[self.wt["wt-locked"]], r"slice/locked\s+0 min\s+clean, locked\s+yes$")
@@ -89,7 +89,7 @@ class Worktrees(GitCase):
         self.assertTrue(all(set(w) == keys for w in data["worktrees"]))
         new = by_path[self.wt["wt-new"]]
         self.assertEqual((new["branch"], new["detached"], new["changed"], new["merged"], new["seats"]),
-                         ("slice/new", False, 2, False, ["fablyn-dev"]))
+                         ("slice/new", False, 2, False, ["sample-dev"]))
         self.assertGreater(new["age_s"], 7 * 86400)
         detached = by_path[self.wt["wt-detached"]]
         self.assertEqual((detached["branch"], detached["detached"], detached["head"]), (None, True, self.main_sha))
@@ -100,12 +100,12 @@ class Worktrees(GitCase):
         self.assertEqual(by_path[os.path.realpath(self.repo)]["seats"], [])
 
     def test_seat_filter_and_unknown_seat(self):
-        code, out, _ = self.run_cli("worktrees", "--seat", "fablyn-dev")
+        code, out, _ = self.run_cli("worktrees", "--seat", "sample-dev")
         self.assertEqual(code, 0)
         self.assertEqual([line.split()[0] for line in out.splitlines()[2:]],
                          [self.short(p) for p in self.git_order() if p in (self.wt["wt-new"], self.wt["wt-detached"])])
-        out = self.run_cli("worktrees", "--seat", "fablyn-reviewer")[1]
-        self.assertIn("fablyn-reviewer declares no worktrees globs", out)
+        out = self.run_cli("worktrees", "--seat", "sample-reviewer")[1]
+        self.assertIn("sample-reviewer declares no worktrees globs", out)
         code, _, err = self.run_cli("worktrees", "--seat", "nobody")
         self.assertEqual(code, 2)
         self.assertIn("not a seat: nobody", err)
@@ -164,9 +164,9 @@ class Porcelain(unittest.TestCase):
         self.assertEqual(items[1].head, "2222222222")
 
     def test_globs(self):
-        self.assertTrue(worktrees.matches(["/private/tmp/fablyn-*"], "/private/tmp/fablyn-export"))
-        self.assertFalse(worktrees.matches(["/private/tmp/fablyn-*"], "/private/tmp/other"))
-        self.assertFalse(worktrees.matches(["/private/tmp/Fablyn-*"], "/private/tmp/fablyn-x"))  # case matters
+        self.assertTrue(worktrees.matches(["/private/tmp/sample-*"], "/private/tmp/sample-export"))
+        self.assertFalse(worktrees.matches(["/private/tmp/sample-*"], "/private/tmp/other"))
+        self.assertFalse(worktrees.matches(["/private/tmp/Sample-*"], "/private/tmp/sample-x"))  # case matters
         self.assertFalse(worktrees.matches([], "/x"))
 
 

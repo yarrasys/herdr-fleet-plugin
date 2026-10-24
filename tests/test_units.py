@@ -19,14 +19,14 @@ from herdr_fleet.state import State, StateError, load_state, prune_state, save_s
 
 
 def seat(**kw):
-    base = dict(name="fablyn-dev", kind="claude", args=["--model", "m x"], cwd="/repo", split="right", ratio=None,
+    base = dict(name="sample-dev", kind="claude", args=["--model", "m x"], cwd="/repo", split="right", ratio=None,
                 env={}, kickoff=None, kickoff_text=None, quit=None, notes="", index=0)
     base.update(kw)
     return Seat(**base)
 
 
 def fleet(seats, **kw):
-    base = dict(path="/repo/.herdr/fleet.toml", repo="/repo", workspace="fablyn", cwd="/repo", state_note=None,
+    base = dict(path="/repo/.herdr/fleet.toml", repo="/repo", workspace="sample", cwd="/repo", state_note=None,
                 kickoff=None, direction="right", ratio=None, quit_timeout_ms=None, seats=seats)
     base.update(kw)
     return Fleet(**base)
@@ -45,11 +45,11 @@ class KickoffRendering(unittest.TestCase):
 
     def test_default_template_and_prefix(self):
         s = seat()
-        text = compose(s, fleet([s]), "fablyn", roster_table([("fablyn-dev", "claude", "w2:p2", "/repo")]), "up")
+        text = compose(s, fleet([s]), "sample", roster_table([("sample-dev", "claude", "w2:p2", "/repo")]), "up")
         self.assertTrue(text.startswith(
-            '[from herdr-fleet] You are fablyn-dev, a claude agent in the "fablyn" fleet for /repo.'))
-        self.assertIn("| fablyn-dev | claude | w2:p2 | /repo |", text)
-        self.assertIn("| fablyn-dev | claude | w2:p2 | /repo |\n\n" + ROSTER_SENTENCE, text)  # design 17.1
+            '[from herdr-fleet] You are sample-dev, a claude agent in the "sample" fleet for /repo.'))
+        self.assertIn("| sample-dev | claude | w2:p2 | /repo |", text)
+        self.assertIn("| sample-dev | claude | w2:p2 | /repo |\n\n" + ROSTER_SENTENCE, text)  # design 17.1
         self.assertIn("on up.", text)
         self.assertEqual(text, text.strip())
         self.assertTrue(DEFAULT_TEMPLATE.startswith("[from herdr-fleet]"))
@@ -57,7 +57,7 @@ class KickoffRendering(unittest.TestCase):
     def test_prefix_added_unless_template_starts_with_from(self):
         s = seat(kickoff_text="Hello {name}, args {args}")
         self.assertEqual(compose(s, fleet([s]), "w", "", "kickoff"),
-                         "[from herdr-fleet] Hello fablyn-dev, args --model 'm x'")
+                         "[from herdr-fleet] Hello sample-dev, args --model 'm x'")
         s = seat(kickoff_text="[from the owner] hi")
         self.assertEqual(compose(s, fleet([s]), "w", "", "kickoff"), "[from the owner] hi")
 
@@ -65,7 +65,7 @@ class KickoffRendering(unittest.TestCase):
         s = seat(kickoff_text="<!-- note for humans: {name} -->\n  <!-- indented too -->\n"
                               "Hi {name} <!-- inline stays -->")
         self.assertEqual(compose(s, fleet([s]), "w", "", "up"),
-                         "[from herdr-fleet] Hi fablyn-dev <!-- inline stays -->")
+                         "[from herdr-fleet] Hi sample-dev <!-- inline stays -->")
         self.assertEqual(strip_comments("a\n<!-- x -->\nb\n"), "a\nb\n")
 
     def test_state_note_and_note(self):
@@ -75,8 +75,8 @@ class KickoffRendering(unittest.TestCase):
             with open(note, "w") as handle:
                 handle.write("main is green\n")
             s = seat(kickoff_text="{state}|{note}|{reason}|{workspace}|{cwd}|{repo}|{kind}")
-            text = compose(s, fleet([s], state_note=note), "fablyn", "", "restart", note="go")
-            self.assertEqual(text, "[from herdr-fleet] main is green|go|restart|fablyn|/repo|/repo|claude")
+            text = compose(s, fleet([s], state_note=note), "sample", "", "restart", note="go")
+            self.assertEqual(text, "[from herdr-fleet] main is green|go|restart|sample|/repo|/repo|claude")
             missing = fleet([s], state_note=os.path.join(tmp, "nope.md"))
             self.assertEqual(compose(s, missing, "w", "", "up"), "[from herdr-fleet] ||up|w|/repo|/repo|claude")
         finally:

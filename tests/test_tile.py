@@ -23,12 +23,12 @@ def back(pane, direction, source, ratio=None):
 class TileCase(GridCase):
     """The fleet's workspace w2 with the given seats live in one tab, in a messy layout."""
 
-    seats = (("fablyn-orchestrator", "claude"), ("fablyn-dev", "claude"), ("fablyn-reviewer", "codex"),
-             ("fablyn-designer", "claude"))
+    seats = (("sample-orchestrator", "claude"), ("sample-dev", "claude"), ("sample-reviewer", "codex"),
+             ("sample-designer", "claude"))
 
     def setUp(self):
         super().setUp()
-        self.fleet_ws("w2", "fablyn")
+        self.fleet_ws("w2", "sample")
         for index, (name, kind) in enumerate(self.seats, 1):
             pane = "w2:p%d" % index
             if pane not in self.world["panes"]:
@@ -52,9 +52,9 @@ class GridTile(TileCase):
             back("w2:p2", "down", "w2:p1", "0.5"),
             back("w2:p4", "down", "w2:p3", "0.5"),
         ])
-        self.assertIn("fablyn-orchestrator: kept - anchors the layout in w2:p1", out)
+        self.assertIn("sample-orchestrator: kept - anchors the layout in w2:p1", out)
         self.assertEqual(out.count(": moved - "), 3)
-        self.assertIn("fablyn-designer: moved - below fablyn-reviewer (w2:p3), ratio 0.5", out)
+        self.assertIn("sample-designer: moved - below sample-reviewer (w2:p3), ratio 0.5", out)
         rects = self.rects("w2:p1")
         self.assert_cell(rects["w2:p1"], 0, 0, 0.5, 0.5)
         self.assert_cell(rects["w2:p2"], 0, 0.5, 0.5, 0.5)
@@ -67,7 +67,7 @@ class GridTile(TileCase):
     def test_dry_run_prints_the_moves_and_makes_none(self):
         code, out, _ = self.run_cli("tile", "--dry-run")
         self.assertEqual(code, 0, out)
-        self.assertIn("fablyn-designer: plan - herdr pane move w2:p4 --new-tab --workspace w2 --label park "
+        self.assertIn("sample-designer: plan - herdr pane move w2:p4 --new-tab --workspace w2 --label park "
                       "--no-focus, then herdr pane move w2:p4 --tab w2:t1 --split down --target-pane w2:p3 "
                       "--ratio 0.5 --no-focus", out)
         self.assertEqual(self.argvs("pane", "move"), [])
@@ -79,8 +79,8 @@ class GridTile(TileCase):
         self.world["panes"]["w2:p4"]["agent"] = None
         code, out, _ = self.run_cli("tile")
         self.assertEqual(code, 0, out)
-        self.assertIn("fablyn-reviewer: elsewhere - in workspace w3, not w2; left alone", out)
-        self.assertIn("fablyn-designer: absent - not running; not tiled", out)
+        self.assertIn("sample-reviewer: elsewhere - in workspace w3, not w2; left alone", out)
+        self.assertIn("sample-designer: absent - not running; not tiled", out)
         self.assertIn("layout: grid - 2 seats in 2 columns (1+1) in tab w2:t1", out)
         self.assertEqual(self.argvs("pane", "move"), [park("w2:p2"), back("w2:p2", "right", "w2:p1", "0.5")])
 
@@ -89,7 +89,7 @@ class GridTile(TileCase):
         code, _, err = self.run_cli("tile")
         self.assertEqual(code, 1)
         self.assertIn("span 2 tabs, and tile works within one tab", err)
-        self.assertIn("fablyn-designer (w2:t2)", err)
+        self.assertIn("sample-designer (w2:t2)", err)
         self.assertEqual(self.argvs("pane", "move"), [])
 
     def test_stops_at_the_first_failed_move(self):
@@ -97,8 +97,8 @@ class GridTile(TileCase):
                                  "stderr": {"error": {"code": "pane_move_failed", "message": "busy"}}}]
         code, out, _ = self.run_cli("tile")
         self.assertEqual(code, 1)
-        self.assertIn("fablyn-dev: failed - parking: herdr error pane_move_failed: busy", out)
-        self.assertIn("stopped; not re-tiled: fablyn-reviewer, fablyn-dev, fablyn-designer; parked in tabs of "
+        self.assertIn("sample-dev: failed - parking: herdr error pane_move_failed: busy", out)
+        self.assertIn("stopped; not re-tiled: sample-reviewer, sample-dev, sample-designer; parked in tabs of "
                       "their own (bring one back with `herdr pane move w2:p3 --tab w2:t1 --split right --no-focus`)",
                       out)
         self.assertEqual([a for a in self.argvs("pane", "move") if "--tab" in a], [])  # nothing came back
@@ -112,8 +112,8 @@ class GridTile(TileCase):
 
 
 class ChainTile(TileCase):
-    fleet_text = THREE_SEATS.replace('name = "fablyn-reviewer"\n',
-                                     'name = "fablyn-reviewer"\nfrom = "fablyn-orchestrator"\nsplit = "down"\n'
+    fleet_text = THREE_SEATS.replace('name = "sample-reviewer"\n',
+                                     'name = "sample-reviewer"\nfrom = "sample-orchestrator"\nsplit = "down"\n'
                                      'ratio = 0.6\n')
     seats = TileCase.seats[:3]
 
@@ -131,7 +131,7 @@ class ChainTile(TileCase):
 
 class NothingToTile(FleetCase):
     def test_no_live_seat(self):
-        self.fleet_ws("w2", "fablyn")
+        self.fleet_ws("w2", "sample")
         code, out, _ = self.run_cli("tile")
         self.assertEqual(code, 0, out)
         self.assertIn("tile: nothing to do - no seat is live in workspace w2", out)
@@ -140,7 +140,7 @@ class NothingToTile(FleetCase):
     def test_missing_workspace(self):
         code, _, err = self.run_cli("tile")
         self.assertEqual(code, 1)
-        self.assertIn("no workspace is labelled 'fablyn'; run `herdr-fleet up` first", err)
+        self.assertIn("no workspace is labelled 'sample'; run `herdr-fleet up` first", err)
 
 
 if __name__ == "__main__":

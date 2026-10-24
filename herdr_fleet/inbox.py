@@ -391,7 +391,7 @@ def direct_text(message: Message) -> str:
 
 
 def item_header(message: Message, direction: bool = False, today: Optional[datetime.date] = None) -> str:
-    """``[from fablyn-orchestrator at 10:09 #3f2a9c re #91be02]``; with ``direction`` the
+    """``[from sample-orchestrator at 10:09 #3f2a9c re #91be02]``; with ``direction`` the
     recipient too (``--history``)."""
     who = "%s to %s" % (message.sender, message.to) if direction else message.sender
     reply = " re #%s" % short_of(message.reply_to) if message.reply_to else ""

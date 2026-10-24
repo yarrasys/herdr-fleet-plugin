@@ -113,19 +113,19 @@ class ManifestCommandsRun(unittest.TestCase):
         # `ui status` opens the pane with --cwd <repo root>; herdr runs the argv there.
         proc = self.run_cmd(self.pane_command("status"), self.repo, stdin="\n", HERDR_PLUGIN_ENTRYPOINT_ID="status")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("fablyn-orchestrator", proc.stdout)
+        self.assertIn("sample-orchestrator", proc.stdout)
         self.assertIn("Press Enter to close.", proc.stdout)
 
     def test_manage_pane_runs_from_the_repo_cwd(self):
         proc = self.run_cmd(self.pane_command("manage"), self.repo, stdin="q\n", HERDR_PLUGIN_ENTRYPOINT_ID="manage")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("1) fablyn-orchestrator", proc.stdout)
+        self.assertIn("1) sample-orchestrator", proc.stdout)
 
     def test_go_pane_runs_from_the_repo_cwd(self):
         # design 22.2: `menu --go` lists the seats and closes on q, focusing nothing
         proc = self.run_cmd(self.pane_command("go"), self.repo, stdin="q\n", HERDR_PLUGIN_ENTRYPOINT_ID="go")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("1) fablyn-orchestrator", proc.stdout)
+        self.assertIn("1) sample-orchestrator", proc.stdout)
         self.assertIn("Go to (number, or q to quit): ", proc.stdout)
         self.assertNotIn(["agent", "focus"], [argv[:2] for argv in read_log(self.env)])
 

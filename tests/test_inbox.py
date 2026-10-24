@@ -43,7 +43,7 @@ def box(repo, name, which):
     return sorted(f[:-3] for f in os.listdir(folder) if f.endswith(".md")) if os.path.isdir(folder) else []
 
 
-def put(repo, to, body, sender="fablyn-orchestrator", ident=None, when=None, ttl=None, fyi=False,
+def put(repo, to, body, sender="sample-orchestrator", ident=None, when=None, ttl=None, fyi=False,
         reply_to=None, which=NEW):
     """Write a message file straight into a mailbox, as an earlier send would have."""
     when = when or inbox.now_utc()
@@ -78,33 +78,33 @@ class Storage(unittest.TestCase):
         self.assertRegex(inbox.new_id(inbox.now_utc(), set()), r"^\d{8}T\d{6}Z-[0-9a-f]{6}$")
 
     def test_file_round_trip_keeps_the_body_verbatim(self):
-        body = "[from someone] Range for 1.25.1: 90ba47c..a659ceb.\n\nBuild in /tmp/x.\n\n"
-        message = put(self.repo, "fablyn-dev", body, ident="20261020T230900Z-3f2a9c", fyi=True,
+        body = "[from someone] Please review the parser change.\n\nBuild in /tmp/x.\n\n"
+        message = put(self.repo, "sample-dev", body, ident="20261020T230900Z-3f2a9c", fyi=True,
                       reply_to="20261020T225300Z-91be02", ttl=local(12, 0))
         with open(message.path) as handle:
             text = handle.read()
-        self.assertTrue(text.startswith("id: 20261020T230900Z-3f2a9c\nfrom: fablyn-orchestrator\nto: fablyn-dev\n"
+        self.assertTrue(text.startswith("id: 20261020T230900Z-3f2a9c\nfrom: sample-orchestrator\nto: sample-dev\n"
                                         "time: "), text)
         self.assertIn("\nfyi: true\nreply_to: 20261020T225300Z-91be02\nttl: ", text)
         self.assertTrue(text.endswith("\n\n" + body))
-        (back,) = inbox.read_box(self.repo, "fablyn-dev", NEW)
+        (back,) = inbox.read_box(self.repo, "sample-dev", NEW)
         self.assertEqual((back.id, back.sender, back.body, back.fyi, back.reply_to),
-                         (message.id, "fablyn-orchestrator", body, True, "20261020T225300Z-91be02"))
+                         (message.id, "sample-orchestrator", body, True, "20261020T225300Z-91be02"))
         self.assertEqual([f for f in os.listdir(os.path.dirname(message.path)) if f.endswith(".tmp")], [])
         with open(os.path.join(self.repo, ".herdr", ".gitignore")) as handle:
             self.assertIn("inbox/", handle.read().split())
 
     def test_short_forms_unique_ambiguous_unknown(self):
-        put(self.repo, "fablyn-dev", "a", ident="20261020T230900Z-3f2a9c")
-        put(self.repo, "fablyn-reviewer", "b", ident="20261020T231000Z-3f2a9c", which=CUR)
-        put(self.repo, "fablyn-dev", "c", ident="20261020T231100Z-91be02")
+        put(self.repo, "sample-dev", "a", ident="20261020T230900Z-3f2a9c")
+        put(self.repo, "sample-reviewer", "b", ident="20261020T231000Z-3f2a9c", which=CUR)
+        put(self.repo, "sample-dev", "c", ident="20261020T231100Z-91be02")
         self.assertEqual(inbox.taken_shorts(self.repo), {"3f2a9c", "91be02"})
         for ref in ("#91be02", "91be02", "20261020T231100Z-91be02"):
             self.assertEqual(inbox.resolve(self.repo, ref).body, "c", ref)
         with self.assertRaises(UsageError) as caught:
             inbox.resolve(self.repo, "#3f2a9c")
-        self.assertIn("20261020T230900Z-3f2a9c (fablyn-dev/new)", str(caught.exception))
-        self.assertIn("20261020T231000Z-3f2a9c (fablyn-reviewer/cur)", str(caught.exception))
+        self.assertIn("20261020T230900Z-3f2a9c (sample-dev/new)", str(caught.exception))
+        self.assertIn("20261020T231000Z-3f2a9c (sample-reviewer/cur)", str(caught.exception))
         self.assertEqual(inbox.resolve(self.repo, "20261020T230900Z-3f2a9c").body, "a")  # the full id is exact
         for ref in ("#000000", "not-an-id", "#3F2A9C"):
             with self.assertRaises(UsageError):
@@ -113,10 +113,10 @@ class Storage(unittest.TestCase):
     def test_same_second_keeps_write_order(self):
         when = inbox.now_utc()
         stamp = inbox.new_id(when, set())[:-6]  # one second, and a hex part that sorts the other way
-        first = put(self.repo, "fablyn-dev", "first", ident=stamp + "ffffff", when=when)
-        second = put(self.repo, "fablyn-dev", "second", ident=stamp + "000000", when=when)
+        first = put(self.repo, "sample-dev", "first", ident=stamp + "ffffff", when=when)
+        second = put(self.repo, "sample-dev", "second", ident=stamp + "000000", when=when)
         os.utime(second.path, ns=(first.mtime_ns + 10 ** 6, first.mtime_ns + 10 ** 6))
-        self.assertEqual([m.body for m in inbox.read_box(self.repo, "fablyn-dev", NEW)], ["first", "second"])
+        self.assertEqual([m.body for m in inbox.read_box(self.repo, "sample-dev", NEW)], ["first", "second"])
 
     def test_mailbox_names_never_become_paths(self):
         with self.assertRaises(UsageError):
@@ -124,24 +124,24 @@ class Storage(unittest.TestCase):
 
 
 class Rendering(unittest.TestCase):
-    def message(self, body, short, hour=10, minute=9, sender="fablyn-orchestrator", reply_to=None, day=21):
-        return Message(id="20261020T230900Z-" + short, sender=sender, to="fablyn-dev",
+    def message(self, body, short, hour=10, minute=9, sender="sample-orchestrator", reply_to=None, day=21):
+        return Message(id="20261020T230900Z-" + short, sender=sender, to="sample-dev",
                        time=inbox.iso_local(local(hour, minute, day)), body=body, reply_to=reply_to)
 
     def test_batch_format_and_reply_to(self):
         today = local(10, 9).date()
-        batch = inbox.render_batch([self.message("Range for 1.25.1\n", "3f2a9c"),
-                                    self.message("done", "91be02", 10, 31, "fablyn-dev",
+        batch = inbox.render_batch([self.message("Review parser change\n", "3f2a9c"),
+                                    self.message("done", "91be02", 10, 31, "sample-dev",
                                                  reply_to="20261020T225300Z-aaaaaa")], today=today)
-        self.assertEqual(batch, "[from fablyn-orchestrator at 10:09 #3f2a9c]\nRange for 1.25.1\n\n"
-                                "[from fablyn-dev at 10:31 #91be02 re #aaaaaa]\ndone")
+        self.assertEqual(batch, "[from sample-orchestrator at 10:09 #3f2a9c]\nReview parser change\n\n"
+                                "[from sample-dev at 10:31 #91be02 re #aaaaaa]\ndone")
         other_day = inbox.render_batch([self.message("x", "3f2a9c", day=20)], today=today)
-        self.assertTrue(other_day.startswith("[from fablyn-orchestrator at 2026-10-20 10:09 #3f2a9c]"))
+        self.assertTrue(other_day.startswith("[from sample-orchestrator at 2026-10-20 10:09 #3f2a9c]"))
         history = inbox.render_batch([self.message("x", "3f2a9c")], direction=True, today=today)
-        self.assertTrue(history.startswith("[from fablyn-orchestrator to fablyn-dev at 10:09 #3f2a9c]\nx"))
+        self.assertTrue(history.startswith("[from sample-orchestrator to sample-dev at 10:09 #3f2a9c]\nx"))
 
     def test_direct_text_and_pointer(self):
-        self.assertEqual(inbox.direct_text(self.message("hi", "3f2a9c")), "[from fablyn-orchestrator #3f2a9c] hi")
+        self.assertEqual(inbox.direct_text(self.message("hi", "3f2a9c")), "[from sample-orchestrator #3f2a9c] hi")
         self.assertEqual(inbox.direct_text(self.message("[from the owner] stop", "3f2a9c")), "[from the owner] stop")
         items = [self.message("x", "3f2a9c"), self.message("y", "91be02", 11, 0)]
         self.assertEqual(inbox.pointer_text(items, 41234, today=local(10, 9).date()),
@@ -149,10 +149,10 @@ class Rendering(unittest.TestCase):
 
     def test_compose_prompt_alone_batched_and_capped(self):
         one, two = self.message("a", "3f2a9c"), self.message("b", "91be02")
-        self.assertEqual(messages.compose_prompt([], one)[0], "[from fablyn-orchestrator #3f2a9c] a")
+        self.assertEqual(messages.compose_prompt([], one)[0], "[from sample-orchestrator #3f2a9c] a")
         text, _, pointer = messages.compose_prompt([one], two)
         self.assertFalse(pointer)
-        self.assertTrue(text.startswith("[from fablyn-orchestrator at ") and text.endswith("#91be02]\nb"), text)
+        self.assertTrue(text.startswith("[from sample-orchestrator at ") and text.endswith("#91be02]\nb"), text)
         big = self.message("x" * inbox.BATCH_CAP, "aaaaaa")
         text, size, pointer = messages.compose_prompt([], big)
         self.assertTrue(pointer)
@@ -160,16 +160,16 @@ class Rendering(unittest.TestCase):
         self.assertTrue(text.startswith("[from herdr-fleet] 1 message waiting (oldest "), text)
 
     def test_log_lines_for_the_new_kinds(self):
-        message = self.message("Range for 1.25.1", "3f2a9c")
+        message = self.message("Review parser change", "3f2a9c")
         delivered = messages.delivered_entry(message, "kickoff", "unconfirmed")
         self.assertRegex(messages.format_entry(delivered),
-                         r"  herdr-fleet → fablyn-dev  delivered\? #3f2a9c via kickoff  Range for 1.25.1$")
+                         r"  herdr-fleet → sample-dev  delivered\? #3f2a9c via kickoff  Review parser change$")
         self.assertRegex(messages.format_entry(messages.disposal_entry("expired", message, "ttl")),
-                         r"  herdr-fleet → fablyn-dev  expired #3f2a9c  Range for 1.25.1$")
-        self.assertRegex(messages.format_entry(messages.ack_entry("fablyn-dev", "x", ident=message.id)),
-                         r"  fablyn-dev → x  ack #3f2a9c$")
+                         r"  herdr-fleet → sample-dev  expired #3f2a9c  Review parser change$")
+        self.assertRegex(messages.format_entry(messages.ack_entry("sample-dev", "x", ident=message.id)),
+                         r"  sample-dev → x  ack #3f2a9c$")
         queued = messages.send_entry(message, "queued")
-        self.assertRegex(messages.format_entry(queued), r"  \d+  #3f2a9c  \[queued\]  Range for 1.25.1$")
+        self.assertRegex(messages.format_entry(queued), r"  \d+  #3f2a9c  \[queued\]  Review parser change$")
         self.assertEqual(messages.first_line("[from a at 10:09 #3f2a9c re #91be02]\nbody line"), "body line")
 
 
@@ -191,7 +191,7 @@ class KickoffTemplate(unittest.TestCase):
     def test_a_template_without_the_placeholder_gets_the_block_appended(self):
         hello = seat(kickoff_text="[from herdr-fleet] Hello {name}.")
         self.assertEqual(compose(hello, fleet([hello]), "w", "R", "up", inbox="BLOCK"),
-                         "[from herdr-fleet] Hello fablyn-dev.\n\nBLOCK")
+                         "[from herdr-fleet] Hello sample-dev.\n\nBLOCK")
         literal = seat(kickoff_text="Show {{inbox}} literally")
         self.assertTrue(compose(literal, fleet([literal]), "w", "R", "up", inbox="B").endswith("\n\nB"))
 
@@ -213,7 +213,7 @@ class SendTable(LiveFleet):
         if state == "absent":
             self.world["panes"]["w2:p2"].update(agent=None, procs=[dict(fake_herdr.SHELL)])
         else:
-            fake_herdr.put_agent(self.world, "w2:p2", "claude", "fablyn-dev", status=state,
+            fake_herdr.put_agent(self.world, "w2:p2", "claude", "sample-dev", status=state,
                                  args=["--model", "claude-opus-5-5"])
 
     def test_every_row(self):
@@ -224,34 +224,34 @@ class SendTable(LiveFleet):
                     if os.path.exists(os.path.join(self.repo, ".herdr", "messages.jsonl")):
                         os.remove(os.path.join(self.repo, ".herdr", "messages.jsonl"))
                     self.set_dev(state)
-                    before = len(self.prompts_to("fablyn-dev"))
-                    argv = ["send", "--as", "fablyn-orchestrator"] + ([flag] if flag else []) + ["fablyn-dev", "go"]
+                    before = len(self.prompts_to("sample-dev"))
+                    argv = ["send", "--as", "sample-orchestrator"] + ([flag] if flag else []) + ["sample-dev", "go"]
                     code, out, err = self.run_cli(*argv)
                     (entry,) = log_entries(self.repo)
-                    prompted = len(self.prompts_to("fablyn-dev")) - before
+                    prompted = len(self.prompts_to("sample-dev")) - before
                     fyi = FYI_LABEL if flag == "--fyi" else ""
                     if outcome == "sent":
                         self.assertEqual((code, prompted, entry["delivery"]), (0, 1, "sent"), out + err)
-                        self.assertTrue(out.startswith("sent to fablyn-dev (%s), " % place(state)), out)
-                        self.assertEqual(box(self.repo, "fablyn-dev", CUR), [entry["id"]])
+                        self.assertTrue(out.startswith("sent to sample-dev (%s), " % place(state)), out)
+                        self.assertEqual(box(self.repo, "sample-dev", CUR), [entry["id"]])
                     elif outcome == "queued":
                         self.assertEqual((code, prompted, entry["delivery"]), (0, 0, "queued"), out + err)
                         lands = LANDS if state == "working" and not flag else ""  # design 23.1
-                        self.assertEqual(out.strip(), "queued in herdr-fleet for fablyn-dev (%s%s) #%s, position 1 of "
+                        self.assertEqual(out.strip(), "queued in herdr-fleet for sample-dev (%s%s) #%s, position 1 of "
                                                       "1%s" % (state_words(state), ", " + FYI_PLACE if fyi else "",
                                                                entry["id"][-6:], lands))
-                        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [entry["id"]])
+                        self.assertEqual(box(self.repo, "sample-dev", NEW), [entry["id"]])
                     else:
                         self.assertEqual((code, prompted, entry["delivery"]), (1, 0, "refused"), out + err)
-                        self.assertEqual(out.strip(), "refused fablyn-dev (%s): nothing sent" % state_words(state))
-                        self.assertEqual(box(self.repo, "fablyn-dev", CUR), [entry["id"]])
-                        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
+                        self.assertEqual(out.strip(), "refused sample-dev (%s): nothing sent" % state_words(state))
+                        self.assertEqual(box(self.repo, "sample-dev", CUR), [entry["id"]])
+                        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
 
     def test_queue_and_now_together_and_bad_options(self):
-        self.assertEqual(self.run_cli("send", "--queue", "--now", "fablyn-dev", "x")[0], 2)
-        self.assertEqual(self.run_cli("send", "--ttl", "5x", "fablyn-dev", "x")[0], 2)
-        self.assertEqual(self.run_cli("send", "--ttl", "0m", "fablyn-dev", "x")[0], 2)
-        code, _, err = self.run_cli("send", "--reply-to", "#000000", "fablyn-dev", "x")
+        self.assertEqual(self.run_cli("send", "--queue", "--now", "sample-dev", "x")[0], 2)
+        self.assertEqual(self.run_cli("send", "--ttl", "5x", "sample-dev", "x")[0], 2)
+        self.assertEqual(self.run_cli("send", "--ttl", "0m", "sample-dev", "x")[0], 2)
+        code, _, err = self.run_cli("send", "--reply-to", "#000000", "sample-dev", "x")
         self.assertEqual(code, 2)
         self.assertIn("no message #000000", err)
         self.assertEqual(self.argvs("agent", "prompt"), [])
@@ -259,178 +259,178 @@ class SendTable(LiveFleet):
 
     def test_a_failed_write_prompts_nothing(self):
         os.makedirs(os.path.join(self.repo, ".herdr", "inbox"))
-        with open(os.path.join(self.repo, ".herdr", "inbox", "fablyn-dev"), "w") as handle:
+        with open(os.path.join(self.repo, ".herdr", "inbox", "sample-dev"), "w") as handle:
             handle.write("not a directory")
-        code, out, _ = self.run_cli("send", "fablyn-dev", "fablyn-reviewer", "x")
+        code, out, _ = self.run_cli("send", "sample-dev", "sample-reviewer", "x")
         self.assertEqual(code, 1)
-        self.assertRegex(out.splitlines()[0], r"^failed fablyn-dev: cannot write the message file \(.*\); "
+        self.assertRegex(out.splitlines()[0], r"^failed sample-dev: cannot write the message file \(.*\); "
                                               r"nothing sent$")
-        self.assertTrue(out.splitlines()[1].startswith("sent to fablyn-reviewer (idle)"))
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
-        self.assertEqual([e["to"] for e in log_entries(self.repo)], ["fablyn-reviewer"])
+        self.assertTrue(out.splitlines()[1].startswith("sent to sample-reviewer (idle)"))
+        self.assertEqual(self.prompts_to("sample-dev"), [])
+        self.assertEqual([e["to"] for e in log_entries(self.repo)], ["sample-reviewer"])
 
     def test_an_fyi_never_wakes_a_seat_that_turned_idle(self):
         working = {"id": "cli:agent:get", "result": {"type": "agent_info", "agent": {
-            "agent": "claude", "agent_status": "working", "name": "fablyn-dev", "pane_id": "w2:p2"}}}
-        self.world["canned"] = [{"prefix": ["agent", "get", "fablyn-dev"], "stdout": working, "times": 1}]
-        code, out, _ = self.run_cli("send", "--fyi", "fablyn-dev", "report")  # working when looked at, idle at prompt
+            "agent": "claude", "agent_status": "working", "name": "sample-dev", "pane_id": "w2:p2"}}}
+        self.world["canned"] = [{"prefix": ["agent", "get", "sample-dev"], "stdout": working, "times": 1}]
+        code, out, _ = self.run_cli("send", "--fyi", "sample-dev", "report")  # working when looked at, idle at prompt
         self.assertEqual(code, 0)  # design 21.1: a working seat is not even tried
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working%s\) %s, position 1 of 1$"
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(working%s\) %s, position 1 of 1$"
                          % (FYI_LABEL, SHORT))
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
     def test_dry_run_writes_nothing(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "queued one")
+        self.run_cli("send", "sample-dev", "queued one")
         self.status_of("w2:p2", "idle")
-        for argv, line in ((["fablyn-dev", "x"], r"^would send to fablyn-dev \(idle\) with 1 queued, \d+ B$"),
-                           (["--queue", "fablyn-dev", "x"],
-                            r"^would queue in herdr-fleet for fablyn-dev \(idle\); would deliver what was queued "
+        for argv, line in ((["sample-dev", "x"], r"^would send to sample-dev \(idle\) with 1 queued, \d+ B$"),
+                           (["--queue", "sample-dev", "x"],
+                            r"^would queue in herdr-fleet for sample-dev \(idle\); would deliver what was queued "
                             r"on refusal$"),
-                           (["--fyi", "fablyn-dev", "x"], r"^would send to fablyn-dev \(idle\) with 1 queued, \d+ B$")):
+                           (["--fyi", "sample-dev", "x"], r"^would send to sample-dev \(idle\) with 1 queued, \d+ B$")):
             code, out, _ = self.run_cli("send", "--dry-run", *argv)
             self.assertEqual(code, 0)
             self.assertRegex(out.strip(), line)
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 1)
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 1)
         self.assertEqual(len(log_entries(self.repo)), 1)
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        self.assertEqual(self.prompts_to("sample-dev"), [])
 
 
 class FlushBeforeSend(LiveFleet):
     def test_the_queue_goes_in_front_in_order_with_one_delivered_entry_each(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "first")
-        self.run_cli("send", "--as", "fablyn-reviewer", "fablyn-dev", "second")
+        self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "first")
+        self.run_cli("send", "--as", "sample-reviewer", "sample-dev", "second")
         self.status_of("w2:p2", "idle")
-        code, out, _ = self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "third")
+        code, out, _ = self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "third")
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.strip(), r"^sent to fablyn-dev \(idle\) with 2 queued, \d+ B$")
-        (prompt,) = self.prompts_to("fablyn-dev")
-        self.assertRegex(prompt, r"^\[from fablyn-orchestrator at %s %s\]\nfirst\n\n"
-                                 r"\[from fablyn-reviewer at %s %s\]\nsecond\n\n"
-                                 r"\[from fablyn-orchestrator at %s %s\]\nthird$" % ((HHMM, SHORT) * 3))
+        self.assertRegex(out.strip(), r"^sent to sample-dev \(idle\) with 2 queued, \d+ B$")
+        (prompt,) = self.prompts_to("sample-dev")
+        self.assertRegex(prompt, r"^\[from sample-orchestrator at %s %s\]\nfirst\n\n"
+                                 r"\[from sample-reviewer at %s %s\]\nsecond\n\n"
+                                 r"\[from sample-orchestrator at %s %s\]\nthird$" % ((HHMM, SHORT) * 3))
         entries = log_entries(self.repo)
         self.assertEqual([(e["kind"], e["delivery"], e.get("via"), e["first_line"]) for e in entries],
                          [("send", "queued", None, "first"), ("send", "queued", None, "second"),
                           ("delivered", "sent", "send", "first"), ("delivered", "sent", "send", "second"),
                           ("send", "sent", None, "third")])
         self.assertEqual(entries[2]["id"], entries[0]["id"])
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
-        self.assertEqual(len(box(self.repo, "fablyn-dev", CUR)), 3)
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
+        self.assertEqual(len(box(self.repo, "sample-dev", CUR)), 3)
 
     def test_a_working_seat_gets_the_batch_typed_ahead_only_with_now(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "first")
+        self.run_cli("send", "sample-dev", "first")
         self.status_of("w2:p2", "working")
-        code, out, _ = self.run_cli("send", "fablyn-dev", "second")  # design 21.1: queued, nothing flushed
+        code, out, _ = self.run_cli("send", "sample-dev", "second")  # design 21.1: queued, nothing flushed
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(working\) %s, position 2 of 2; "
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(working\) %s, position 2 of 2; "
                                       r"lands at its next idle, or now with --now$" % SHORT)
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
-        code, out, _ = self.run_cli("send", "--now", "fablyn-dev", "third")
+        self.assertEqual(self.prompts_to("sample-dev"), [])
+        code, out, _ = self.run_cli("send", "--now", "sample-dev", "third")
         self.assertEqual(code, 0)
-        self.assertIn("sent to fablyn-dev (%s) with 2 queued" % place("working"), out)
-        self.assertIn("\nfirst\n\n[from caller at", self.prompts_to("fablyn-dev")[0])
+        self.assertIn("sent to sample-dev (%s) with 2 queued" % place("working"), out)
+        self.assertIn("\nfirst\n\n[from caller at", self.prompts_to("sample-dev")[0])
 
     def test_a_refused_prompt_leaves_everything_queued(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "first")
+        self.run_cli("send", "sample-dev", "first")
         self.status_of("w2:p2", "idle")
-        self.world["canned"] = [{"prefix": ["agent", "prompt", "fablyn-dev"], "exit": 1, "times": 1,
+        self.world["canned"] = [{"prefix": ["agent", "prompt", "sample-dev"], "exit": 1, "times": 1,
                                  "stderr": {"error": {"code": "agent_blocked", "message": "blocked"}}}]
-        code, out, _ = self.run_cli("send", "fablyn-dev", "second")
+        code, out, _ = self.run_cli("send", "sample-dev", "second")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(blocked: a dialog is open\) %s, "
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(blocked: a dialog is open\) %s, "
                                       r"position 2 of 2$" % SHORT)
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 2)
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 2)
         self.assertEqual([e["kind"] for e in log_entries(self.repo)], ["send", "send"])
 
     def test_an_unconfirmed_batch_is_moved_and_logged_unconfirmed(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "first")
+        self.run_cli("send", "sample-dev", "first")
         self.status_of("w2:p2", "idle")
-        self.world["behaviors"]["prompt_errors"] = {"fablyn-dev": "agent_prompt_stalled"}
-        code, out, _ = self.run_cli("send", "fablyn-dev", "second")
+        self.world["behaviors"]["prompt_errors"] = {"sample-dev": "agent_prompt_stalled"}
+        code, out, _ = self.run_cli("send", "sample-dev", "second")
         self.assertEqual(code, 1)
-        self.assertIn("unconfirmed fablyn-dev with 1 queued", out)
+        self.assertIn("unconfirmed sample-dev with 1 queued", out)
         self.assertEqual([(e["kind"], e["delivery"]) for e in log_entries(self.repo)[1:]],
                          [("delivered", "unconfirmed"), ("send", "unconfirmed")])
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
 
 
 class Pointer(LiveFleet):
     def test_a_prompt_over_16_kib_becomes_a_pointer_and_the_files_stay(self):
-        code, out, _ = self.run_cli("send", "fablyn-dev", "x" * 17000)
+        code, out, _ = self.run_cli("send", "sample-dev", "x" * 17000)
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(idle\) %s, position 1 of 1; prompted a "
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(idle\) %s, position 1 of 1; prompted a "
                                       r"pointer instead: 1 message waiting \(oldest %s, 17\.0 KB\); "
                                       r"run: herdr-fleet inbox --read$" % (SHORT, HHMM))
-        (prompt,) = self.prompts_to("fablyn-dev")
+        (prompt,) = self.prompts_to("sample-dev")
         self.assertRegex(prompt, r"^\[from herdr-fleet\] 1 message waiting \(oldest %s, 17\.0 KB\); "
                                  r"run: herdr-fleet inbox --read$" % HHMM)
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 1)
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 1)
         self.assertEqual([e["delivery"] for e in log_entries(self.repo)], ["queued"])
-        code, out, _ = self.run_cli("inbox", "--as", "fablyn-dev", "--read")
+        code, out, _ = self.run_cli("inbox", "--as", "sample-dev", "--read")
         self.assertIn("x" * 17000, out)
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
 
     def test_deliver_prompts_a_pointer_for_a_large_queue(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "a" * 9000)
-        self.run_cli("send", "fablyn-dev", "b" * 9000)
+        self.run_cli("send", "sample-dev", "a" * 9000)
+        self.run_cli("send", "sample-dev", "b" * 9000)
         self.status_of("w2:p2", "idle")
         code, out, _ = self.run_cli("deliver")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^prompted fablyn-dev \(idle\) with a pointer: 2 messages waiting")
-        self.assertTrue(self.prompts_to("fablyn-dev")[0].startswith("[from herdr-fleet] 2 messages waiting"))
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 2)
+        self.assertRegex(out.strip(), r"^prompted sample-dev \(idle\) with a pointer: 2 messages waiting")
+        self.assertTrue(self.prompts_to("sample-dev")[0].startswith("[from herdr-fleet] 2 messages waiting"))
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 2)
         self.assertNotIn("delivered", [e["kind"] for e in log_entries(self.repo)])
 
 
 class ReplyToAndTtl(LiveFleet):
     def test_reply_to_is_stored_logged_and_rendered(self):
-        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Task 4")
+        self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "Task 4")
         ask = log_entries(self.repo)[0]["id"]
         self.status_of("w2:p1", "blocked")
-        self.run_cli("send", "--as", "fablyn-dev", "--reply-to", "#" + ask[-6:], "fablyn-orchestrator", "done")
+        self.run_cli("send", "--as", "sample-dev", "--reply-to", "#" + ask[-6:], "sample-orchestrator", "done")
         reply = log_entries(self.repo)[-1]
         self.assertEqual(reply["reply_to"], ask)
-        (message,) = inbox.read_box(self.repo, "fablyn-orchestrator", NEW)
+        (message,) = inbox.read_box(self.repo, "sample-orchestrator", NEW)
         self.assertEqual(message.reply_to, ask)
         self.status_of("w2:p1", "idle")
-        self.run_cli("deliver", "fablyn-orchestrator")
-        self.assertIn(" re #%s]\ndone" % ask[-6:], self.prompts_to("fablyn-orchestrator")[0])
+        self.run_cli("deliver", "sample-orchestrator")
+        self.assertIn(" re #%s]\ndone" % ask[-6:], self.prompts_to("sample-orchestrator")[0])
 
     def test_ttl_is_absolute_and_expires_at_delivery(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "--ttl", "30m", "fablyn-dev", "still fresh")
-        (message,) = inbox.read_box(self.repo, "fablyn-dev", NEW)
+        self.run_cli("send", "--ttl", "30m", "sample-dev", "still fresh")
+        (message,) = inbox.read_box(self.repo, "sample-dev", NEW)
         delta = inbox.parse_time(message.ttl) - inbox.parse_time(message.time)
         self.assertEqual(delta, datetime.timedelta(minutes=30))
-        stale = put(self.repo, "fablyn-dev", "outdated", ttl=inbox.now_utc() - datetime.timedelta(minutes=1))
+        stale = put(self.repo, "sample-dev", "outdated", ttl=inbox.now_utc() - datetime.timedelta(minutes=1))
         data = json.loads(self.run_cli("status", "--json")[1])
-        self.assertEqual(data["queued"], {"fablyn-dev": 1})  # status counts only live messages and moves nothing
-        self.assertIn(stale.id, box(self.repo, "fablyn-dev", NEW))
+        self.assertEqual(data["queued"], {"sample-dev": 1})  # status counts only live messages and moves nothing
+        self.assertIn(stale.id, box(self.repo, "sample-dev", NEW))
         self.status_of("w2:p2", "idle")
         code, out, _ = self.run_cli("deliver")
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.strip(), r"^delivered 1 to fablyn-dev \(idle\)")
-        self.assertNotIn("outdated", self.prompts_to("fablyn-dev")[0])
-        self.assertIn(stale.id, box(self.repo, "fablyn-dev", CUR))
+        self.assertRegex(out.strip(), r"^delivered 1 to sample-dev \(idle\)")
+        self.assertNotIn("outdated", self.prompts_to("sample-dev")[0])
+        self.assertIn(stale.id, box(self.repo, "sample-dev", CUR))
         expired = [e for e in log_entries(self.repo) if e["kind"] == "expired"]
         self.assertEqual([(e["id"], e["via"], e["delivery"]) for e in expired], [(stale.id, "ttl", "none")])
 
     def test_ttl_expires_in_inbox(self):
-        stale = put(self.repo, "fablyn-dev", "stale", ttl=inbox.now_utc() - datetime.timedelta(seconds=1))
-        code, out, _ = self.run_cli("inbox", "--as", "fablyn-dev")
-        self.assertEqual((code, out.strip()), (0, "nothing queued for fablyn-dev"))
-        self.assertEqual(box(self.repo, "fablyn-dev", CUR), [stale.id])
+        stale = put(self.repo, "sample-dev", "stale", ttl=inbox.now_utc() - datetime.timedelta(seconds=1))
+        code, out, _ = self.run_cli("inbox", "--as", "sample-dev")
+        self.assertEqual((code, out.strip()), (0, "nothing queued for sample-dev"))
+        self.assertEqual(box(self.repo, "sample-dev", CUR), [stale.id])
         self.assertEqual([e["kind"] for e in log_entries(self.repo)], ["expired"])
 
 
 # -- kickoffs -------------------------------------------------------------------------------------
 
-WITH_TEMPLATE = THREE_SEATS.replace('name = "fablyn-dev"\n', 'name = "fablyn-dev"\nkickoff = ".herdr/kickoff/dev.md"\n')
+WITH_TEMPLATE = THREE_SEATS.replace('name = "sample-dev"\n', 'name = "sample-dev"\nkickoff = ".herdr/kickoff/dev.md"\n')
 DEV_TEMPLATE = "[from herdr-fleet] You are {name}.\nTeam:\n{roster}\n\n{inbox}\n\nWhere things stand:\n{state}\n"
 
 
@@ -440,82 +440,82 @@ class KickoffCarriesTheInbox(LiveFleet):
         self.write_file(".herdr/kickoff/dev.md", DEV_TEMPLATE)
         self.write_fleet(WITH_TEMPLATE)
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Range for 1.25.1")
-        self.run_cli("send", "--as", "fablyn-reviewer", "--fyi", "fablyn-dev", "round 3 clean")
+        self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "Review parser change")
+        self.run_cli("send", "--as", "sample-reviewer", "--fyi", "sample-dev", "parser tests pass")
         self.status_of("w2:p2", "idle")
 
     def test_the_block_sits_where_the_placeholder_is(self):
-        code, out, _ = self.run_cli("kickoff", "fablyn-dev")
+        code, out, _ = self.run_cli("kickoff", "sample-dev")
         self.assertEqual(code, 0, out)
-        self.assertIn("fablyn-dev: briefed - kickoff sent (kickoff) with 2 queued", out)
-        (text,) = self.prompts_to("fablyn-dev")
-        self.assertRegex(text, r"\n\nMessages that arrived while you were away:\n\[from fablyn-orchestrator at %s %s\]"
-                               r"\nRange for 1\.25\.1\n\n\[from fablyn-reviewer at %s %s\]\nround 3 clean\n\n"
+        self.assertIn("sample-dev: briefed - kickoff sent (kickoff) with 2 queued", out)
+        (text,) = self.prompts_to("sample-dev")
+        self.assertRegex(text, r"\n\nMessages that arrived while you were away:\n\[from sample-orchestrator at %s %s\]"
+                               r"\nReview parser change\n\n\[from sample-reviewer at %s %s\]\nparser tests pass\n\n"
                                r"Where things stand:$" % (HHMM, SHORT, HHMM, SHORT))
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
         kinds = [(e["kind"], e.get("via")) for e in log_entries(self.repo)]
         self.assertEqual(kinds[-3:], [("delivered", "kickoff"), ("delivered", "kickoff"), ("kickoff", None)])
 
     def test_without_the_placeholder_the_block_is_appended(self):
-        self.write_fleet(THREE_SEATS.replace('name = "fablyn-dev"\n',
-                                             'name = "fablyn-dev"\nkickoff_text = "[from herdr-fleet] Hello {name}."\n'))
-        self.run_cli("kickoff", "fablyn-dev")
-        (text,) = self.prompts_to("fablyn-dev")
-        self.assertTrue(text.startswith("[from herdr-fleet] Hello fablyn-dev.\n\nMessages that arrived while you "
-                                        "were away:\n[from fablyn-orchestrator at "), text)
+        self.write_fleet(THREE_SEATS.replace('name = "sample-dev"\n',
+                                             'name = "sample-dev"\nkickoff_text = "[from herdr-fleet] Hello {name}."\n'))
+        self.run_cli("kickoff", "sample-dev")
+        (text,) = self.prompts_to("sample-dev")
+        self.assertTrue(text.startswith("[from herdr-fleet] Hello sample-dev.\n\nMessages that arrived while you "
+                                        "were away:\n[from sample-orchestrator at "), text)
 
     def test_a_refused_kickoff_leaves_the_messages_queued(self):
         self.status_of("w2:p2", "working")
-        code, out, _ = self.run_cli("kickoff", "fablyn-dev")
+        code, out, _ = self.run_cli("kickoff", "sample-dev")
         self.assertEqual(code, 3)
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 2)
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 2)
         self.assertNotIn("delivered", [e["kind"] for e in log_entries(self.repo)])
 
     def test_drop_inbox_on_kickoff_and_restart(self):
-        code, out, _ = self.run_cli("kickoff", "--drop-inbox", "fablyn-dev")
+        code, out, _ = self.run_cli("kickoff", "--drop-inbox", "sample-dev")
         self.assertEqual(code, 0, out)
-        self.assertIn("fablyn-dev: dropped - 2 queued messages moved to cur/", out)
-        self.assertNotIn("Messages that arrived", self.prompts_to("fablyn-dev")[0])
-        self.assertIn("\n\nWhere things stand:", self.prompts_to("fablyn-dev")[0])
+        self.assertIn("sample-dev: dropped - 2 queued messages moved to cur/", out)
+        self.assertNotIn("Messages that arrived", self.prompts_to("sample-dev")[0])
+        self.assertIn("\n\nWhere things stand:", self.prompts_to("sample-dev")[0])
         dropped = [e for e in log_entries(self.repo) if e["kind"] == "dropped"]
         self.assertEqual([(e["via"], e["delivery"]) for e in dropped], [("drop-inbox", "none")] * 2)
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "fablyn-dev", "again")
+        self.run_cli("send", "sample-dev", "again")
         self.status_of("w2:p2", "idle")
-        code, out, _ = self.run_cli("restart", "--drop-inbox", "fablyn-dev")
+        code, out, _ = self.run_cli("restart", "--drop-inbox", "sample-dev")
         self.assertEqual(code, 0, out)
-        self.assertIn("fablyn-dev: dropped - 1 queued message moved to cur/", out)
-        self.assertNotIn("Messages that arrived", self.prompts_to("fablyn-dev")[-1])
+        self.assertIn("sample-dev: dropped - 1 queued message moved to cur/", out)
+        self.assertNotIn("Messages that arrived", self.prompts_to("sample-dev")[-1])
 
 
 class UpDeliversAtKickoff(FleetCase):
     def test_a_message_to_an_absent_seat_arrives_with_its_kickoff(self):
-        code, out, _ = self.run_cli("send", "--as", "owner", "fablyn-dev", "welcome back")
+        code, out, _ = self.run_cli("send", "--as", "owner", "sample-dev", "welcome back")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for fablyn-dev \(absent\) %s, position 1 of 1$" % SHORT)
+        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(absent\) %s, position 1 of 1$" % SHORT)
         code, out, _ = self.run_cli("up")
         self.assertEqual(code, 0, out)
-        kickoff = self.prompts_to("fablyn-dev")[0]
+        kickoff = self.prompts_to("sample-dev")[0]
         self.assertRegex(kickoff, r"Messages that arrived while you were away:\n\[from owner at %s %s\]\n"
                                   r"welcome back" % (HHMM, SHORT))
-        self.assertNotIn("Messages that arrived", self.prompts_to("fablyn-reviewer")[0])
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
-        self.assertFalse(os.path.exists(os.path.join(self.repo, ".herdr", "inbox", "fablyn-reviewer")))
+        self.assertNotIn("Messages that arrived", self.prompts_to("sample-reviewer")[0])
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
+        self.assertFalse(os.path.exists(os.path.join(self.repo, ".herdr", "inbox", "sample-reviewer")))
 
     def test_a_seat_blocked_at_startup_keeps_its_messages(self):
-        self.run_cli("send", "--as", "owner", "fablyn-dev", "welcome back")
-        self.world["behaviors"]["start_not_ready"] = ["fablyn-dev"]
+        self.run_cli("send", "--as", "owner", "sample-dev", "welcome back")
+        self.world["behaviors"]["start_not_ready"] = ["sample-dev"]
         code, out, _ = self.run_cli("up")
         self.assertEqual(code, 3)
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 1)
+        self.assertEqual(self.prompts_to("sample-dev"), [])
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 1)
 
     def test_dry_run_says_what_the_kickoff_carries(self):
-        self.run_cli("send", "--as", "owner", "fablyn-dev", "welcome back")
+        self.run_cli("send", "--as", "owner", "sample-dev", "welcome back")
         code, out, _ = self.run_cli("up", "--dry-run")
         self.assertEqual(code, 0)
-        self.assertIn("fablyn-dev carries 1 queued", out)
+        self.assertIn("sample-dev carries 1 queued", out)
 
 
 # -- deliver ---------------------------------------------------------------------------------------
@@ -526,9 +526,9 @@ class Deliver(LiveFleet):
         super().setUp()
         self.status_of("w2:p2", "blocked")
         self.status_of("w2:p3", "blocked")
-        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Task A")
-        self.run_cli("send", "--as", "fablyn-orchestrator", "--queue", "fablyn-reviewer", "Review B")
-        self.run_cli("send", "--as", "fablyn-dev", "--fyi", "fablyn-orchestrator", "FYI only")
+        self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "Task A")
+        self.run_cli("send", "--as", "sample-orchestrator", "--queue", "sample-reviewer", "Review B")
+        self.run_cli("send", "--as", "sample-dev", "--fyi", "sample-orchestrator", "FYI only")
         self.status_of("w2:p2", "idle")
         self.status_of("w2:p3", "working")
 
@@ -536,51 +536,51 @@ class Deliver(LiveFleet):
         code, out, _ = self.run_cli("deliver")
         self.assertEqual(code, 0, out)
         lines = out.splitlines()
-        self.assertRegex(lines[0], r"^delivered 1 to fablyn-dev \(idle\), \d+ B$")
-        self.assertEqual(lines[1], "fablyn-reviewer: working, 1 left queued")
+        self.assertRegex(lines[0], r"^delivered 1 to sample-dev \(idle\), \d+ B$")
+        self.assertEqual(lines[1], "sample-reviewer: working, 1 left queued")
         self.assertEqual(len(lines), 2)  # the FYI-only mailbox is not taken
-        self.assertRegex(self.prompts_to("fablyn-dev")[0], r"^\[from fablyn-orchestrator at %s %s\]\nTask A$"
+        self.assertRegex(self.prompts_to("sample-dev")[0], r"^\[from sample-orchestrator at %s %s\]\nTask A$"
                          % (HHMM, SHORT))
-        self.assertEqual(self.prompts_to("fablyn-reviewer"), [])
-        self.assertEqual(self.prompts_to("fablyn-orchestrator"), [])
+        self.assertEqual(self.prompts_to("sample-reviewer"), [])
+        self.assertEqual(self.prompts_to("sample-orchestrator"), [])
         self.assertEqual([(e["kind"], e["via"]) for e in log_entries(self.repo) if e["kind"] == "delivered"],
                          [("delivered", "deliver")])
         code, out, _ = self.run_cli("deliver", "--fyi")  # seats in file order: the orchestrator comes first
         self.assertEqual(code, 0)
-        self.assertRegex(out.splitlines()[0], r"^delivered 1 to fablyn-orchestrator \(idle\)")
-        self.assertRegex(out.splitlines()[1], r"^fablyn-reviewer: working, 1 left queued$")
+        self.assertRegex(out.splitlines()[0], r"^delivered 1 to sample-orchestrator \(idle\)")
+        self.assertRegex(out.splitlines()[1], r"^sample-reviewer: working, 1 left queued$")
 
     def test_names_blocked_unknown_and_nothing(self):
         self.status_of("w2:p3", "blocked")
-        code, out, _ = self.run_cli("deliver", "fablyn-reviewer", "fablyn-orchestrator")
+        code, out, _ = self.run_cli("deliver", "sample-reviewer", "sample-orchestrator")
         self.assertEqual(code, 0)
-        self.assertEqual(out.splitlines()[0], "fablyn-reviewer: blocked: a dialog is open, 1 left queued")
-        self.assertRegex(out.splitlines()[1], r"^delivered 1 to fablyn-orchestrator")  # named: FYIs too
-        self.assertEqual(self.prompts_to("fablyn-reviewer"), [])
-        code, out, _ = self.run_cli("deliver", "fablyn-orchestrator")
-        self.assertEqual(out.strip(), "nothing queued for fablyn-orchestrator")
+        self.assertEqual(out.splitlines()[0], "sample-reviewer: blocked: a dialog is open, 1 left queued")
+        self.assertRegex(out.splitlines()[1], r"^delivered 1 to sample-orchestrator")  # named: FYIs too
+        self.assertEqual(self.prompts_to("sample-reviewer"), [])
+        code, out, _ = self.run_cli("deliver", "sample-orchestrator")
+        self.assertEqual(out.strip(), "nothing queued for sample-orchestrator")
         self.assertEqual(self.run_cli("deliver", "nobody")[0], 2)
 
     def test_only_fyis_and_dry_run(self):
-        self.run_cli("deliver", "fablyn-dev")
+        self.run_cli("deliver", "sample-dev")
         self.status_of("w2:p3", "idle")
-        self.run_cli("deliver", "fablyn-reviewer")
+        self.run_cli("deliver", "sample-reviewer")
         code, out, _ = self.run_cli("deliver")
         self.assertEqual(out.strip(), "nothing to deliver (only FYIs are queued; deliver --fyi takes them)")
         code, out, _ = self.run_cli("deliver", "--fyi", "--dry-run")
-        self.assertRegex(out.strip(), r"^would deliver 1 to fablyn-orchestrator \(idle\), \d+ B$")
-        self.assertEqual(self.prompts_to("fablyn-orchestrator"), [])
-        self.assertEqual(len(box(self.repo, "fablyn-orchestrator", NEW)), 1)
+        self.assertRegex(out.strip(), r"^would deliver 1 to sample-orchestrator \(idle\), \d+ B$")
+        self.assertEqual(self.prompts_to("sample-orchestrator"), [])
+        self.assertEqual(len(box(self.repo, "sample-orchestrator", NEW)), 1)
 
     def test_unconfirmed_exits_1_and_is_never_redelivered(self):
-        self.world["behaviors"]["prompt_errors"] = {"fablyn-dev": "timeout"}
-        code, out, _ = self.run_cli("deliver", "fablyn-dev")
+        self.world["behaviors"]["prompt_errors"] = {"sample-dev": "timeout"}
+        code, out, _ = self.run_cli("deliver", "sample-dev")
         self.assertEqual(code, 1)
-        self.assertIn("unconfirmed fablyn-dev: herdr error timeout", out)
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
+        self.assertIn("unconfirmed sample-dev: herdr error timeout", out)
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
         self.assertEqual([e["delivery"] for e in log_entries(self.repo) if e["kind"] == "delivered"], ["unconfirmed"])
-        self.assertEqual(self.run_cli("deliver", "fablyn-dev")[1].strip(), "nothing queued for fablyn-dev")
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
+        self.assertEqual(self.run_cli("deliver", "sample-dev")[1].strip(), "nothing queued for sample-dev")
+        self.assertEqual(len(self.prompts_to("sample-dev")), 1)
 
 
 # -- inbox -----------------------------------------------------------------------------------------
@@ -590,77 +590,77 @@ class InboxCommand(LiveFleet):
     def setUp(self):
         super().setUp()
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "Task A\nwith details")
-        self.run_cli("send", "--as", "fablyn-reviewer", "--fyi", "fablyn-dev", "round 3 clean")
+        self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "Task A\nwith details")
+        self.run_cli("send", "--as", "sample-reviewer", "--fyi", "sample-dev", "parser tests pass")
         self.ids = [e["id"] for e in log_entries(self.repo)]
 
     def test_list_count_read(self):
         before = len(self.calls())
-        code, out, _ = self.run_cli("inbox", "--as", "fablyn-dev")
+        code, out, _ = self.run_cli("inbox", "--as", "sample-dev")
         self.assertEqual(code, 0)
         lines = out.splitlines()
         self.assertEqual(len(lines), 2)
-        self.assertRegex(lines[0], r"^1\. #%s  %s  fablyn-orchestrator  \[on refusal\]  Task A$"
+        self.assertRegex(lines[0], r"^1\. #%s  %s  sample-orchestrator  \[on refusal\]  Task A$"
                          % (self.ids[0][-6:], HHMM))
-        self.assertRegex(lines[1], r"^2\. #%s  %s  fablyn-reviewer  \[fyi\]  round 3 clean$" % (self.ids[1][-6:], HHMM))
-        self.assertEqual(self.run_cli("inbox", "--as", "fablyn-dev", "--count")[1], "2\n")
-        self.assertEqual(json.loads(self.run_cli("inbox", "--as", "fablyn-dev", "--count", "--json")[1]),
-                         {"name": "fablyn-dev", "count": 2})
-        data = json.loads(self.run_cli("inbox", "--as", "fablyn-dev", "--json")[1])
+        self.assertRegex(lines[1], r"^2\. #%s  %s  sample-reviewer  \[fyi\]  parser tests pass$" % (self.ids[1][-6:], HHMM))
+        self.assertEqual(self.run_cli("inbox", "--as", "sample-dev", "--count")[1], "2\n")
+        self.assertEqual(json.loads(self.run_cli("inbox", "--as", "sample-dev", "--count", "--json")[1]),
+                         {"name": "sample-dev", "count": 2})
+        data = json.loads(self.run_cli("inbox", "--as", "sample-dev", "--json")[1])
         self.assertEqual([(d["id"], d["from"], d["fyi"]) for d in data],
-                         [(self.ids[0], "fablyn-orchestrator", False), (self.ids[1], "fablyn-reviewer", True)])
-        self.assertEqual(len(box(self.repo, "fablyn-dev", NEW)), 2)  # listing moves nothing
-        code, out, _ = self.run_cli("inbox", "--as", "fablyn-dev", "--read")
+                         [(self.ids[0], "sample-orchestrator", False), (self.ids[1], "sample-reviewer", True)])
+        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 2)  # listing moves nothing
+        code, out, _ = self.run_cli("inbox", "--as", "sample-dev", "--read")
         self.assertEqual(code, 0)
-        self.assertRegex(out, r"^\[from fablyn-orchestrator at %s #%s\]\nTask A\nwith details\n\n"
-                              r"\[from fablyn-reviewer at %s #%s\]\nround 3 clean\n$"
+        self.assertRegex(out, r"^\[from sample-orchestrator at %s #%s\]\nTask A\nwith details\n\n"
+                              r"\[from sample-reviewer at %s #%s\]\nparser tests pass\n$"
                          % (HHMM, self.ids[0][-6:], HHMM, self.ids[1][-6:]))
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [])
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [])
         self.assertEqual([(e["kind"], e["via"], e["id"]) for e in log_entries(self.repo)[2:]],
                          [("delivered", "inbox", self.ids[0]), ("delivered", "inbox", self.ids[1])])
-        self.assertEqual(self.run_cli("inbox", "--as", "fablyn-dev", "--count")[1], "0\n")
+        self.assertEqual(self.run_cli("inbox", "--as", "sample-dev", "--count")[1], "0\n")
         self.assertEqual(len(self.calls()), before)  # with --as, no herdr command at all
-        self.assertEqual(self.prompts_to("fablyn-dev"), [])
+        self.assertEqual(self.prompts_to("sample-dev"), [])
 
     def test_history_and_redeliver(self):
-        self.run_cli("inbox", "--as", "fablyn-dev", "--read")
-        self.run_cli("send", "--as", "fablyn-dev", "--reply-to", self.ids[0], "fablyn-orchestrator", "Task A done")
-        put(self.repo, "fablyn-dev", "dropped one", which=CUR)  # no log entry: shown
-        self.run_cli("send", "--as", "fablyn-orchestrator", "--ttl", "1m", "fablyn-dev", "expires")
+        self.run_cli("inbox", "--as", "sample-dev", "--read")
+        self.run_cli("send", "--as", "sample-dev", "--reply-to", self.ids[0], "sample-orchestrator", "Task A done")
+        put(self.repo, "sample-dev", "dropped one", which=CUR)  # no log entry: shown
+        self.run_cli("send", "--as", "sample-orchestrator", "--ttl", "1m", "sample-dev", "expires")
         expiring = log_entries(self.repo)[-1]["id"]
-        messages.append(self.repo, {"time": "2026-10-21T10:00:00+11:00", "from": "herdr-fleet", "to": "fablyn-dev",
+        messages.append(self.repo, {"time": "2026-10-21T10:00:00+11:00", "from": "herdr-fleet", "to": "sample-dev",
                                     "kind": "expired", "id": expiring, "via": "ttl", "bytes": 0, "first_line": "x",
                                     "delivery": "none"})
-        os.rename(os.path.join(self.repo, ".herdr", "inbox", "fablyn-dev", NEW, expiring + ".md"),
-                  os.path.join(self.repo, ".herdr", "inbox", "fablyn-dev", CUR, expiring + ".md"))
-        code, out, _ = self.run_cli("inbox", "--as", "fablyn-dev", "--history", "fablyn-orchestrator")
+        os.rename(os.path.join(self.repo, ".herdr", "inbox", "sample-dev", NEW, expiring + ".md"),
+                  os.path.join(self.repo, ".herdr", "inbox", "sample-dev", CUR, expiring + ".md"))
+        code, out, _ = self.run_cli("inbox", "--as", "sample-dev", "--history", "sample-orchestrator")
         self.assertEqual(code, 0)
-        self.assertRegex(out, r"^\[from fablyn-orchestrator to fablyn-dev at %s #%s\]\nTask A\nwith details\n\n"
-                              r"\[from fablyn-dev to fablyn-orchestrator at %s %s re #%s\]\nTask A done\n\n"
-                              r"\[from fablyn-orchestrator to fablyn-dev at %s %s\]\ndropped one\n$"
+        self.assertRegex(out, r"^\[from sample-orchestrator to sample-dev at %s #%s\]\nTask A\nwith details\n\n"
+                              r"\[from sample-dev to sample-orchestrator at %s %s re #%s\]\nTask A done\n\n"
+                              r"\[from sample-orchestrator to sample-dev at %s %s\]\ndropped one\n$"
                          % (HHMM, self.ids[0][-6:], HHMM, SHORT, self.ids[0][-6:], HHMM, SHORT))
         self.assertNotIn("expires", out)
-        self.assertNotIn("round 3", out)  # from another sender
-        code, out, _ = self.run_cli("inbox", "--as", "fablyn-dev", "--redeliver", "#" + self.ids[0][-6:])
+        self.assertNotIn("parser review", out)  # from another sender
+        code, out, _ = self.run_cli("inbox", "--as", "sample-dev", "--redeliver", "#" + self.ids[0][-6:])
         self.assertEqual(code, 0)
-        self.assertEqual(out.strip(), "#%s is queued again for fablyn-dev; the next delivery carries it"
+        self.assertEqual(out.strip(), "#%s is queued again for sample-dev; the next delivery carries it"
                          % self.ids[0][-6:])
-        self.assertEqual(box(self.repo, "fablyn-dev", NEW), [self.ids[0]])
-        self.assertEqual(self.run_cli("inbox", "--as", "fablyn-dev", "--redeliver", self.ids[0])[0], 2)  # queued
-        self.assertEqual(self.run_cli("inbox", "--as", "fablyn-dev", "--redeliver", "#000000")[0], 2)
-        self.assertEqual(self.run_cli("inbox", "--as", "fablyn-dev", "--history", "Not A Name")[0], 2)
+        self.assertEqual(box(self.repo, "sample-dev", NEW), [self.ids[0]])
+        self.assertEqual(self.run_cli("inbox", "--as", "sample-dev", "--redeliver", self.ids[0])[0], 2)  # queued
+        self.assertEqual(self.run_cli("inbox", "--as", "sample-dev", "--redeliver", "#000000")[0], 2)
+        self.assertEqual(self.run_cli("inbox", "--as", "sample-dev", "--history", "Not A Name")[0], 2)
 
     def test_the_caller_is_found_from_its_pane_or_is_owner(self):
-        self.run_cli("send", "--as", "fablyn-dev", "--queue", "caller", "for the caller")
+        self.run_cli("send", "--as", "sample-dev", "--queue", "caller", "for the caller")
         before = len(self.calls())
         code, out, _ = self.run_cli("inbox")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^1\. %s  %s  fablyn-dev  \[queued\]  for the caller$" % (SHORT, HHMM))
+        self.assertRegex(out.strip(), r"^1\. %s  %s  sample-dev  \[queued\]  for the caller$" % (SHORT, HHMM))
         self.assertEqual([c["argv"][:2] for c in self.calls()[before:]], [["pane", "current"], ["agent", "get"]])
-        self.run_cli("send", "--as", "fablyn-dev", "--queue", "owner", "for you")
+        self.run_cli("send", "--as", "sample-dev", "--queue", "owner", "for you")
         env = {"PATH": os.environ.get("PATH", ""), "HOME": self.tmp}  # outside herdr: the caller is owner
         code, out, _ = self.run_cli("inbox", env=env)
-        self.assertRegex(out.strip(), r"^1\. %s  %s  fablyn-dev  \[queued\]  for you$" % (SHORT, HHMM))
+        self.assertRegex(out.strip(), r"^1\. %s  %s  sample-dev  \[queued\]  for you$" % (SHORT, HHMM))
         self.assertRegex(self.run_cli("inbox", "--as", "owner")[1].strip(), r"for you$")
         self.assertEqual(self.run_cli("inbox", "--as", "Not A Name")[0], 2)
         self.assertEqual(self.run_cli("inbox", "--read", "--count")[0], 2)
@@ -671,14 +671,14 @@ class InboxCommand(LiveFleet):
 
 class Owner(LiveFleet):
     def test_inside_herdr_the_owner_gets_a_notification(self):
-        code, out, _ = self.run_cli("send", "--as", "fablyn-dev", "owner", "Please approve the deploy\nDetails.")
+        code, out, _ = self.run_cli("send", "--as", "sample-dev", "owner", "Please review the example\nDetails.")
         self.assertEqual(code, 0, out)
         self.assertRegex(out.strip(), r"^sent to owner \(notification\), \d+ B$")
         ident = log_entries(self.repo)[0]["id"]
         note = self.world["notifications"][-1]
-        self.assertEqual(note["title"], "message from fablyn-dev #%s" % ident[-6:])
-        self.assertTrue(note["body"].startswith("Please approve the deploy\n"), note)
-        self.assertIn("herdr-fleet inbox --as owner --history fablyn-dev", note["body"])
+        self.assertEqual(note["title"], "message from sample-dev #%s" % ident[-6:])
+        self.assertTrue(note["body"].startswith("Please review the example\n"), note)
+        self.assertIn("herdr-fleet inbox --as owner --history sample-dev", note["body"])
         self.assertEqual(box(self.repo, "owner", CUR), [ident])
         self.assertEqual([(e["kind"], e["delivery"], e.get("via")) for e in log_entries(self.repo)],
                          [("send", "queued", None), ("delivered", "sent", "notify")])
@@ -687,23 +687,23 @@ class Owner(LiveFleet):
     def test_outside_herdr_it_stays_queued_until_delivered(self):
         env = {"PATH": os.environ.get("PATH", ""), "HOME": self.tmp}
         before = len(self.calls())
-        code, out, err = self.run_cli("send", "--as", "fablyn-dev", "owner", "Please approve", env=env)
+        code, out, err = self.run_cli("send", "--as", "sample-dev", "owner", "Please approve", env=env)
         self.assertEqual(code, 0, out + err)
         self.assertRegex(out.strip(), r"^queued in herdr-fleet for owner \(not in herdr\) %s, position 1 of 1$" % SHORT)
         self.assertEqual(len(self.calls()), before)  # no herdr command at all
         self.assertEqual(self.world["notifications"], [])
-        self.assertEqual(self.run_cli("send", "--as", "fablyn-dev", "owner", "fablyn-orchestrator", "x",
+        self.assertEqual(self.run_cli("send", "--as", "sample-dev", "owner", "sample-orchestrator", "x",
                                       env=env)[0], 1)  # a seat needs herdr
         self.assertEqual(len(box(self.repo, "owner", NEW)), 1)
         code, out, _ = self.run_cli("deliver")
         self.assertEqual((code, out.strip()), (0, "delivered 1 to owner (notification)"))
-        self.assertEqual(self.world["notifications"][-1]["title"][:21], "message from fablyn-d")
+        self.assertEqual(self.world["notifications"][-1]["title"][:21], "message from sample-d")
 
     def test_queue_and_read_as_owner(self):
-        code, out, _ = self.run_cli("send", "--as", "fablyn-dev", "--queue", "owner", "later")
+        code, out, _ = self.run_cli("send", "--as", "sample-dev", "--queue", "owner", "later")
         self.assertRegex(out.strip(), r"^queued in herdr-fleet for owner %s, position 1 of 1$" % SHORT)
         self.assertEqual(self.world["notifications"], [])
-        self.assertRegex(self.run_cli("inbox", "--as", "owner", "--read")[1], r"^\[from fablyn-dev at .*\]\nlater\n$")
+        self.assertRegex(self.run_cli("inbox", "--as", "owner", "--read")[1], r"^\[from sample-dev at .*\]\nlater\n$")
 
 
 # -- owed replies (design 18.8) ---------------------------------------------------------------------------
@@ -772,28 +772,28 @@ class OwedFromDelivery(unittest.TestCase):
 
 class OwedCommands(LiveFleet):
     def test_reply_to_and_ack_by_id(self):
-        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "task 1")
-        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "task 2")
+        self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "task 1")
+        self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "task 2")
         first, second = [e["id"] for e in log_entries(self.repo)]
-        self.run_cli("send", "--as", "fablyn-dev", "--fyi", "--reply-to", second, "fablyn-orchestrator", "task 2 done")
+        self.run_cli("send", "--as", "sample-dev", "--fyi", "--reply-to", second, "sample-orchestrator", "task 2 done")
         owed = json.loads(self.run_cli("log", "--owed", "--json")[1])
         self.assertEqual([(o["first_line"], o["id"]) for o in owed], [("task 1", first)])
-        code, out, _ = self.run_cli("ack", "--as", "fablyn-dev", "#" + first[-6:])
+        code, out, _ = self.run_cli("ack", "--as", "sample-dev", "#" + first[-6:])
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^acked #%s from fablyn-orchestrator since %s \(task 1\)$" % (first[-6:], HHMM))
+        self.assertRegex(out.strip(), r"^acked #%s from sample-orchestrator since %s \(task 1\)$" % (first[-6:], HHMM))
         self.assertEqual(log_entries(self.repo)[-1]["id"], first)
         self.assertEqual(json.loads(self.run_cli("log", "--owed", "--json")[1]), [])
-        code, out, _ = self.run_cli("ack", "--as", "fablyn-dev", first[-6:])  # the hex part without #
+        code, out, _ = self.run_cli("ack", "--as", "sample-dev", first[-6:])  # the hex part without #
         self.assertEqual(out.strip(), "nothing owed for #%s" % first[-6:])
-        self.assertEqual(self.run_cli("ack", "--as", "fablyn-dev", "#000000")[0], 2)
+        self.assertEqual(self.run_cli("ack", "--as", "sample-dev", "#000000")[0], 2)
 
     def test_a_queued_message_owes_nothing_until_it_is_delivered(self):
         self.status_of("w2:p2", "blocked")
-        self.run_cli("send", "--as", "fablyn-orchestrator", "fablyn-dev", "task")
+        self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "task")
         self.assertNotIn("awaiting:", self.run_cli("status")[1])
         self.status_of("w2:p2", "idle")
         self.run_cli("deliver")
-        self.assertIn("awaiting: fablyn-dev owes fablyn-orchestrator for ", self.run_cli("status")[1])
+        self.assertIn("awaiting: sample-dev owes sample-orchestrator for ", self.run_cli("status")[1])
 
 
 # -- status and the safety hook ------------------------------------------------------------------------
@@ -805,15 +805,15 @@ class StatusQueued(LiveFleet):
         self.assertEqual(json.loads(self.run_cli("status", "--json")[1])["queued"], {})
         self.status_of("w2:p2", "blocked")
         for text in ("a", "b", "c"):
-            self.run_cli("send", "fablyn-dev", text)
+            self.run_cli("send", "sample-dev", text)
         self.run_cli("send", "--queue", "owner", "d")
         lines = self.run_cli("status")[1].splitlines()
         (queued,) = [l for l in lines if l.startswith("queued:")]
-        self.assertRegex(queued, r"^queued: fablyn-dev 3 \(oldest (<1m|\d+m)\), owner 1$")
+        self.assertRegex(queued, r"^queued: sample-dev 3 \(oldest (<1m|\d+m)\), owner 1$")
         self.assertLess(lines.index(queued), [i for i, l in enumerate(lines) if l.startswith("integration ")][0])
         data = json.loads(self.run_cli("status", "--json")[1])
-        self.assertEqual(data["queued"], {"fablyn-dev": 3, "owner": 1})
-        self.assertEqual(sorted(data["queued_oldest"]), ["fablyn-dev", "owner"])
+        self.assertEqual(data["queued"], {"sample-dev": 3, "owner": 1})
+        self.assertEqual(sorted(data["queued_oldest"]), ["owner", "sample-dev"])
 
 
 class SafetyHookLearnedTheNewCommands(LiveFleet):
@@ -826,11 +826,11 @@ class SafetyHookLearnedTheNewCommands(LiveFleet):
         os.remove(self.log_path)
 
     def test_deliver_never_prompts_a_working_agent(self):
-        self.check_fails(["deliver"], ["agent", "prompt", "fablyn-dev", "x"], {"target_status": "working"})
+        self.check_fails(["deliver"], ["agent", "prompt", "sample-dev", "x"], {"target_status": "working"})
 
     def test_inbox_runs_only_the_caller_lookup(self):
         self.check_fails(["inbox"], ["agent", "list"], {})
-        self.check_fails(["inbox", "--as", "fablyn-dev"], ["agent", "get", CALLER_PANE], {})
+        self.check_fails(["inbox", "--as", "sample-dev"], ["agent", "get", CALLER_PANE], {})
 
 
 if __name__ == "__main__":

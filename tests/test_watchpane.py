@@ -17,7 +17,7 @@ from support import ARGS, CALLER_PANE, FleetCase, GridCase, LiveFleet, THREE_SEA
 from herdr_fleet import inbox
 from herdr_fleet.fleetfile import FleetError, load_fleet
 
-NO_LABEL = THREE_SEATS.replace('workspace = "fablyn"\n', "")
+NO_LABEL = THREE_SEATS.replace('workspace = "sample"\n', "")
 
 
 def with_top(text, line):
@@ -66,7 +66,7 @@ class FreshWorkspace(StripCase):
                       out)
         cells = self.geometry(root)
         self.assertEqual(cells[strip], (0, 40, 200, 10))  # the full width, 10 of 50 rows
-        for name in ("fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"):
+        for name in ("sample-orchestrator", "sample-dev", "sample-reviewer"):
             x, y, w, h = cells[self.pane_of(name)]
             self.assertLessEqual(y + h, 40, name)  # every seat sits above the strip
         entry = self.read_state()["watch"]
@@ -86,7 +86,7 @@ class FreshWorkspace(StripCase):
         cells = self.geometry(root)
         self.assertEqual(cells[self.strip()], (0, 40, 200, 10))
         self.assertEqual(cells[root], (0, 0, 100, 20))  # orchestrator: top left quarter of the area above
-        self.assertEqual(cells[self.pane_of("fablyn-designer")], (100, 20, 100, 20))
+        self.assertEqual(cells[self.pane_of("sample-designer")], (100, 20, 100, 20))
 
     def test_status_line_and_json(self):
         self.run_cli("up")
@@ -106,7 +106,7 @@ class FreshWorkspace(StripCase):
         self.assertIn("\nwatcher: not running (watcher pane %s idle)\n" % strip, out)
         self.assertNotIn(strip, out.split("\nwatcher:")[0])  # never a row of the seat table
         self.assertEqual([s["name"] for s in json.loads(self.run_cli("status", "--json")[1])["seats"]],
-                         ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"])
+                         ["sample-orchestrator", "sample-dev", "sample-reviewer"])
 
     def test_second_up_opens_no_second_strip(self):
         self.run_cli("up")
@@ -145,9 +145,9 @@ class FreshWorkspace(StripCase):
         code, out, _ = self.run_cli("up", "--dry-run")
         self.assertEqual(code, 0, out)
         self.assertIn("watcher: plan - herdr plugin pane open --plugin yarrasys.fleet --entrypoint watch --placement "
-                      "split --target-pane '<root pane of fablyn>' --direction down --cwd %s --env "
-                      "HERDR_FLEET_FILE=%s --no-focus, then herdr pane resize --pane '<root pane of fablyn>' "
-                      "--direction down --amount 0.3 (the strip gets 20%% of <root pane of fablyn>)"
+                      "split --target-pane '<root pane of sample>' --direction down --cwd %s --env "
+                      "HERDR_FLEET_FILE=%s --no-focus, then herdr pane resize --pane '<root pane of sample>' "
+                      "--direction down --amount 0.3 (the strip gets 20%% of <root pane of sample>)"
                       % (self.repo, os.path.join(self.repo, ".herdr", "fleet.toml")), out)
         for prefix in (("plugin", "pane"), ("pane", "resize"), ("pane", "layout")):
             self.assertEqual(self.argvs(*prefix), [])
@@ -195,7 +195,7 @@ class FreshWorkspace(StripCase):
         self.assertEqual(code, 3, out)
         self.assertIn("watcher: failed - plugin pane open: herdr error plugin_not_found: not installed; start one by "
                       "hand with `herdr-fleet watch`", out)
-        self.assertEqual(len(self.prompts_to("fablyn-dev")), 1)
+        self.assertEqual(len(self.prompts_to("sample-dev")), 1)
         self.assertNotIn("watch", self.read_state())
 
 
@@ -226,12 +226,12 @@ class Skips(StripCase):
         self.fleet_ws()
         # every recorded pane hosts an unnamed agent of another kind: every seat conflicts,
         # nothing is placed and nothing is live
-        for pane, name in (("w2:p7", "fablyn-orchestrator"), ("w2:p8", "fablyn-dev"), ("w2:p9", "fablyn-reviewer")):
+        for pane, name in (("w2:p7", "sample-orchestrator"), ("w2:p8", "sample-dev"), ("w2:p9", "sample-reviewer")):
             fake_herdr.add_pane(self.world, pane, "w2", self.repo)
             fake_herdr.put_agent(self.world, pane, "codex")
         self.write_state({"version": 1, "workspace_id": "w2", "agents": {
-            "fablyn-orchestrator": {"pane_id": "w2:p7"}, "fablyn-dev": {"pane_id": "w2:p8"},
-            "fablyn-reviewer": {"pane_id": "w2:p9"}}})
+            "sample-orchestrator": {"pane_id": "w2:p7"}, "sample-dev": {"pane_id": "w2:p8"},
+            "sample-reviewer": {"pane_id": "w2:p9"}}})
         code, out, _ = self.run_cli("up")
         self.assertIn("watcher: not started - no seat is up", out)
         self.assertEqual(self.argvs("plugin", "pane", "open"), [])
@@ -246,18 +246,18 @@ class BesideTheCaller(StripCase):
     def test_chain_strip_under_the_first_seat_before_the_rest(self):
         code, out, err = self.run_cli("up")
         self.assertEqual(code, 0, out + err)
-        first = self.pane_of("fablyn-orchestrator")
+        first = self.pane_of("sample-orchestrator")
         self.assertEqual(self.argvs("plugin", "pane", "open"), [self.strip_argv(first)])
         splits = [c["argv"] for c in self.calls() if c["argv"][:2] in (["pane", "split"], ["plugin", "pane"])]
         self.assertEqual([a[:3] for a in splits],
                          [["pane", "split", CALLER_PANE], ["plugin", "pane", "open"],
-                          ["pane", "split", first], ["pane", "split", self.pane_of("fablyn-dev")]])
+                          ["pane", "split", first], ["pane", "split", self.pane_of("sample-dev")]])
 
     def test_grid_strip_under_the_grid_area(self):
         self.write_fleet(grid_fleet(NO_LABEL, '[layout]\nmode = "grid"\nratio = 0.4\n'))
-        code, out, err = self.run_cli("up", "--me", "fablyn-orchestrator")
+        code, out, err = self.run_cli("up", "--me", "sample-orchestrator")
         self.assertEqual(code, 0, out + err)
-        area = self.pane_of("fablyn-dev")
+        area = self.pane_of("sample-dev")
         self.assertEqual(self.argvs("plugin", "pane", "open"), [self.strip_argv(area)])
         cells = self.geometry(CALLER_PANE)
         strip = cells[self.strip()]
@@ -270,7 +270,7 @@ class ExistingLayout(StripCase):
 
     def test_under_the_last_seat_after_the_kickoffs(self):
         self.run_cli("up", "--no-watch")
-        reviewer, dev = self.pane_of("fablyn-reviewer"), self.pane_of("fablyn-dev")
+        reviewer, dev = self.pane_of("sample-reviewer"), self.pane_of("sample-dev")
         self.world["panes"][dev].update(agent=None, procs=[dict(fake_herdr.SHELL)])  # dev exited: up starts it again
         before = len(self.calls())
         code, out, err = self.run_cli("up")
@@ -292,7 +292,7 @@ class ExistingLayout(StripCase):
         self.run_cli("up", "--no-watch")
         code, out, _ = self.run_cli("up")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.argvs("plugin", "pane", "open")[0][10], self.pane_of("fablyn-reviewer"))
+        self.assertEqual(self.argvs("plugin", "pane", "open")[0][10], self.pane_of("sample-reviewer"))
         self.assertIn("watcher: started", out)
 
     def test_live_seats_with_a_live_lock(self):
@@ -307,7 +307,7 @@ class ExistingLayout(StripCase):
         self.world["panes"][root].update(plugin="watch", created=True,
                                          procs=[dict(fake_herdr.SHELL)])
         fake_herdr.add_pane(self.world, "w2:p2", "w2", self.repo)
-        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "fablyn", "agents": {},
+        self.write_state({"version": 1, "workspace_id": "w2", "workspace_label": "sample", "agents": {},
                           "watch": {"pane_id": root, "created_pane": True, "started": "2026-10-21T10:00:00+11:00"}})
         code, out, _ = self.run_cli("up", "--no-watch")
         self.assertEqual(code, 0, out)
@@ -335,12 +335,12 @@ class Tile(StripCase):
         self.assertEqual(backs[0], ["pane", "move", strip, "--tab", self.ws + ":t1", "--split", "down",
                                     "--target-pane", self.root, "--ratio", "0.8", "--no-focus"])
         self.assertEqual([m[2] for m in backs[1:]], [self.pane_of(n) for n in
-                                                     ("fablyn-reviewer", "fablyn-dev", "fablyn-designer")])
-        self.assertIn("watcher: moved - below fablyn-orchestrator (%s), ratio 0.8" % self.root, out)
+                                                     ("sample-reviewer", "sample-dev", "sample-designer")])
+        self.assertIn("watcher: moved - below sample-orchestrator (%s), ratio 0.8" % self.root, out)
         cells = self.geometry(self.root)
         self.assertEqual(cells[strip], (0, 40, 200, 10))
         self.assertEqual(cells[self.root], (0, 0, 100, 20))
-        self.assertEqual(cells[self.pane_of("fablyn-designer")], (100, 20, 100, 20))
+        self.assertEqual(cells[self.pane_of("sample-designer")], (100, 20, 100, 20))
         self.assertEqual(self.read_state()["watch"]["pane_id"], strip)
 
     def test_dry_run(self):
@@ -349,7 +349,7 @@ class Tile(StripCase):
         self.assertEqual(code, 0, out)
         self.assertIn("watcher: plan - herdr pane move %s --new-tab --workspace %s --label park --no-focus, then "
                       "herdr pane move %s --tab %s:t1 --split down --target-pane %s --ratio 0.8 --no-focus "
-                      "(below fablyn-orchestrator, before the seats come back)" % (strip, self.ws, strip, self.ws,
+                      "(below sample-orchestrator, before the seats come back)" % (strip, self.ws, strip, self.ws,
                                                                                   self.root), out)
 
     def test_strip_in_another_tab_is_left_alone(self):
@@ -397,7 +397,7 @@ class Down(StripCase):
         self.assertEqual(self.read_state()["watch"]["pane_id"], self.strip_pane)
 
     def test_down_names_never_touches_it(self):
-        code, out, _ = self.run_cli("down", "fablyn-dev", "--close-panes")
+        code, out, _ = self.run_cli("down", "sample-dev", "--close-panes")
         self.assertEqual(code, 0, out)
         self.assertIn(self.strip_pane, self.world["panes"])
 
@@ -427,7 +427,7 @@ class Down(StripCase):
         self.write_fleet(THREE_SEATS.replace('args = ["-m", "gpt-6-astra"]', 'args = ["-m", "gpt-7"]'))
         code, out, _ = self.run_cli("swap")
         self.assertEqual(code, 0, out)
-        code, out, _ = self.run_cli("restart", "fablyn-dev")
+        code, out, _ = self.run_cli("restart", "sample-dev")
         self.assertEqual(code, 0, out)
         self.assertNotIn("watcher", out)
         self.assertEqual(len(self.argvs("plugin", "pane", "open")), 1)

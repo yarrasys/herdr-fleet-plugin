@@ -19,6 +19,7 @@ from support import CALLER_PANE, CALLER_WS, FleetCase
 from herdr_fleet import __version__
 from herdr_fleet.cli import main
 from herdr_fleet.fleetfile import NAME_RE, load_fleet
+from herdr_fleet.kickoff import PLACEHOLDERS, compose, roster_table
 from herdr_fleet.scaffold import EXAMPLES_DIR, SKIP_NAMES, seat_name
 
 GIT = shutil.which("git")
@@ -166,11 +167,11 @@ class Starter(InitCase):
 
 
 class Examples(InitCase):
-    def test_fablyn_copies_every_file(self):
+    def test_team_copies_every_file(self):
         project = self.mkdir("project")
-        code, out, err = self.run_cli("init", "--example", "fablyn", cwd=project)
+        code, out, err = self.run_cli("init", "--example", "team", cwd=project)
         self.assertEqual(code, 0, out + err)
-        source = os.path.join(EXAMPLES_DIR, "fablyn")
+        source = os.path.join(EXAMPLES_DIR, "team")
         shipped = []
         for folder, _, names in os.walk(source):
             shipped += [os.path.relpath(os.path.join(folder, n), source) for n in names if n not in SKIP_NAMES]
@@ -180,13 +181,35 @@ class Examples(InitCase):
             self.assertIn("created     %s" % rel.replace(os.sep, "/"), out)
         self.assertEqual(out.count("created     "), len(shipped))  # the example only, no starter files
         fleet = load_fleet(os.path.join(project, ".herdr", "fleet.toml"))
-        self.assertEqual([s.name for s in fleet.seats], ["fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer", "fablyn-designer"])
+        self.assertEqual([s.name for s in fleet.seats], ["sample-orchestrator", "sample-dev", "sample-reviewer", "sample-designer"])
+
+    def test_team_initializes_and_renders_every_role_without_external_documents(self):
+        project = self.mkdir("portable-team")
+        code, out, err = self.run_cli("init", "--example", "team", cwd=project)
+        self.assertEqual(code, 0, out + err)
+        fleet = load_fleet(os.path.join(project, ".herdr", "fleet.toml"))
+        self.assertEqual(fleet.warnings, [])
+        roster = roster_table([(seat.name, seat.kind, "no pane", seat.cwd) for seat in fleet.seats])
+        for seat in fleet.seats:
+            with self.subTest(role=seat.name):
+                self.assertEqual(seat.args, [])  # no account-specific model is required
+                self.assertTrue(os.path.isfile(seat.kickoff))
+                rendered = compose(seat, fleet, "sample", roster, "up", note="Example note",
+                                   state_text="Example state")
+                self.assertTrue(rendered.startswith("[from herdr-fleet] You are " + seat.name))
+                self.assertIn("Example note", rendered)
+                self.assertIn("Example state", rendered)
+                self.assertIn("explicit owner authorization before merging, deploying, publishing or pushing",
+                              rendered)
+                for key in PLACEHOLDERS:
+                    self.assertNotIn("{" + key + "}", rendered)
+                self.assertEqual(self.calls(), [])  # initialization/rendering never invokes Herdr
 
     def test_unknown_example_exits_2_and_lists_the_examples(self):
         project = self.mkdir("project")
         code, _, err = self.run_cli("init", "--example", "nope", cwd=project)
         self.assertEqual(code, 2)
-        self.assertIn("unknown example 'nope'; available: fablyn", err)
+        self.assertIn("unknown example 'nope'; available: team", err)
         self.assertEqual(os.listdir(project), [])
 
 
