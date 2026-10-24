@@ -47,6 +47,14 @@ acts, writes it back and appends one JSON line to the call log (env
   200x50 cell area, rounded as herdr rounds. ``pane resize`` follows herdr's rule: the
   nearest split on the pane's named edge (else the opposite edge) gains the amount
   for right and down and loses it for left and up, clamped to 0.1-0.9.
+- Zoom (design 25.1): ``pane zoom [PANE] [--current] --toggle`` flips the pane's ``zoomed``
+  flag and records the pane, whether ``--current`` named it (the caller's pane) and
+  whether it is a plugin pane. A fresh Claude Code session's suggestion (``❯ Try "…"``) is
+  an empty prompt line for ``owner_typing`` and ``input_held``, as for the plugin's guard.
+- Titles and lists (design 24): ``pane get``/``pane list`` records carry ``terminal_title``
+  and ``terminal_title_stripped`` (empty unless a test calls ``set_title``), and every
+  ``agent list`` records the state of each named agent it answered (``states``), so the
+  safety check knows which seats the board may read the screen of.
 - Focus and screens (design 21.2): panes and workspaces carry ``focused`` (false unless
   a test calls ``focus(world, pane)``, which makes that pane the owner's: focused in its
   tab, its tab the workspace's active tab, its workspace the only focused one).
@@ -99,6 +107,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 from typing import Dict, List, Optional, Tuple
@@ -224,6 +233,13 @@ def focus(world: Dict, pane: str) -> None:
     world["workspaces"][target["workspace_id"]]["active_tab_id"] = target["tab_id"]
 
 
+def set_title(world: Dict, pane: str, title: Optional[str]) -> None:
+    """The pane's terminal title, as Claude Code and Codex set it to the task they work on:
+    ``pane get`` answers ``terminal_title`` (with the spinner glyph) and
+    ``terminal_title_stripped`` (without it), as live herdr 0.9.5 does (design 24.2)."""
+    world["panes"][pane]["title"] = title or ""
+
+
 def unfocus(world: Dict) -> None:
     """The owner left herdr's UI: no workspace is focused (pane focus stays per tab)."""
     for record in world["workspaces"].values():
@@ -309,7 +325,15 @@ def prompt_of(kind: str, text: str) -> Optional[str]:
     return found
 
 
+# A fresh Claude Code session suggests a prompt in its empty input line (`❯ Try "fix lint
+# errors"`); it is no text of the owner's (design 23.11, seen live on the 0.13.0 demo).
+PLACEHOLDER_PATTERNS = {"claude": re.compile(r'Try "[^"]*"')}
+
+
 def line_holds_text(kind: str, line: Optional[str]) -> bool:
+    pattern = PLACEHOLDER_PATTERNS.get(kind)
+    if line and pattern is not None and pattern.fullmatch(line):
+        return False
     return bool(line) and line != PLACEHOLDERS.get(kind)
 
 
@@ -502,10 +526,12 @@ class Sim:
 
     def _pane_record(self, pid: str) -> Dict:
         p = self.w["panes"][pid]
+        title = p.get("title") or ""
         rec = {"cwd": p["cwd"], "foreground_cwd": p["cwd"], "focused": bool(p.get("focused")), "pane_id": pid,
                "revision": 1, "scroll": {"max_offset_from_bottom": 0, "offset_from_bottom": 0,
                                          "viewport_rows": 40},
-               "tab_id": p["tab_id"], "terminal_id": "term_" + pid, "terminal_title": "",
+               "tab_id": p["tab_id"], "terminal_id": "term_" + pid,
+               "terminal_title": ("\u2733 " + title) if title else "", "terminal_title_stripped": title,
                "workspace_id": p["workspace_id"], "label": p.get("label")}
         if p["agent"]:  # live herdr: pane records carry the kind and state, never the name
             rec["agent"] = p["agent"]["agent"]
@@ -591,6 +617,7 @@ class Sim:
 
     def _agent_list(self, args: List[str]) -> Result:
         agents = [self._agent_record(pid) for pid, p in self.w["panes"].items() if p["agent"]]
+        self.info["states"] = {str(a["name"]): a.get("agent_status") for a in agents if a.get("name")}  # design 24.5
         return _ok({"agents": agents, "type": "agent_list"}, "cli:agent:list")
 
     def _agent_get(self, args: List[str]) -> Result:
@@ -836,6 +863,35 @@ class Sim:
         p = self.w["panes"][pid]
         p["label"] = None if clear else " ".join(pos[1:])
         return _ok({"pane": self._pane_record(pid), "type": "pane_info"}, "cli:pane:rename")
+
+    def _pane_zoom(self, args: List[str]) -> Result:
+        """``pane zoom [PANE] [--current] --toggle|--on|--off`` (design 25.1): records the pane,
+        whether it was named by ``--current`` (the caller's own pane, followed through moves)
+        and whether it is a plugin pane, and flips the pane's ``zoomed`` flag."""
+        pos, opts, _ = _opts(args, ("--pane",))
+        current = "--current" in opts
+        pid = (opts.get("--pane") or pos or [None])[0]
+        if current:
+            pid = self.w.get("caller")
+            seen = set()
+            while pid in self.w.get("aliases", {}) and pid not in seen:
+                seen.add(pid)
+                pid = self.w["aliases"][pid]
+        own = pid
+        seen_own = set()
+        while own in self.w.get("aliases", {}) and own not in seen_own:
+            seen_own.add(own)
+            own = self.w["aliases"][own]
+        self.info.update(pane=pid, current=current, own=(own == self.w.get("caller")),
+                         plugin=(self.w["panes"].get(pid) or {}).get("plugin"))
+        if not pid or pid not in self.w["panes"]:
+            return _err("pane_not_found", "pane %s not found" % pid)
+        record = self.w["panes"][pid]
+        if "--toggle" in opts:
+            record["zoomed"] = not record.get("zoomed")
+        else:
+            record["zoomed"] = "--on" in opts
+        return _ok({"pane": self._pane_record(pid), "zoomed": record["zoomed"], "type": "pane_zoom"}, "cli:pane:zoom")
 
     def _pane_get(self, args: List[str]) -> Result:
         pid = args[0]

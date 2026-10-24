@@ -59,7 +59,7 @@ Or, inside herdr, run the **Fleet: init** action (`herdr plugin action invoke ya
 | `.herdr/fleet.toml` | one seat, `<repository name>-dev`, kind `claude`, no args, no `workspace` (so seats open beside your pane), with every optional key shown in comments |
 | `.herdr/kickoff/default.md` | the built-in kickoff template, as the default for every seat |
 | `.herdr/STATE.md` | the "where things stand" note that fills `{state}` |
-| `.herdr/.gitignore` | ignores `fleet.state.json` |
+| `.herdr/.gitignore` | ignores what herdr-fleet writes there: `fleet.state.json`, `messages.jsonl`, `inbox/`, `watch.lock` and `watch.log` |
 
 It never overwrites a file: each one is reported as `created` or `kept`, and only `--force` overwrites (`overwritten`). It runs no herdr command and works outside herdr. `herdr-fleet init --example fablyn` copies the three-seat example in [examples/fablyn](examples/fablyn) as shipped instead. Commit the `.herdr` files (the state file stays ignored).
 
@@ -125,7 +125,7 @@ direction = "right"                    # chain: split direction between seats. g
 ratio     = 0.5                        # chain: split ratio. grid: share your pane keeps. 0 < ratio < 1
 
 [watch]                                # optional; the strip up opens for the watcher (omit for the defaults)
-ratio    = 0.12                        # the strip's share of the area it is split from, 0.1 to 0.4
+ratio    = 0.2                         # the strip's share of the area it is split from, 0.1 to 0.4
 position = "bottom"                    # the only position so far
 # notify_blocked_after = "3m"          # optional: the watcher notifies you once when a seat has been blocked
                                        # this long (30m, 2h, 1d; unset: never)
@@ -217,7 +217,7 @@ Every command except `init` and `install-cli` accepts `--fleet PATH` to pick the
 | `send TARGET... [TEXT] [--file PATH] [--fyi] [--queue \| --now] [--urgent] [--reply-to ID] [--ttl DURATION] [--as NAME] [--when-ready MS] [--all] [--dry-run]` | Message seats, contacts, `owner` or live agents through their inbox (see Messages and Inbox). `--fyi` marks a report that awaits no reply and never wakes an idle seat; `--queue` only queues, until the seat is idle; `--now` delivers (typed ahead into a working seat's own input) or refuses, never queues; `--urgent` puts it ahead of what is already queued in herdr-fleet; `--reply-to` names the message this answers; `--ttl 30m\|2h\|1d` drops it if still queued by then. A note about your own unread messages comes first, the line per target last. |
 | `deliver [NAME...] [--fyi] [--now] [--dry-run]` | Hand queued messages to the seats that can take them now: an idle or done seat gets its whole queue as one prompt; a working seat keeps it queued (`fablyn-dev: working, 3 left queued`) unless you type it ahead with `deliver NAME --now`; a blocked, unknown or absent seat keeps it queued, and so does a seat whose input holds text (`fablyn-dev: owner typing in w1A:p2, 3 left queued`, or `text in its input (…)` when it is not your pane; see The owner at the keyboard). Without names: every seat and contact with a queued message that is not FYI (`--fyi`: any), and `owner` (a notification). |
 | `inbox [--as NAME] [--read \| --wait [--timeout MS] \| --count \| --history NAME \| --redeliver ID] [--full] [--json]` | Your own mailbox: list what is queued for you, in delivery order, `--read` it (print and mark read), wait for it (`--wait`: block until a message arrives, then read it; see Inbox), `--count` it, replay your messages with NAME (`--history`), or queue a delivered message again (`--redeliver`). `--read` and `--history` print a message longer than `inbox_print_max` bytes as its first ten lines and the path of its file; `--full` prints everything. Runs no herdr command except finding who you are, and none with `--as`. `inbox --hook stop\|prompt` is what the Claude Code hooks run (see Claude Code hooks). |
-| `watch [--debounce MS] [--once]` | Run in the foreground until Ctrl-C and deliver queued messages as seats become idle (see The watcher). One per fleet. `--once` delivers what can be delivered now and exits. |
+| `watch [--debounce MS] [--once] [--log]` | Run in the foreground until Ctrl-C and deliver queued messages as seats become idle (see The watcher). One per fleet. On a terminal it draws the board (see The board) and appends its lines to `.herdr/watch.log`; `--log` prints them instead, as does any stdout that is not a terminal. `--once` delivers what can be delivered now and exits. |
 | `hooks install [--remove]` | Add (or remove) the Claude Code `Stop` and `UserPromptSubmit` hooks in `<repo>/.claude/settings.local.json`, keeping everything else in it (see Claude Code hooks). |
 | `ack (NAME \| ID)... [--all] [--older-than DURATION] [--reason TEXT] [--as NAME] [--dry-run]` | Settle replies you owe by hand: a NAME settles what you owe that sender, an ID (`#3f2a9c`) that one message, `--older-than 2h` every message you owe that was delivered more than 2 h ago; `ack #id --reason TEXT` closes that message's debt whoever owes it. Sends nothing to anyone (see FYI messages and ack). |
 | `log [--seat NAME] [--last N] [--json] [--owed]` | The message log, newest last (default the last 50); `--owed` lists the messages awaiting a reply. |
@@ -365,18 +365,79 @@ While text sits there, nothing is sent: a plain `send` queues (`queued in herdr-
 - Mailboxes that hold only FYIs get no waiter. An absent agent gets none either: its next kickoff carries the messages (it is looked for again every 30 s). Messages for `owner` become a notification at once.
 - A delivery that may not have arrived (`unconfirmed`) is never repeated; a queue too large for one prompt gets the pointer once, and again only when something new arrives; a failed delivery waits a minute before the next try.
 - One watcher per fleet: it writes `.herdr/watch.lock` (`{"pid", "started", "fleet"}`) and refuses to start while that names a live process (`watcher already running (pid 123)`, exit 1). A lock left by a watcher that died is replaced. The lock goes when the watcher stops.
-- It prints one line per event, with the time: `waiting on fablyn-dev (3 queued)`, `fablyn-dev idle; delivering 3`, `delivered 3 to fablyn-dev`, `fablyn-dev blocked: a dialog is open; still waiting`. It runs no herdr command but `agent list`, `agent wait`, `agent get`, `agent prompt`, `notification show` and the read-only `pane get`, `workspace list` and `pane read` of the typing check, and never starts, restarts or quits anything.
+- It writes one line per event, with the time: `waiting on fablyn-dev (3 queued)`, `fablyn-dev idle; delivering 3`, `delivered 3 to fablyn-dev`, `fablyn-dev blocked: a dialog is open; still waiting`. On a terminal they go to `.herdr/watch.log` and the board's footer (see The board); with `--log`, or when stdout is not a terminal, they are printed. It runs no herdr command but `agent list`, `agent wait`, `agent get`, `agent prompt`, `notification show`, the read-only `pane get`, `workspace list` and `pane read` of the typing check, and for the board `agent read` of a blocked seat (or of any seat on `p`), and on your key `agent focus` (`g`) and `pane zoom` of its own strip (`z`); it never starts, restarts or quits anything.
 - It records every state it sees (for `status`'s `blocked (4m)`). With `[watch] notify_blocked_after = "3m"` it also reads `herdr agent list` every 30 s and, once a seat has been blocked that long, sends one notification per blocked episode with the `request` sound: `wc-research blocked 3m (w1A:pA): answer its prompt`. It never touches the seat.
 - `watch --once` delivers what can be delivered right now (seats already idle or done), prints `deliver`'s lines and exits; it takes no lock.
 
 It reads the fleet file once when it starts; restart it after adding a seat.
+
+#### The board
+
+On a terminal (the strip, **Fleet: watch**, or a shell) the watcher draws a board of the fleet instead of a scrolling log, redrawn every 5 s and at once after anything it does. The strip takes 20% of the area by default (`[watch] ratio`), which leaves eight usable rows: a header, six seats and a footer.
+
+```
+fablyn · watching 11h · owner: #bade2a 12:13 from winner-chronicles "1.28.1 is LIVE on production"                                        waiting on 2 · holding 1
+fablyn-dev          ● working 3m  vitest run                       2 queued, oldest 3m  #018934 "two 1.30.4 items"     –                                ctx 376k
+fablyn-reviewer     ○ idle 2h                                      –                                                   owes orchestrator 2h #62437b     ctx 514k ⚠
+fablyn-designer     ○ idle 25m                                     –                                                   –                                ctx 382k
+fablyn-orchestrator ◐ blocked 4m  "Allow Bash(pnpm test)?"         1 queued, holding: owner typing                     –                                ctx 730k ⚠
+
+
+08:02 delivered 2 to fablyn-dev                                                                    Enter open · g go · a ack · d deliver · z zoom · l log · ? help
+```
+
+- **The header**: the fleet, how long the watcher has run, the newest message to you, delivered or not (`owner: #bade2a 12:13 from winner-chronicles "1.28.1 is LIVE…"`, or `owner: nothing`), and at the right what the watcher is doing: how many seats it waits on, holds (your text in a seat's input) and retries after a failure.
+- **One row per seat**, in fleet-file order, then the contacts while there is room. The cells: the seat's `label` or name; its state with how long it has been so (`●` working, `○` idle, `◐` blocked, `✓` done, `?` unknown, `–` absent; the age is since herdr-fleet first saw that state, as in `status`); what it is doing (a working seat's terminal title, which Claude Code and Codex set to the task, or for a blocked seat the first line of the dialog it shows, quoted); its queue (`2 queued, oldest 3m  #018934 "first line"`, or `holding: owner typing` while the watcher holds it, `retrying in 45 s`, or `–`); the oldest reply it owes (`owes orchestrator 2h #62437b`); and its context size (`ctx 376k`, Claude seats only, `⚠` at or above `restart_hint_tokens`).
+- **The footer**: the last thing the watcher did, with its time (red for a failure), and at the right the keys of the view you are in, cut from the right when the strip is narrow; a question or the help line takes the whole footer while shown.
+- **Narrow or short strips.** Below 120 columns the doing cell goes, below 90 the debt cell, and below 60 a row is name, state and queue count. When the seats need more rows than the strip has, they are packed two to a row (name, state, queue count, `⚠`) when it is at least 120 columns wide, else the most urgent are shown (blocked, then those with a queue, then working) and the footer says `+2 more`. In fewer than three rows the board is one line: the most urgent seat. Text is cut with `…`, never wrapped.
+- **Colours**: blocked red and bold, working green, idle and done dim, `⚠` yellow. `NO_COLOR` (or a terminal without colours) turns them off; the blocked state stays bold and the selection reversed.
+
+**Pages.** Enter on a seat (or its number, or a click on its row) opens its page inside the strip; Esc, Backspace or `q` goes back. A seat's page:
+
+```
+fablyn-dev · ● working 3m · claude · w1N:p3 · ctx 376k
+doing     vitest run
+queue     #018934 09:55 from fablyn-orchestrator [on refusal]  "two 1.30.4 items: the rect floor and the ocean tick"
+          #899d99 09:55 from fablyn-orchestrator [queued]  "and bump the registry to 1.30.4 when done"
+debts     owes fablyn-orchestrator since 09:56 (#2d2f1a)  "ROUND 1 us-states 1.30.4: please review"
+recent    09:57 ← fablyn-orchestrator #899d99 queued  "and bump the registry to 1.30.4 when done"
+          09:50 → fablyn-orchestrator #a1e0c2 sent  "1.30.3 is merged"
+          09:44 kickoff
+
+10:03 waiting on fablyn-dev (2 queued)                                               Esc back · ↑↓ scroll · ←→ seat · g go · a ack · d deliver · p screen · z zoom
+```
+
+Its sections, each left out when empty: `doing` (the task; for a blocked seat `dialog`, up to four lines of the dialog it shows); `queue` (every queued message in delivery order, with why it waits: `[on refusal]`, `[queued]`, `[fyi]`); `debts` (what it owes and what it is owed, oldest first); `recent` (its last twenty log entries, newest first: `←` received, `→` sent, kickoffs, acks, interrupts); `screen` (only after `p`: its last twelve screen lines, read again on each `p` and gone when the page closes). ↑ ↓ move over the messages, Enter opens one, ← → step to the previous or next seat (then the contacts, round again).
+
+Enter on the header (↑ from the first row), or a click on it, opens the **fleet page**: the fleet file and workspace, the watcher's pid, uptime and lock, every wait, hold and retry, the debts and queues `status` would list, the warnings the watcher saw, then `.herdr/watch.log` (drift, worktrees and hooks stay with `herdr-fleet status` and `doctor`, which run what the board does not). `o`, or a click on the header's `owner:` cell, opens the **owner page**: every message to you, newest first, delivered or not. A contact's row opens its **contact page**: its state, pane and the messages it exchanged with this fleet. Enter on any message opens its **body**, as stored (`#b9770b · 09:55 · fablyn-orchestrator → fablyn-dev · queued (on refusal) · 2.1 KB`), scrolled with ↑ ↓, PageUp and PageDown; a message from before 0.6.0 shows its first line and `(no stored body)`.
+
+Keys work while the strip has focus (click into it); without them the board is complete:
+
+| Key | Does |
+| --- | --- |
+| ↑ ↓ | on the board, select the header or a row (the first seat starts selected); on a page, move over its messages (or scroll; a page opens with its first message selected, so Enter reads it at once) |
+| Enter, `1` to `9`, a click | open the selected (numbered, clicked) seat's or contact's page; on the header, the fleet page; on a message, its body. A click on the footer does nothing; a click inside a page goes back |
+| Esc, Backspace, `q` | back one view; on the board `q` says `Ctrl-C stops the watcher`: no key stops it |
+| ← → | on a seat or contact page, the previous or next one |
+| `g` | on the board or a seat page: go to the seat's pane (`herdr agent focus`, as `go`); the focus leaves the strip |
+| `z` | zoom the strip to the whole tab, and back (`herdr pane zoom --current --toggle` on the strip's own pane) |
+| `o` | the owner page |
+| `a` | on the board, ack the selected seat's oldest debt; on a seat page, the selected debt; on the owner page, the selected message. The footer asks `ack #62437b (fablyn-reviewer owes fablyn-orchestrator 2h)? y/n`; `y` writes `ack #62437b --reason "from the board"` as `owner` (see FYI messages and ack); anything else answers no |
+| `d` | on the board, deliver now every queue whose seat is idle or done; on a seat page, that seat's, or the footer says why not (`working: lands at its next idle`, `blocked: a dialog is open`, `text in its input`). No debounce; the watcher's own delivery, presence check included |
+| `p` | on a seat page, read its last twelve screen lines (`herdr agent read`) |
+| `l` | the log (the last lines of `.herdr/watch.log`); any key returns |
+| `?` | the keys, in the footer for 5 s |
+
+Drawing the board only reads: `herdr agent list`, `pane get` for a working seat's title, `herdr agent read <seat> --lines 16` for a blocked seat (of which it keeps and shows the dialog's lines and nothing else), the mailboxes, the message log and the Claude transcripts' token counts; a page adds the stored messages it lists and, on `p`, the seat's last screen lines. Nothing on the board prompts a seat or presses a key in any pane: `d` delivers exactly as the watcher does, `a` only writes the message log, `g` only moves your focus and `z` only zooms the strip itself.
+
+Every line the watcher would have printed is appended, with its time, to `<repo>/.herdr/watch.log` (ignored by `.herdr/.gitignore`): `tail -f .herdr/watch.log` from anywhere follows it. The footer shortens the first one to `watching <repository directory> (pid N)`; the log keeps the fleet file's full path. Mouse reports the terminal sends in SGR or X10 encoding become clicks, and any other escape sequence curses passes on is dropped whole, so none of its characters is taken for a key. `herdr-fleet watch --log` prints the lines as before 0.13.0, and so does a watcher whose stdout is not a terminal or whose terminal curses cannot drive; `--once` never draws. When the watcher stops, the board goes and the terminal shows `stopped`.
 
 #### The watcher strip
 
 `up` starts the watcher for you, in a plugin pane you can see: the plugin's `watch` entrypoint, opened with `herdr plugin pane open --plugin yarrasys.fleet --entrypoint watch --placement split --target-pane <pane> --direction down --cwd <repo root> --env HERDR_FLEET_FILE=<fleet file> --no-focus`, so the installed plugin's copy runs, for the same fleet file (`--fleet` included), and your focus stays where it is.
 
 - **Where.** On a fresh layout the strip is split from the first pane of the layout before any other seat is placed: the root pane of a workspace `up` creates, the grid area, or the first chained seat's pane. The seats then fill the space above it, and the strip spans all of them. When seats are already placed, it opens under the last seat's pane in the fleet's workspace, after the kickoffs; `herdr-fleet tile` then stretches it across the layout.
-- **Size.** herdr splits 50/50, so `up` reads the split with `herdr pane layout` and grows the pane above with `herdr pane resize --pane <above> --direction down --amount <0.5 - ratio>` until the strip has `[watch] ratio` (default 12%) of the area it was split from. herdr keeps every split between 10% and 90%, hence the 0.1 lower bound. A failed resize is only a warning; if the layout cannot be read, the amount assumes the 50/50 split and the output says `about`.
+- **Size.** herdr splits 50/50, so `up` reads the split with `herdr pane layout` and grows the pane above with `herdr pane resize --pane <above> --direction down --amount <0.5 - ratio>` until the strip has `[watch] ratio` (default 20%, which gives the board eight usable rows) of the area it was split from. herdr keeps every split between 10% and 90%, hence the 0.1 lower bound. A failed resize is only a warning; if the layout cannot be read, the amount assumes the 50/50 split and the output says `about`.
 - **When not.** `watch = false` at the top of the fleet file, or `up --no-watch`. If `.herdr/watch.lock` names a live process, `up` prints `watcher: already running (pid N)` and opens nothing; if the strip it recorded is still open, it opens no second one (and says so when that pane no longer runs the watcher). It never starts one for a fleet with no seat up.
 - **Never a seat.** The strip is recorded in the state file as `"watch": {"pane_id", "created_pane": true, "started"}`. It hosts no agent: it is not in the seat table, drift or any seat loop, and nothing is ever prompted or typed into it. `restart` and `swap` ignore it. `status` shows it in the watcher line; a strip that is gone is dropped from the state file like a seat's pane.
 - **Stopping it.** Close the pane (the watcher gets SIGHUP and removes its lock), or run `down --close-panes`, which closes it after the seats when it runs the watcher or sits at a shell. Without `--close-panes` the watcher keeps running, with nothing to deliver.
@@ -522,8 +583,9 @@ herdr-fleet never answers anything for you; the one dialog it answers is the exi
 15. `--urgent` reorders only the mailbox herdr-fleet holds; nothing reorders or reads what sits in an agent's own input.
 16. How a queued message is delivered is decided by how it was sent (`queued_by`), never by its text.
 17. Before any text goes to a seat, herdr-fleet checks whether its prompt line holds text or is not on screen, in every seat pane whether you are in it or not; if so, nothing is sent (see The owner at the keyboard). Whether the pane is the one your keystrokes go to only chooses the wording. The check reads only the last lines of that pane to find the prompt line, keeps nothing and decides nothing else from them.
-18. herdr-fleet changes a pane's display name only for a pane that hosts one of the fleet's seats, and only to that seat's name or `label` (`down` clears it on a seat pane it leaves at a shell). `pane rename` and `agent focus` are the only display commands it runs; neither reaches the agent, and `agent focus` runs only from `go` and the popups, because you asked for that seat by name.
+18. herdr-fleet changes a pane's display name only for a pane that hosts one of the fleet's seats, and only to that seat's name or `label` (`down` clears it on a seat pane it leaves at a shell). `pane rename` and `agent focus` are the only display commands it runs; neither reaches the agent, and `agent focus` runs only from `go`, the popups and the board's `g` key, because you asked for that seat.
 19. Keys reach an agent only through `herdr agent send-keys`, and only two ways: one Enter on the exit confirmation that herdr-fleet's own quit provoked (`restart`, `swap`, `down`), right after reading the seat's screen and finding Claude Code's `Background work is running` dialog with `Exit and stop tasks` highlighted, once per quit; and the kind's interrupt keys from `interrupt NAME`, to a seat of this fleet that is `working` and whose screen, read just before, shows no dialog (a Claude seat gets exactly one Ctrl-C), followed by one Ctrl-U only when, read again after the interrupt, its prompt line holds the interrupted prompt. Only `enter`, `esc`, `ctrl+c` and that `ctrl+u` are ever pressed, never to a contact or another fleet's agent, and never from the watcher, a popup, a dry run or anything automatic.
+20. The watcher's board reads only the seats' states, a working seat's title, a blocked seat's screen (of which it shows the dialog's lines and keeps nothing else), a seat's last screen lines when you press `p` on its page, the mailboxes and stored messages, the message log and the transcripts' token counts; it prompts nothing, presses no key, delivers only as the watcher may, and moves your focus (`g`) or zooms its own strip (`z`) only when you press the key.
 
 If a seat is blocked at startup (typically a trust prompt), `up` records it, notifies you with the `request` sound and moves on. Answer the prompt yourself, then run `herdr-fleet kickoff NAME`.
 
@@ -573,7 +635,7 @@ An adopted session usually runs with its owner's own args (for example a hand-st
 
 ## The state file
 
-`<repo>/.herdr/fleet.state.json`, created on the first `up`, records the workspace, the watcher strip `up` opened (`"watch"`), and, per seat, the pane, whether herdr-fleet created it, the kind and args it started with, timestamps, and `state_seen` (`{"state", "since"}`: the last state any command saw and since when, for `blocked (4m)`; written under a lock on `.herdr/` so concurrent commands keep each other's changes). herdr-fleet also creates `<repo>/.herdr/.gitignore` (or appends to it) so the state file, the message log (`messages.jsonl`), the inbox (`inbox/`) and `watch.lock` (the running watcher) are never committed. It lives in the repo rather than the plugin state directory so the manifest actions and an agent running the CLI share it.
+`<repo>/.herdr/fleet.state.json`, created on the first `up`, records the workspace, the watcher strip `up` opened (`"watch"`), and, per seat, the pane, whether herdr-fleet created it, the kind and args it started with, timestamps, and `state_seen` (`{"state", "since"}`: the last state any command saw and since when, for `blocked (4m)`; written under a lock on `.herdr/` so concurrent commands keep each other's changes). herdr-fleet also creates `<repo>/.herdr/.gitignore` (or appends to it) so the state file, the message log (`messages.jsonl`), the inbox (`inbox/`), `watch.lock` (the running watcher) and `watch.log` (its lines) are never committed. It lives in the repo rather than the plugin state directory so the manifest actions and an agent running the CLI share it.
 
 Pane and workspace ids are valid for one herdr server. Every command checks the ids it is about to use and drops the ones herdr no longer knows. There is one exception: a seat whose recorded pane is gone but which is still live by name elsewhere (its pane was moved to another workspace, which changes its id) is re-pointed to its new pane, and every other field is kept. When a live seat turns up in a different pane while its recorded pane still exists, the entry follows it but no longer counts the pane as created by herdr-fleet, so `--close-panes` will not close it. Whenever herdr-fleet moves a seat's pane or finds it moved (`--join`, `tile`, a pane moved by hand, a seat found live elsewhere), it prints `<seat>: pane w1A:p1 → w1H:p5`, so notes that hard-code pane ids can be corrected. Writes are atomic.
 

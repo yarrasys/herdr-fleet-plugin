@@ -38,7 +38,8 @@ HOOK_CALLS = (["agent", "get"],)
 # local `herdr --version` of the common preconditions; design 21.2: the presence guard's
 # pane get, workspace list and pane read.
 WATCH_CALLS = (["agent", "wait"], ["agent", "get"], ["agent", "list"], ["agent", "prompt"],
-               ["notification", "show"], ["--version"], ["pane", "get"], ["workspace", "list"], ["pane", "read"])
+               ["notification", "show"], ["--version"], ["pane", "get"], ["workspace", "list"], ["pane", "read"],
+               ["agent", "read"], ["agent", "focus"], ["pane", "zoom"])  # the last three: the board (24, 25)
 # Design 19.3: only `up` (also from the popup menu) and `ui` open plugin panes; only `up` resizes.
 PLUGIN_PANE_COMMANDS = ("up", "ui", "menu")
 RESIZE_COMMANDS = ("up", "menu")
@@ -47,7 +48,12 @@ RESIZE_COMMANDS = ("up", "menu")
 # popup move the owner's focus.
 RENAME_COMMANDS = ("up", "restart", "swap", "kickoff", "tile", "status", "down", "menu")
 CLEAR_COMMANDS = ("down", "menu")
-FOCUS_COMMANDS = ("go", "menu")
+FOCUS_COMMANDS = ("go", "menu", "watch")
+# Design 24.4, 25.1 and invariant 22: the board's `agent focus` follows a key the owner pressed
+# (the fake screen logs each replayed key as {"key": ...}), one focus per `g` or number key; its
+# `pane zoom` follows a `z`, on its own pane; its `agent read` of a seat that was not blocked
+# follows a `p`.
+GO_KEYS = tuple("123456789") + ("g",)
 # Design 23.7 and invariant 21: keys reach an agent only as one `enter` on the exit
 # confirmation from restart, swap or down, and as the kind's interrupt keys from `interrupt`;
 # never from watch, the popup, deliver or a dry run. `agent read` comes only from `peek`,
@@ -56,7 +62,7 @@ KEYS = ("enter", "esc", "ctrl+c", "ctrl+u")  # ctrl+u: interrupt's cleanup only 
 ENTER_COMMANDS = ("restart", "swap", "down")
 NO_KEYS_COMMANDS = ("watch", "menu", "deliver")
 INTERRUPT_DEFAULTS = {"claude": ["ctrl+c"], "agy": ["ctrl+c", "ctrl+c"]}  # the harness's own copy
-READ_COMMANDS = ("peek", "restart", "swap", "down", "menu", "interrupt")
+READ_COMMANDS = ("peek", "restart", "swap", "down", "menu", "interrupt", "watch")  # watch: blocked seats only
 PEEK_CALLS = (["agent", "list"], ["--version"], ["pane", "current"], ["agent", "read"])
 
 THREE_SEATS = """
@@ -204,6 +210,12 @@ class FleetCase(unittest.TestCase):
 
     # -- log inspection -----------------------------------------------------------
 
+    def log_key(self, key: str) -> None:
+        """Mark a key the fake screen replays in the call log (design 24.5), so the safety
+        check can tell a focus the owner asked for from one nobody did."""
+        with open(self.log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"key": key}) + "\n")
+
     def calls(self) -> List[Dict]:
         if not os.path.exists(self.log_path):
             return []
@@ -240,7 +252,11 @@ class FleetCase(unittest.TestCase):
         `swap` or `down`, to an agent whose screen then showed the highlighted exit
         confirmation, right after an `agent read` of it, once per command per agent; or as
         the kind's interrupt keys from `interrupt`, to a seat `working` at its last `agent
-        get`; never from `watch`, the popup, `deliver` or a dry run."""
+        get`; never from `watch`, the popup, `deliver` or a dry run. Invariant 22 (design 24,
+        25): the board's `agent read` only of a seat whose state at the command's last `agent
+        list` was `blocked`, or right after a `p` the fake screen replayed; its `agent focus`
+        only right after a `g` or a number key; its `pane zoom` only right after a `z`, and
+        only on its own pane (`--current`, or a plugin pane); one command per key."""
         caller = self.env.get("HERDR_PANE_ID")
         command: List[str] = []
         strips = set()
@@ -250,21 +266,38 @@ class FleetCase(unittest.TestCase):
                 entries = [json.loads(line) for line in handle if line.strip()]
         keys = KeysCheck(self, command)
         previous: Optional[List[str]] = None
+        listed: Dict[str, Optional[str]] = {}  # the states the command's last `agent list` answered
+        pressed: Optional[str] = None          # the last key the fake screen replayed, until a focus uses it
         for call in entries:
             if "command" in call:
                 keys.finish()
                 command = call["command"]
                 keys = KeysCheck(self, command)
                 previous = None
+                listed, pressed = {}, None
+                continue
+            if "key" in call:
+                pressed = call["key"]
                 continue
             argv, info = call["argv"], call["info"]
             self.assertTrue(argv, "bare herdr was run")
+            if argv[:2] == ["agent", "list"] and "states" in info:
+                listed = dict(info["states"])
             if argv[:2] == ["agent", "get"] and info.get("name"):
                 keys.seen(str(info["name"]), info.get("status"))
             if argv[:2] == ["agent", "send-keys"]:
                 keys.check(argv, info, previous, call["exit"])
             if argv[:2] == ["agent", "read"]:
                 self.assertIn(command[:1] and command[0], READ_COMMANDS, "%s read a screen: %s" % (command[:1], argv))
+                if command[:1] == ["watch"]:
+                    seats = fake_herdr.fleet_names(fleet_file(command, self.env, self.repo))
+                    if pressed == "p":  # design 25.2: the owner asked for the seat's screen
+                        pressed = None
+                    else:
+                        self.assertIn(argv[2], seats, "the board read the screen of %s, not a seat: %s"
+                                      % (argv[2], argv))
+                        self.assertEqual(listed.get(argv[2]), "blocked", "the board read the screen of %s, which "
+                                         "was %s at the last agent list: %s" % (argv[2], listed.get(argv[2]), argv))
                 keys.read.add(argv[2])
                 keys.text[argv[2]] = bool(info.get("input_text"))
             if command[:1] == ["peek"]:
@@ -289,8 +322,19 @@ class FleetCase(unittest.TestCase):
                 self.assertIn(command[0], RESIZE_COMMANDS, "%s resized a pane: %s" % (command[:1], argv))
             if argv[:2] == ["pane", "rename"]:
                 self.assert_rename(command, argv, info)
+            if argv[:2] == ["pane", "zoom"]:
+                self.assertEqual(command[:1], ["watch"], "%s zoomed a pane: %s" % (command[:1], argv))
+                self.assertEqual(pressed, "z", "the board zoomed without a z: %s" % argv)
+                self.assertNotIn("--current", argv, "the board zoomed --current, which herdr resolves to the owner's "
+                                 "focused pane (25.7): %s" % argv)
+                self.assertTrue(info.get("own") or info.get("plugin") == "watch",
+                                "the board zoomed a pane that is not its own: %s" % argv)
+                pressed = None
             if argv[:2] == ["agent", "focus"]:
                 self.assertIn(command[0], FOCUS_COMMANDS, "%s moved the owner's focus: %s" % (command[:1], argv))
+                if command[:1] == ["watch"]:
+                    self.assertIn(pressed, GO_KEYS, "the board moved the owner's focus without a key: %s" % argv)
+                    pressed = None
             if argv[:2] == ["agent", "prompt"] or argv[:2] == ["agent", "rename"]:
                 self.assertNotIn(argv[2], strips, "a watcher pane was addressed as an agent: %s" % argv)
             if argv[:2] == ["agent", "start"] and "--pane" in argv:

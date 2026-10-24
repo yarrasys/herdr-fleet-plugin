@@ -69,6 +69,11 @@ PROMPT_GLYPHS: Dict[str, Tuple[str, ...]] = {
 PROMPT_PLACEHOLDERS: Dict[str, Tuple[str, ...]] = {
     "codex": ("Ask Codex to do anything",),
 }
+# A fresh Claude Code session shows a suggestion in its empty input line (`❯ Try "fix typecheck
+# errors"`), which `pane read` prints like typed text; it is a placeholder (design 23.11).
+PROMPT_PLACEHOLDER_PATTERNS: Dict[str, Tuple[str, ...]] = {
+    "claude": (r'Try "[^"]*"',),
+}
 
 # Design 23.7: the exit confirmation a kind may show after its quit command, which the
 # plugin answers with one Enter (invariant 21). ``signature``: lines that must all be on
@@ -393,6 +398,24 @@ def dialog_first_line(screen: str) -> Optional[str]:
             break
     first = next((line for line in lines[start:choice + 1] if line), lines[choice])
     return first if len(first) <= 80 else first[:79] + "\u2026"
+
+
+def dialog_lines(screen: str, count: int = 4) -> List[str]:
+    """Design 25.2: up to ``count`` non-blank lines of the dialog on screen, from the line
+    ``dialog_first_line`` names (the first after the last rule above the highlighted
+    choice), each cut at 80 characters; [] when no numbered choice is highlighted."""
+    first = dialog_first_line(screen)
+    if first is None:
+        return []
+    lines = [_bare(line) for line in screen.splitlines()]
+    choice = next(i for i, line in enumerate(lines) if CHOICE_RE.match(line))
+    start = 0
+    for index in range(choice - 1, -1, -1):
+        if len(lines[index]) >= 3 and set(lines[index]) <= RULE_CHARS:
+            start = index + 1
+            break
+    shown = [line if len(line) <= 80 else line[:79] + "\u2026" for line in lines[start:] if line]
+    return shown[:count]
 
 
 def _no_exit(herdr: Herdr, target: str, quit_cmd: str, timeout_ms: int, gone: bool, answered: bool) -> str:

@@ -256,6 +256,15 @@ class Herdr:
 
     # -- panes and workspaces --------------------------------------------
 
+    def pane_zoom_toggle(self, pane_id: str) -> Dict:
+        """Zoom a pane, or restore it (``pane zoom PANE --toggle``). Only the watcher's board
+        runs it, on its own strip, on the owner's ``z`` (design 25.1, invariant 22). The pane
+        is always named: ``--current`` resolves to the owner's focused pane, not to the
+        calling process (25.7)."""
+        if not str(pane_id or "") or str(pane_id).startswith("-"):
+            raise HerdrError("forbidden_command", "pane zoom needs the strip's own pane id (got %r)" % (pane_id,))
+        return self.run("pane", "zoom", str(pane_id), "--toggle")
+
     def pane_get(self, pane_id: str) -> Dict:
         result = self.run("pane", "get", pane_id)
         return dict(result.get("pane") or result)

@@ -102,7 +102,7 @@ class StateFile(unittest.TestCase):
         self.assertEqual(data["repo"], self.repo)
         self.assertEqual(data["agents"]["a"]["pane_id"], "w1:p2")
         with open(os.path.join(self.repo, ".herdr", ".gitignore")) as handle:
-            self.assertEqual(handle.read(), "fleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\n")
+            self.assertEqual(handle.read(), "fleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\nwatch.log\n")
         self.assertEqual([f for f in os.listdir(os.path.join(self.repo, ".herdr")) if f.endswith(".tmp")], [])
 
     def test_gitignore_line_appended_once(self):
@@ -114,7 +114,7 @@ class StateFile(unittest.TestCase):
         save_state(state)
         save_state(state)
         with open(os.path.join(self.repo, ".herdr", ".gitignore")) as handle:
-            self.assertEqual(handle.read(), "other\nfleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\n")
+            self.assertEqual(handle.read(), "other\nfleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\nwatch.log\n")
 
     def test_corrupt_state_is_an_error(self):
         os.makedirs(os.path.join(self.repo, ".herdr"))

@@ -37,7 +37,7 @@ INBOX_PRINT_MAX = 8192               # design 20.4: bytes of one message `inbox 
 DURATION_RE = re.compile(r"^([1-9][0-9]*)([mhd])$")  # the --ttl grammar (30m, 2h, 1d)
 DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
 WATCH_POSITIONS = ("bottom",)        # design 19.1: the only position in 0.8.0
-WATCH_RATIO = 0.12                   # the strip's default share of the area it is split from
+WATCH_RATIO = 0.2                    # the strip's default share of the area it is split from (design 25)
 WATCH_RATIO_RANGE = (0.1, 0.4)       # herdr clamps every split ratio to 0.1-0.9 (19.4)
 SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "from", "env", "kickoff",
              "kickoff_text", "quit", "notes", "worktrees", "label"}

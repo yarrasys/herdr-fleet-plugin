@@ -48,6 +48,18 @@ def placeholders_for(kind: str) -> Tuple[str, ...]:
     return tuple(PROMPT_PLACEHOLDERS.get(kind or "", ()))
 
 
+def placeholder_patterns_for(kind: str) -> Tuple[str, ...]:
+    from herdr_fleet.seats import PROMPT_PLACEHOLDER_PATTERNS
+    return tuple(PROMPT_PLACEHOLDER_PATTERNS.get(kind or "", ()))
+
+
+def is_placeholder(line: str, kind: str) -> bool:
+    """The kind's empty-input text: an exact placeholder or one matching a pattern in full."""
+    if line in placeholders_for(kind):
+        return True
+    return any(re.fullmatch(pattern, line) for pattern in placeholder_patterns_for(kind))
+
+
 def checkable(kind: str) -> bool:
     """True when the guard knows the kind's prompt glyph (else it passes, design 21.2 item 3)."""
     return bool(glyphs_for(kind))
@@ -89,7 +101,7 @@ def is_typed(line: Optional[str], kind: str) -> bool:
     No prompt line at all (None) counts too: the agent shows something else to answer."""
     if line is None:
         return True
-    return bool(line) and line not in placeholders_for(kind)
+    return bool(line) and not is_placeholder(line, kind)
 
 
 def owner_pane(herdr: Herdr, pane_id: str) -> bool:

@@ -24,7 +24,8 @@ from herdr_fleet.kickoff import DEFAULT_TEMPLATE
 from herdr_fleet.statenote import starter_text
 
 EXAMPLES_DIR = os.path.join(PLUGIN_ROOT, "examples")
-SKIP_NAMES = (".DS_Store", "fleet.state.json", "messages.jsonl", "watch.lock")  # never copied from an example
+# never copied from an example
+SKIP_NAMES = (".DS_Store", "fleet.state.json", "messages.jsonl", "watch.lock", "watch.log")
 SKIP_DIRS = ("inbox",)  # .herdr/inbox: messages are never copied either
 NAME_SUFFIX = "-dev"
 
@@ -51,6 +52,11 @@ kickoff = ".herdr/kickoff/default.md"   # default kickoff template for every sea
 # direction = "right"            # chain: split direction between seats: right | down;
 #                                # grid: direction of the first split off your pane
 # ratio = 0.5                    # chain: split ratio; grid: share your pane keeps (0 < ratio < 1)
+
+# watch = false                  # up starts no watcher strip below the seats
+# [watch]                        # the watcher strip `up` opens below the seats (not with watch = false)
+# ratio = 0.2                    # its share of the area it is split from, 0.1 to 0.4 (0.2: eight rows of board)
+# notify_blocked_after = "3m"    # notify you once when a seat has been blocked this long
 
 [[agents]]
 __NAME_LINE__ # herdr agent name: [a-z][a-z0-9_-]{0,31}, unique in this file
@@ -136,7 +142,7 @@ def starter_files(root: str) -> Files:
         (".herdr/fleet.toml", fleet.encode("utf-8")),
         (".herdr/kickoff/default.md", (KICKOFF_COMMENT + DEFAULT_TEMPLATE).encode("utf-8")),
         (".herdr/STATE.md", STATE_NOTE.encode("utf-8")),
-        (".herdr/.gitignore", b"fleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\n"),
+        (".herdr/.gitignore", b"fleet.state.json\nmessages.jsonl\ninbox/\nwatch.lock\nwatch.log\n"),
     ]
 
 

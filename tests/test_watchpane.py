@@ -59,16 +59,16 @@ class FreshWorkspace(StripCase):
         self.assertEqual(self.argvs("plugin", "pane", "open"), [self.strip_argv(root)])
         self.assertLess(self.index("plugin", "pane", "open"), self.index("pane", "split"))
         self.assertLess(self.index("pane", "resize"), self.index("pane", "split"))
-        # herdr split 50/50; the pane above grows by 0.38 so the strip keeps 0.12
+        # herdr split 50/50; the pane above grows by 0.3 so the strip keeps 0.2 (design 25)
         self.assertEqual(self.argvs("pane", "resize"),
-                         [["pane", "resize", "--pane", root, "--direction", "down", "--amount", "0.38"]])
-        self.assertIn("watcher: started - herdr-fleet watch in pane %s below %s, 12%% of the area" % (strip, root),
+                         [["pane", "resize", "--pane", root, "--direction", "down", "--amount", "0.3"]])
+        self.assertIn("watcher: started - herdr-fleet watch in pane %s below %s, 20%% of the area" % (strip, root),
                       out)
         cells = self.geometry(root)
-        self.assertEqual(cells[strip], (0, 44, 200, 6))  # the full width, 6 of 50 rows
+        self.assertEqual(cells[strip], (0, 40, 200, 10))  # the full width, 10 of 50 rows
         for name in ("fablyn-orchestrator", "fablyn-dev", "fablyn-reviewer"):
             x, y, w, h = cells[self.pane_of(name)]
-            self.assertLessEqual(y + h, 44, name)  # every seat sits above the strip
+            self.assertLessEqual(y + h, 40, name)  # every seat sits above the strip
         entry = self.read_state()["watch"]
         self.assertEqual((entry["pane_id"], entry["created_pane"]), (strip, True))
         self.assertTrue(entry["started"])
@@ -84,9 +84,9 @@ class FreshWorkspace(StripCase):
         root = self.read_state()["workspace_id"] + ":p1"
         self.assertLess(self.index("pane", "resize"), self.index("pane", "split"))
         cells = self.geometry(root)
-        self.assertEqual(cells[self.strip()], (0, 44, 200, 6))
-        self.assertEqual(cells[root], (0, 0, 100, 22))  # orchestrator: top left quarter of the area above
-        self.assertEqual(cells[self.pane_of("fablyn-designer")], (100, 22, 100, 22))
+        self.assertEqual(cells[self.strip()], (0, 40, 200, 10))
+        self.assertEqual(cells[root], (0, 0, 100, 20))  # orchestrator: top left quarter of the area above
+        self.assertEqual(cells[self.pane_of("fablyn-designer")], (100, 20, 100, 20))
 
     def test_status_line_and_json(self):
         self.run_cli("up")
@@ -147,7 +147,7 @@ class FreshWorkspace(StripCase):
         self.assertIn("watcher: plan - herdr plugin pane open --plugin yarrasys.fleet --entrypoint watch --placement "
                       "split --target-pane '<root pane of fablyn>' --direction down --cwd %s --env "
                       "HERDR_FLEET_FILE=%s --no-focus, then herdr pane resize --pane '<root pane of fablyn>' "
-                      "--direction down --amount 0.38 (the strip gets 12%% of <root pane of fablyn>)"
+                      "--direction down --amount 0.3 (the strip gets 20%% of <root pane of fablyn>)"
                       % (self.repo, os.path.join(self.repo, ".herdr", "fleet.toml")), out)
         for prefix in (("plugin", "pane"), ("pane", "resize"), ("pane", "layout")):
             self.assertEqual(self.argvs(*prefix), [])
@@ -178,8 +178,8 @@ class FreshWorkspace(StripCase):
                                     "type": "pane_resize", "resize": {"changed": True}}}}]
         code, out, _ = self.run_cli("up")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.argvs("pane", "resize")[0][-2:], ["--amount", "0.38"])
-        self.assertIn("about 12% of the area (pane layout unreadable; assumed herdr's 50/50 split)", out)
+        self.assertEqual(self.argvs("pane", "resize")[0][-2:], ["--amount", "0.3"])
+        self.assertIn("about 20% of the area (pane layout unreadable; assumed herdr's 50/50 split)", out)
 
     def test_focus_is_reported_when_herdr_moves_it(self):
         pane = {"pane_id": "w101:p102", "focused": True}
@@ -282,7 +282,7 @@ class ExistingLayout(StripCase):
         self.assertTrue(prompts)
         self.assertLess(max(prompts), opened)  # the strip came after the kickoff
         self.assertEqual(self.argvs("pane", "resize")[0][2:], ["--pane", reviewer, "--direction", "down",
-                                                                "--amount", "0.38"])
+                                                                "--amount", "0.3"])
         cells = self.geometry(reviewer)
         x, y, w, h = cells[self.strip()]
         rx, ry, rw, rh = cells[reviewer]
@@ -333,14 +333,14 @@ class Tile(StripCase):
         backs = [m for m in moves if "--tab" in m]
         self.assertEqual(parks[-1][2], strip)  # parked after the seats
         self.assertEqual(backs[0], ["pane", "move", strip, "--tab", self.ws + ":t1", "--split", "down",
-                                    "--target-pane", self.root, "--ratio", "0.88", "--no-focus"])
+                                    "--target-pane", self.root, "--ratio", "0.8", "--no-focus"])
         self.assertEqual([m[2] for m in backs[1:]], [self.pane_of(n) for n in
                                                      ("fablyn-reviewer", "fablyn-dev", "fablyn-designer")])
-        self.assertIn("watcher: moved - below fablyn-orchestrator (%s), ratio 0.88" % self.root, out)
+        self.assertIn("watcher: moved - below fablyn-orchestrator (%s), ratio 0.8" % self.root, out)
         cells = self.geometry(self.root)
-        self.assertEqual(cells[strip], (0, 44, 200, 6))
-        self.assertEqual(cells[self.root], (0, 0, 100, 22))
-        self.assertEqual(cells[self.pane_of("fablyn-designer")], (100, 22, 100, 22))
+        self.assertEqual(cells[strip], (0, 40, 200, 10))
+        self.assertEqual(cells[self.root], (0, 0, 100, 20))
+        self.assertEqual(cells[self.pane_of("fablyn-designer")], (100, 20, 100, 20))
         self.assertEqual(self.read_state()["watch"]["pane_id"], strip)
 
     def test_dry_run(self):
@@ -348,7 +348,7 @@ class Tile(StripCase):
         code, out, _ = self.run_cli("tile", "--dry-run")
         self.assertEqual(code, 0, out)
         self.assertIn("watcher: plan - herdr pane move %s --new-tab --workspace %s --label park --no-focus, then "
-                      "herdr pane move %s --tab %s:t1 --split down --target-pane %s --ratio 0.88 --no-focus "
+                      "herdr pane move %s --tab %s:t1 --split down --target-pane %s --ratio 0.8 --no-focus "
                       "(below fablyn-orchestrator, before the seats come back)" % (strip, self.ws, strip, self.ws,
                                                                                   self.root), out)
 
@@ -456,7 +456,7 @@ class FleetFile(FleetCase):
 
     def test_defaults(self):
         fleet = load_fleet(self.write_fleet(THREE_SEATS))
-        self.assertEqual((fleet.watch, fleet.watch_ratio, fleet.watch_position), (True, 0.12, "bottom"))
+        self.assertEqual((fleet.watch, fleet.watch_ratio, fleet.watch_position), (True, 0.2, "bottom"))
 
     def test_off_and_table(self):
         self.assertFalse(self.load("watch = false").watch)

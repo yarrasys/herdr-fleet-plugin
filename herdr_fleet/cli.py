@@ -182,12 +182,17 @@ def build_parser() -> argparse.ArgumentParser:
                        description="Run until Ctrl-C: for every seat or contact with a queued message that is not "
                                    "FYI, wait in the herdr server (`herdr agent wait`) until it is idle or done, "
                                    "then deliver its queue as one prompt, as `deliver` does. owner gets a "
-                                   "notification at once. One watcher per fleet (.herdr/watch.lock).")
+                                   "notification at once. One watcher per fleet (.herdr/watch.lock). On a "
+                                   "terminal it draws a board of the seats (keys: ? for help) and appends its "
+                                   "lines to .herdr/watch.log; --log prints them instead.")
     p.add_argument("--debounce", metavar="MS", type=int, default=DEFAULT_DEBOUNCE_MS,
                    help="after a seat turns idle, wait MS ms and check again before delivering (default %d)"
                         % DEFAULT_DEBOUNCE_MS)
     p.add_argument("--once", action="store_true",
                    help="deliver what can be delivered now (seats already idle or done) and exit; no lock")
+    p.add_argument("--log", action="store_true",
+                   help="print one line per event instead of drawing the board (the default when stdout is "
+                        "not a terminal)")
 
     p = sub.add_parser("hooks", help="Claude Code hooks that let seats read their inbox (opt-in)",
                        description="Pick a fleet file with --fleet PATH after the action (hooks install --fleet ...).")
@@ -388,7 +393,7 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         if args.debounce < 0:
             raise UsageError("--debounce takes milliseconds, 0 or more")
         preflight(ctx, caller=False)
-        return op_watch(ctx, args.debounce, args.once)
+        return op_watch(ctx, args.debounce, args.once, args.log)
     if command == "send":  # preflight inside, since a message to owner may queue outside herdr
         return op_send(ctx, args.words, args.message_file, args.as_name, args.when_ready, args.all_seats, args.fyi,
                        args.queue, args.now, args.reply_to, args.ttl, args.urgent)

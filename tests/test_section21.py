@@ -68,6 +68,13 @@ class PromptLine(unittest.TestCase):
         self.assertFalse(presence.is_typed(presence.prompt_line(boxed_empty, "claude"), "claude"))
         self.assertEqual(presence.prompt_line("│ > boxed text │\n", "claude"), "boxed text")
 
+    def test_a_fresh_claude_session_shows_a_suggestion_which_is_not_typed_text(self):
+        fresh = "\u2500" * 40 + "\n\u276f Try \"write a test for test_init.py\"\n" + "\u2500" * 40 + "\n  status\n"
+        self.assertEqual(presence.prompt_line(fresh, "claude"), 'Try "write a test for test_init.py"')
+        self.assertFalse(presence.is_typed(presence.prompt_line(fresh, "claude"), "claude"))
+        self.assertTrue(presence.is_typed('Try "x" and more', "claude"))
+        self.assertTrue(presence.is_typed("Try harder", "claude"))
+
     def test_no_prompt_line_counts_as_typing(self):
         dialog = "╭──╮\n│ Do you want to proceed? │\n│   1. Yes │\n╰──╯\n"
         self.assertIsNone(presence.prompt_line(dialog, "claude"))
