@@ -51,6 +51,7 @@ Tests are the executable coverage inventory. For the principal areas, start with
 | Messages, inbox, delivery and state notes | `test_messages.py`, `test_inbox.py`, `test_contacts.py`, `test_statenote.py`, `test_section20.py`, `test_section23.py` |
 | Watcher, hooks and presence | `test_watch.py`, `test_hooks.py`, `test_section21.py` |
 | Board, pages and file reload | `test_section24.py`, `test_section25.py`, `test_section26_6.py` |
+| Cross-fleet ownership, caller/build identity and launcher provenance | `test_section31.py` |
 | Daily timers, calendar/fallback and durable queue recovery | `test_section30.py` |
 | Starter examples and combined seat/contact capacity | `test_section27.py` |
 | Claude/Codex transcript usage, windows and cache | `test_context.py`, `test_section29.py` |
@@ -64,7 +65,9 @@ Use temporary source roots (`HERDR_FLEET_CLAUDE_PROJECTS` and `HERDR_FLEET_CODEX
 
 Section 30 exercises the public timers CLI/parser, offline zero-write dry-run, the real watcher delivery seam, TTL on ordinary pull/hook/kickoff/send paths, metadata-only ownership checks, body snapshotting, crash recovery before file/after file/after logging, reordered send/delivery audit, corruption, concurrent schedulers and lock order. Both calendar backends receive the same DST/fold/gap/non-hour-zone checks; forcing the native backend on Python 3.9/3.12 simulates the fallback and is not an actual Python 3.8 run. Active schedules beyond the former small-cache capacity must reuse calendar batches on the next cycle. Test timer/history-bearing log-mode reload, removal of the last timer preserving unrelated mail, and pristine no-timer behavior separately.
 
-Historical release inventories, live observations and their limitations are in [docs/design.md](design.md), particularly sections 12 and 17–29. They record what was run at the time; they are not current procedures or proof that a new build was smoke-tested.
+Section 31 exercises the real send/destination inbox/watcher delivery seams with two synthetic fleets. Check alias canonicalization, one destination pending file, source history not counting as delivery, immediate pull of deferred FYIs, ordinary state/input holds, TTL and terminal receipt propagation, exact replies/acknowledgements (including local owner replies settling origin debt without routing owner mail), partial-write recovery, short-id collisions across both trees, concurrent readers/watchers/reverse routes, and legacy source queues without migration. Dry-run must leave both trees byte-identical. Move the source configuration to a valid custom filename with no conventional source fleet file: explicit `--fleet` sends through both a contact alias and a dynamic agent must queue locally with an origin-eligibility reason and leave the destination unchanged. Normal conventional-source routing remains covered separately. Caller tests distinguish a verified shell from missing/failed identity and retain clean JSON/count stdout plus silent hooks. Build tests cover old locks, missing Git, cached checkout identity and current/stale/unknown comparisons. Launcher subprocess tests isolate both PATH and `HERDR_BIN_PATH` with fake registry executables, use marker-writing development files to detect any implicit fallback, and check exact plugin selection, registry exit codes, malformed/missing registrations/executables, explicit override/dev behavior, untouched argument arrays and hook silence. Output policy fixtures separate additive identity headings only at their assertions; the raw CLI streams and safety call logs remain intact.
+
+Historical release inventories, live observations and their limitations are in [docs/design.md](design.md), particularly sections 12 and 17–31. They record what was run at the time; they are not current procedures or proof that a new build was smoke-tested.
 
 ## Manual scratch-fleet check
 
@@ -255,3 +258,26 @@ herdr workspace list
 Verify only the scratch seat and scratch workspace disappeared, the controller stayed alive, and a recorded scratch watcher stopped and released its lock. A refused or failed shutdown needs inspection before another attempt. Keep the temporary directory and logs until review; remove only that verified scratch directory afterwards. If you changed plugin registration, restore the previously recorded installation/link deliberately; running old plugin panes remain separate processes.
 
 Report the code revision or working-tree state, Herdr/Python/agent versions, model chosen, terminal size, exact commands, observed outcomes, files retained, and everything not run. Separate automated evidence from live evidence. Never label a proposed procedure as a passed check.
+
+### Cross-fleet ownership and launch provenance acceptance
+
+The designer or owner can extend the disposable setup above to two temporary repositories. Use unique live names in each, declare each exact name as a seat in its own fleet, and add a contact alias only to the source scratch fleet with `match = { name = "<destination live name>" }`. Keep watchers stopped while setting up; inspect both fleet paths and the live records' cwd before sending. A contact alias is not a destination seat. The commands below use shell variables assigned to these verified scratch paths/names: `FLEET_SOURCE_FILE`, `FLEET_DESTINATION_FILE`, `FLEET_DESTINATION_NAME`, and `FLEET_CONTACT_ALIAS`. They are manual acceptance steps, not automation against owner fleets.
+
+```bash
+python3 "$FLEET_CHECKOUT/bin/herdr-fleet" send --as owner --queue --fyi \
+    --fleet "$FLEET_SOURCE_FILE" "$FLEET_CONTACT_ALIAS" "FYI: synthetic mailbox acceptance"
+python3 "$FLEET_CHECKOUT/bin/herdr-fleet" inbox --as "$FLEET_DESTINATION_NAME" \
+    --fleet "$FLEET_DESTINATION_FILE" --count --json
+python3 "$FLEET_CHECKOUT/bin/herdr-fleet" inbox --as "$FLEET_DESTINATION_NAME" \
+    --fleet "$FLEET_DESTINATION_FILE" --wait --timeout 3000 --full
+python3 "$FLEET_CHECKOUT/bin/herdr-fleet" log --json --fleet "$FLEET_SOURCE_FILE"
+python3 "$FLEET_CHECKOUT/bin/herdr-fleet" log --json --fleet "$FLEET_DESTINATION_FILE"
+```
+
+Expect one destination `new/` file and no source pending alias/canonical copy before the read. Human output must show explicit sender, selected source and holding destination, including alias to canonical name. The source `cur/` receipt is nonpending and produces no debt until delivery. The queued FYI must be visible to an already-running destination wait without a native wake; verify with the wait started in a second scratch controller shell before sending another unique report. After the pull, expect one delivered receipt per log and no native prompt. For native acceptance, check idle/done and empty input, then send a plain synthetic request through the alias; inspect both logs for one delivery. Enter harmless draft text by hand in the destination input and verify a plain send stays queued; clear it manually before intentional delivery. A blocked dialog is answered only by the owner. Never blindly repeat an unconfirmed prompt.
+
+From the selected scratch namespace, try `send --reply-to` with an absent synthetic full/short id; expect exit 2, that namespace's path, `--fleet PATH`/plain-send guidance, and unchanged queues/logs. Exercise explicit sender identity separately from a missing caller environment; inspect JSON/count stdout independently from stderr. Preserve any pre-existing source queues and history; this test does not migrate them.
+
+Start the explicit checkout watcher in its own scratch shell, inspect `status --json` for `cli`, `watcher.launch` and `watcher.comparison`, and compare with the actual launch command. A known different build must be stale; an older lock or unavailable Git must remain unknown. Stop only that watcher with Ctrl-C before relaunching selected code; keep coding-agent sessions running. A fleet-file reload cannot replace Python code.
+
+Generate a launcher only into a separate temporary directory with `install-cli --dir DIR`. Test it with an isolated fake registry command before any real installation. Simulate denied access, invalid JSON and a missing installation, and verify nonzero exit plus stderr provenance for normal calls, empty successful hook results, and no execution of a development marker file. Check a valid exact enabled registration and an explicit override. Refreshing the actual user launcher after release is an explicit deployment step; merely updating plugin files does not replace an older generated launcher. Remove only scratch resources after recording results, using the guarded cleanup above. Report actual observations and any untested paths; these instructions alone provide no live evidence.

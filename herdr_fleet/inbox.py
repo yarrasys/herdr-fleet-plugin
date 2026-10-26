@@ -73,6 +73,13 @@ class Message:
     mtime_ns: int = 0
     timer: Optional[str] = None
     scheduled_for: Optional[str] = None
+    origin_fleet: Optional[str] = None
+    destination_fleet: Optional[str] = None
+    requested_to: Optional[str] = None
+    history_only: bool = False
+    route_bytes: Optional[int] = None
+    origin_send_order: Optional[int] = None
+    destination_send_order: Optional[int] = None
 
     @property
     def short(self) -> str:
@@ -244,8 +251,17 @@ def render_file(message: Message) -> str:
         lines.append("queued_by: %s" % message.queued_by)
     if message.priority:
         lines.append("priority: %d" % message.priority)
+    if message.history_only:
+        lines.append("history_only: true")
+    if message.route_bytes is not None:
+        lines.append("route_bytes: %d" % message.route_bytes)
+    for key in ("origin_send_order", "destination_send_order"):
+        if getattr(message, key) is not None:
+            lines.append("%s: %d" % (key, getattr(message, key)))
     for key, value in (("reply_to", message.reply_to), ("ttl", message.ttl), ("file", message.file),
-                       ("timer", message.timer), ("scheduled_for", message.scheduled_for)):
+                       ("timer", message.timer), ("scheduled_for", message.scheduled_for),
+                       ("origin_fleet", message.origin_fleet), ("destination_fleet", message.destination_fleet),
+                       ("requested_to", message.requested_to)):
         if value:
             lines.append("%s: %s" % (key, _one_line(value)))
     return "\n".join(lines) + "\n\n" + message.body
@@ -268,11 +284,25 @@ def parse_file(text: str, path: str = "", box: str = NEW) -> Message:
         priority: Optional[int] = int(fields.get("priority", "")) or None
     except ValueError:
         priority = None
+    try:
+        route_bytes = int(fields["route_bytes"]) if "route_bytes" in fields else None
+    except ValueError:
+        route_bytes = None
+    orders = {}
+    for key in ("origin_send_order", "destination_send_order"):
+        try:
+            orders[key] = int(fields[key]) if key in fields else None
+        except ValueError:
+            orders[key] = None
     return Message(id=fields["id"], sender=fields["from"], to=fields["to"], time=fields["time"], body=body,
                    fyi=fields.get("fyi", "").lower() == "true", reply_to=fields.get("reply_to") or None,
                    ttl=fields.get("ttl") or None, file=fields.get("file") or None,
                    queued_by=fields.get("queued_by") or None, priority=priority, path=path, box=box,
-                   timer=fields.get("timer") or None, scheduled_for=fields.get("scheduled_for") or None)
+                   timer=fields.get("timer") or None, scheduled_for=fields.get("scheduled_for") or None,
+                   origin_fleet=fields.get("origin_fleet") or None,
+                   destination_fleet=fields.get("destination_fleet") or None,
+                   requested_to=fields.get("requested_to") or None, history_only=fields.get("history_only") == "true",
+                   route_bytes=route_bytes, **orders)
 
 
 def write(repo: str, message: Message, box: str = NEW) -> Message:
@@ -301,6 +331,8 @@ def write(repo: str, message: Message, box: str = NEW) -> Message:
 def load(path: str, box: str) -> Message:
     with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
         message = parse_file(handle.read(), path, box)
+    if message.origin_fleet and os.path.basename(path) != message.id + ".md":
+        raise ValueError("routed message header id differs from filename")
     message.mtime_ns = os.stat(path).st_mtime_ns
     return message
 

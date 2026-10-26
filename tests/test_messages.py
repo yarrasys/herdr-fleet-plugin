@@ -12,7 +12,7 @@ import re
 import unittest
 
 import fake_herdr
-from support import CALLER_PANE, FleetCase, LiveFleet
+from support import policy_output, CALLER_PANE, FleetCase, LiveFleet
 from herdr_fleet import messages
 from herdr_fleet.cli import main
 
@@ -43,7 +43,7 @@ class Send(LiveFleet):
         short = entry["id"][-6:]
         text = "[from caller #%s] Please review the parser example\nDetails follow." % short
         self.assertEqual(self.argvs("agent", "prompt"), [["agent", "prompt", "sample-dev", text]])
-        self.assertEqual(out.strip(), "sent to sample-dev (idle), %d B" % len(text.encode()))
+        self.assertEqual(policy_output(out).strip(), "sent to sample-dev (idle), %d B" % len(text.encode()))
         self.assertIn(["pane", "current", "--current"], self.argvs("pane", "current"))  # sender from your pane
         self.assertEqual({k: entry[k] for k in ("from", "to", "kind", "bytes", "first_line", "delivery")},
                          {"from": "caller", "to": "sample-dev", "kind": "send", "bytes": len(text.encode()),
@@ -59,7 +59,7 @@ class Send(LiveFleet):
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "sample-dev", "when you are free")
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(working\) #[0-9a-f]{6}, "
+        self.assertRegex(policy_output(out).strip(), r"^queued in herdr-fleet for sample-dev \(working\) #[0-9a-f]{6}, "
                                       r"position 1 of 1; lands at its next idle, or now with --now$")  # design 23.1
         self.assertEqual(self.prompts_to("sample-dev"), [])
         code, out, _ = self.run_cli("send", "--now", "sample-dev", "now please")
@@ -75,7 +75,7 @@ class Send(LiveFleet):
         code, out, _ = self.run_cli("send", "sample-dev", "sample-reviewer", "sample-orchestrator", "hello")
         self.assertEqual(code, 0)
         entries = log_entries(self.repo)
-        self.assertEqual(out.splitlines(), [  # design 20.3: the line names the place and the position
+        self.assertEqual(policy_output(out).splitlines(), [  # design 20.3: the line names the place and the position
             "queued in herdr-fleet for sample-dev (blocked: a dialog is open) #%s, position 1 of 1"  # design 23.5
             % entries[0]["id"][-6:],
             "queued in herdr-fleet for sample-reviewer (unknown) #%s, position 1 of 1" % entries[1]["id"][-6:],
@@ -93,11 +93,12 @@ class Send(LiveFleet):
 
     def test_sender_as_and_owner(self):
         self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "a")
+        self.world["panes"][CALLER_PANE]["procs"] = [dict(fake_herdr.SHELL)]
         self.world["panes"][CALLER_PANE]["agent"] = None           # a shell in your pane (design 23.3)
         self.run_cli("send", "sample-dev", "b")
         env = dict(self.env)
         del env["HERDR_PANE_ID"]                                   # not run from a pane at all
-        self.run_cli("send", "sample-dev", "c", env=env)
+        self.run_cli("send", "--as", "owner", "sample-dev", "c", env=env)
         self.assertEqual(strip_ids(self.prompts_to("sample-dev")),
                          ["[from sample-orchestrator] a", "[from owner] b", "[from owner] c"])
         self.assertEqual(self.run_cli("send", "--as", "Not A Name", "sample-dev", "d")[0], 2)
@@ -150,7 +151,7 @@ class Send(LiveFleet):
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "--when-ready", "5000", "sample-dev", "your turn")
         self.assertEqual(code, 0)
-        self.assertRegex(out, r"queued in herdr-fleet for sample-dev \(working after --when-ready 5000 ms\) "
+        self.assertRegex(policy_output(out), r"queued in herdr-fleet for sample-dev \(working after --when-ready 5000 ms\) "
                               r"#[0-9a-f]{6}, position 1 of 1")
         self.assertEqual(self.prompts_to("sample-dev"), [])
         code, out, _ = self.run_cli("send", "--now", "--when-ready", "5000", "sample-dev", "your turn")
@@ -172,7 +173,7 @@ class Send(LiveFleet):
         self.world["behaviors"]["prompt_errors"] = {"sample-dev": "timeout", "sample-reviewer": "agent_not_found"}
         code, out, _ = self.run_cli("send", "sample-dev", "sample-reviewer", "x")
         self.assertEqual(code, 1)
-        self.assertRegex(out, r"failed sample-reviewer: herdr error agent_not_found: .*; #[0-9a-f]{6} left queued")
+        self.assertRegex(policy_output(out), r"failed sample-reviewer: herdr error agent_not_found: .*; #[0-9a-f]{6} left queued")
         self.assertEqual([(e["to"], e["delivery"]) for e in log_entries(self.repo)],
                          [("sample-dev", "unconfirmed"), ("sample-reviewer", "queued")])
 
@@ -249,7 +250,7 @@ class LogCommand(LiveFleet):
             handle.write("{not json\n")
         code, out, err = self.run_cli("log")
         self.assertEqual(code, 0)
-        lines = out.splitlines()
+        lines = policy_output(out).splitlines()
         self.assertEqual(len(lines), 3)
         self.assertRegex(lines[0], r"^\S+  sample-orchestrator → sample-dev  \d+  #[0-9a-f]{6}  first$")
         self.assertIn("corrupt line skipped", err)
@@ -440,7 +441,7 @@ class Fyi(LiveFleet):
     def test_flag_logs_fyi_and_keeps_it_queued_for_an_idle_seat(self):  # design 18.3: never wakes an idle seat
         code, out, _ = self.run_cli("send", "--fyi", "--as", "sample-dev", "sample-orchestrator", "cleanup done")
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-orchestrator \(idle, fyi: delivered with the "
+        self.assertRegex(policy_output(out).strip(), r"^queued in herdr-fleet for sample-orchestrator \(idle, fyi: delivered with the "
                                       r"next plain send, kickoff or deliver\) #[0-9a-f]{6}, position 1 of 1$")
         self.assertEqual(self.prompts_to("sample-orchestrator"), [])
         (item,) = log_entries(self.repo)
@@ -501,7 +502,7 @@ class Ack(LiveFleet):
         before = len(self.calls())
         code, out, err = self.run_cli("ack", "--as", "sample-dev", "sample-orchestrator")
         self.assertEqual(code, 0, out + err)
-        self.assertRegex(out.strip(), r"^acked sample-orchestrator since \d\d:\d\d \(Parser example review\)$")
+        self.assertRegex(policy_output(out).strip(), r"^acked sample-orchestrator since \d\d:\d\d \(Parser example review\)$")
         self.assertEqual(len(self.calls()), before)  # with --as, herdr is not asked anything
         item = log_entries(self.repo)[-1]
         self.assertEqual({k: v for k, v in item.items() if k != "time"},
@@ -516,14 +517,14 @@ class Ack(LiveFleet):
     def test_owner_and_options_anywhere(self):
         code, out, _ = self.run_cli("ack", "owner", "--as", "sample-dev", "sample-orchestrator")
         self.assertEqual(code, 0, out)
-        self.assertEqual([l.split()[1] for l in out.splitlines()], ["owner", "sample-orchestrator"])
+        self.assertEqual([l.split()[1] for l in policy_output(out).splitlines()], ["owner", "sample-orchestrator"])
         self.assertEqual([p for p in self.owed_pairs() if p[1] == "sample-dev"], [])
 
     def test_all_resolves_the_caller_from_its_pane(self):
         before = len(self.calls())
         code, out, err = self.run_cli("ack", "--all")
         self.assertEqual(code, 0, out + err)
-        self.assertEqual([l.split()[1] for l in out.splitlines()], ["sample-orchestrator", "sample-reviewer"])
+        self.assertEqual([l.split()[1] for l in policy_output(out).splitlines()], ["sample-orchestrator", "sample-reviewer"])
         self.assertEqual([(e["from"], e["to"]) for e in log_entries(self.repo)[-2:]],
                          [("caller", "sample-orchestrator"), ("caller", "sample-reviewer")])
         self.assertEqual([p for p in self.owed_pairs() if p[1] == "caller"], [])
@@ -535,13 +536,13 @@ class Ack(LiveFleet):
     def test_all_plus_names_and_nothing_owed(self):
         code, out, _ = self.run_cli("ack", "--as", "sample-dev", "--all", "sample-reviewer")
         self.assertEqual(code, 0)
-        self.assertEqual(out.splitlines()[0], "nothing owed to sample-reviewer")
-        self.assertEqual([l.split()[1] for l in out.splitlines()[1:]], ["sample-orchestrator", "owner"])
+        self.assertEqual(policy_output(out).splitlines()[0], "nothing owed to sample-reviewer")
+        self.assertEqual([l.split()[1] for l in policy_output(out).splitlines()[1:]], ["sample-orchestrator", "owner"])
         written = len(log_entries(self.repo))
         code, out, _ = self.run_cli("ack", "--as", "sample-dev", "--all")
-        self.assertEqual((code, out.strip()), (0, "nothing owed by sample-dev"))
+        self.assertEqual((code, policy_output(out).strip()), (0, "nothing owed by sample-dev"))
         code, out, _ = self.run_cli("ack", "--as", "sample-dev", "sample-orchestrator")
-        self.assertEqual((code, out.strip()), (0, "nothing owed to sample-orchestrator"))
+        self.assertEqual((code, policy_output(out).strip()), (0, "nothing owed to sample-orchestrator"))
         self.assertEqual(len(log_entries(self.repo)), written)  # nothing owed: no entry
 
     def test_unknown_names_and_usage(self):
@@ -565,7 +566,7 @@ class StatusShowsOwed(LiveFleet):
     def test_status_lines_and_json(self):
         self.run_cli("send", "--as", "sample-orchestrator", "sample-reviewer", "Review parser commits")
         code, out, _ = self.run_cli("status")
-        lines = out.splitlines()
+        lines = policy_output(out).splitlines()
         owes = "awaiting: sample-reviewer owes sample-orchestrator"
         awaiting = [i for i, l in enumerate(lines) if l.startswith(owes)]
         integration = [i for i, l in enumerate(lines) if l.startswith("integration ")]

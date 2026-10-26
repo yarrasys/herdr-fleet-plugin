@@ -63,7 +63,7 @@ from herdr_fleet.herdr import HerdrError
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
 from herdr_fleet.kickoff import INBOX_HEADING
 from herdr_fleet.notify import notify
-from herdr_fleet.seats import SEND_ALLOWED, SETTLED, safe_prompt, state_words
+from herdr_fleet.seats import SEND_ALLOWED, SETTLED, at_shell_prompt, safe_prompt, state_words
 from herdr_fleet.state import ensure_gitignore, now_iso
 
 LOG_NAME = "messages.jsonl"
@@ -132,6 +132,7 @@ def send_entry(message: Message, delivery: str, file: Optional[str] = None) -> D
     if message.reply_to:
         entry["reply_to"] = message.reply_to
     entry.update(timer_metadata(message))
+    entry.update(route_metadata(message))
     return entry
 
 
@@ -139,17 +140,22 @@ def timer_metadata(message: Message) -> Dict:
     return {"timer": message.timer, "scheduled_for": message.scheduled_for} if message.timer else {}
 
 
+def route_metadata(message: Message) -> Dict:
+    return {"origin_fleet": message.origin_fleet, "destination_fleet": message.destination_fleet,
+            "requested_to": message.requested_to} if message.origin_fleet else {}
+
+
 def delivered_entry(message: Message, via: str, delivery: str = "sent") -> Dict:
     return {"time": now_iso(), "from": PLUGIN_SENDER, "to": message.to, "kind": "delivered", "id": message.id,
             "via": via, "bytes": 0, "first_line": first_line(message.body), "delivery": delivery,
-            **timer_metadata(message)}
+            **timer_metadata(message), **route_metadata(message)}
 
 
 def disposal_entry(kind: str, message: Message, via: str) -> Dict:
     """``expired`` (via ``ttl``) or ``dropped`` (via ``drop-inbox``): moved to ``cur/`` undelivered."""
     return {"time": now_iso(), "from": PLUGIN_SENDER, "to": message.to, "kind": kind, "id": message.id,
             "via": via, "bytes": 0, "first_line": first_line(message.body), "delivery": "none",
-            **timer_metadata(message)}
+            **timer_metadata(message), **route_metadata(message)}
 
 
 def ack_entry(caller: str, seat: str, time: Optional[str] = None, ident: Optional[str] = None,
@@ -191,9 +197,17 @@ def append(repo: str, entry: Dict) -> None:
 def record(ctx: Ctx, entry: Dict) -> None:
     """Append, turning a failed write into a warning: the message itself already moved."""
     try:
+        crossfleet.local_source(ctx, entry)
+    except (OSError, ValueError, UsageError) as exc:
+        ctx.warn("cannot repair route send receipt: %s" % exc)
+    try:
         append(ctx.fleet.repo, entry)
     except OSError as exc:
         ctx.warn("cannot append to %s: %s" % (log_path(ctx.fleet.repo), exc))
+    try:
+        crossfleet.terminal(ctx, entry)
+    except (OSError, ValueError, UsageError) as exc:
+        ctx.warn("cannot mirror route receipt: %s; no message will be re-prompted" % exc)
 
 
 def read(repo: str, warnings: Optional[List[str]] = None) -> List[Dict]:
@@ -260,13 +274,13 @@ def unsettled(entries: Sequence[Dict]) -> List[Tuple[Key, Dict]]:
     # A timer's atomic file can be consumed after a crash before its send is
     # recovered. Join these sources by id even when the send was appended later;
     # unrelated message ordering keeps its existing semantics.
-    timer_sources = {str(e["id"]): e for e in entries if e.get("kind") == "send" and e.get("timer")
+    recoverable_sources = {str(e["id"]): e for e in entries if e.get("kind") == "send" and (e.get("timer") or e.get("origin_fleet"))
                      and e.get("id") and e.get("delivery") == "queued"}
-    timer_delivered: Set[str] = set()
-    timer_delivery_order = {}
+    recoverable_delivered: Set[str] = set()
+    delivery_order = {}
     for index, entry in enumerate(entries):
-        if entry.get("kind") == "delivered" and str(entry.get("id")) in timer_sources:
-            timer_delivery_order.setdefault(str(entry["id"]), index)
+        if entry.get("kind") == "delivered" and str(entry.get("id")) in recoverable_sources:
+            delivery_order.setdefault(str(entry["id"]), index)
 
     def ask(source: Dict, key: Key, since: str) -> None:
         if source.get("fyi"):
@@ -286,13 +300,13 @@ def unsettled(entries: Sequence[Dict]) -> List[Tuple[Key, Dict]]:
         pair = (str(entry["from"]), str(entry["to"]))
         if kind == "send":
             delivery = entry.get("delivery") or "sent"
-            if entry.get("timer") and delivery == "queued":
+            if (entry.get("timer") or entry.get("origin_fleet")) and delivery == "queued":
                 # Recovered sends retain their original creation time and logical
                 # log position. Equal-second recovery must not answer a newer ask
                 # to owner merely because the source was appended after delivery.
-                order = entry.get("timer_enqueue_order")
+                order = entry.get("timer_enqueue_order") if entry.get("timer") else entry.get("route_enqueue_order")
                 order = order if type(order) is int and order >= 0 else index
-                order = min(order, index, timer_delivery_order.get(str(entry.get("id")), index))
+                order = min(order, index, delivery_order.get(str(entry.get("id")), index))
                 key = (when, order * 2 - 1)
             if delivery in ANSWERED:
                 if entry.get("reply_to"):
@@ -305,11 +319,11 @@ def unsettled(entries: Sequence[Dict]) -> List[Tuple[Key, Dict]]:
                 pending[str(entry["id"])] = entry
         elif kind == "delivered":
             ident = str(entry.get("id"))
-            source = pending.pop(ident, None) or timer_sources.get(ident)
-            if source is not None and source.get("timer"):
-                if ident in timer_delivered:
+            source = pending.pop(ident, None) or recoverable_sources.get(ident)
+            if source is not None and (source.get("timer") or source.get("origin_fleet")):
+                if ident in recoverable_delivered:
                     continue
-                timer_delivered.add(ident)
+                recoverable_delivered.add(ident)
             if source is not None:
                 if entry.get("via") == "kickoff":
                     carried.setdefault(str(entry["to"]), []).append((source, str(entry["time"]), key))
@@ -605,6 +619,9 @@ class Target:
     problem: Optional[str] = None
     kind: str = "seat"           # seat | contact | agent | owner
     other: Optional[str] = None  # a live agent of another fleet: that fleet's repository (design 20.8)
+    destination: Optional[object] = None  # validated destination fleet for a new route
+    requested: Optional[str] = None
+    route_reason: Optional[str] = None
 
 
 def message_text(words: Sequence[str], text_file: Optional[str], all_seats: bool = False) -> Tuple[List[str], str]:
@@ -636,18 +653,42 @@ def caller_record(ctx: Ctx, as_name: Optional[str]) -> Tuple[str, Dict]:
     pane hosts no agent or the command runs outside herdr. An unnamed agent that no
     contact matches is a usage error: its messages would otherwise read "[from owner]"."""
     if as_name:
-        if not NAME_RE.match(as_name):
+        if not NAME_RE.fullmatch(as_name):
             raise UsageError("--as %r must match [a-z][a-z0-9_-]{0,31}" % as_name)
+        ctx.identity_reason = "explicit --as"
         return as_name, {}
-    pane = ctx.invocation.pane_id if ctx.inside_herdr() else None
-    record = ctx.herdr.pane_agent(pane) if pane else {}
+    if not ctx.inside_herdr():
+        ctx.identity_reason = "owner outside Herdr"
+        return OWNER, {}
+    guidance = "cannot establish caller identity; pass --as NAME (or --as owner explicitly)"
+    if not ctx.env.get("HERDR_PANE_ID"):
+        raise UsageError(guidance + ": caller pane is missing (focused-pane context is not caller identity)")
+    pane = ctx.invocation.pane_id
+    if not pane:
+        raise UsageError(guidance + ": caller pane is missing")
+    try:
+        record = ctx.herdr.agent_get(pane)
+    except HerdrError as exc:
+        if exc.code != "agent_not_found":
+            raise UsageError(guidance + ": agent lookup failed (%s)" % exc.code)
+        record = {}
     name = record.get("name")
     if name:
+        ctx.identity_reason = "named caller in %s" % pane
         return str(name), record
-    if not record.get("agent"):  # no agent in the pane (or no pane): the owner at a shell
+    if not record.get("agent"):
+        try:
+            info = ctx.herdr.pane_get(pane)
+            shell = not info.get("agent") and at_shell_prompt(ctx.herdr.process_info(pane))
+        except HerdrError:
+            shell = False
+        if not shell:
+            raise UsageError(guidance + ": %s is not a verified shell pane" % pane)
+        ctx.identity_reason = "owner at verified shell %s" % pane
         return OWNER, record
     found = [c.name for c in ctx.fleet.contacts if contact_mod.matches(c, record)]
     if len(found) == 1:
+        ctx.identity_reason = "unique caller contact in %s" % pane
         return found[0], record
     where = str(record.get("pane_id") or pane)
     several = " (it matches the contacts %s)" % " and ".join(found) if found else ""
@@ -660,6 +701,21 @@ def resolve_sender(ctx: Ctx, as_name: Optional[str]) -> str:
     return caller_record(ctx, as_name)[0]
 
 
+def selection_label(ctx: Ctx) -> str:
+    return "%s (%s)" % (ctx.fleet.path, "explicit" if ctx.file or ctx.env.get("HERDR_FLEET_FILE") else "discovered")
+
+
+def reply_reference(ctx: Ctx, reference: str) -> str:
+    try:
+        return inbox.resolve(ctx.fleet.repo, reference).id
+    except UsageError as exc:
+        if not str(exc).startswith("no message "):
+            raise
+        raise UsageError("%s; selected fleet/mailbox namespace: %s. A forwarded request may belong elsewhere; "
+                         "use --fleet PATH for its originating fleet, or use a plain send for a forwarded-only "
+                         "message. A plain send does not retain exact reply linkage." % (exc, ctx.fleet.path))
+
+
 def resolve_targets(ctx: Ctx, names: Sequence[str], agents: Sequence[Dict]) -> List[Target]:
     """Seats, contacts, ``owner`` and live agent names; unknown names are a usage error.
     A live agent that is neither seat nor contact may belong to another fleet (20.8)."""
@@ -670,14 +726,22 @@ def resolve_targets(ctx: Ctx, names: Sequence[str], agents: Sequence[Dict]) -> L
         contact = fleet.contact(name)
         if fleet.seat(name) is not None:
             targets.append(Target(name, name, None if name in live else "absent"))
-        elif contact is not None:
-            res = contact_mod.resolve(contact, agents)
-            targets.append(Target(name, res.pane, res.problem() and "%s: %s" % (res.state, res.problem()),
-                                  "contact"))
         elif name == OWNER:
             targets.append(Target(name, None, None, "owner"))
+        elif contact is not None:
+            res = contact_mod.resolve(contact, agents)
+            destination, canonical, reason = crossfleet.destination(res.agent, agents, fleet.repo)
+            targets.append(Target(name, res.pane, res.problem() and "%s: %s" % (res.state, res.problem()),
+                                  "contact", destination=destination, requested=name, route_reason=reason))
+            if canonical:
+                targets[-1].name = canonical
+                targets[-1].herdr = canonical
         elif name in live:
-            targets.append(Target(name, name, None, "agent", crossfleet.other_fleet(live[name], fleet.repo)))
+            destination, canonical, reason = crossfleet.destination(live[name], agents, fleet.repo)
+            ambiguous = sum(a.get("name") == name for a in agents) != 1
+            targets.append(Target(canonical or name, None if ambiguous else name,
+                                  "ambiguous live agent" if ambiguous else None, "agent",
+                                  destination=destination, requested=name, route_reason=reason))
         else:
             unknown.append(name)
     if unknown:
@@ -724,12 +788,13 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
         names += [s.name for s in ctx.fleet.seats if s.name in live and s.name != sender and s.name not in names]
     if not names:
         if all_seats:
+            ctx.say("sender: %s; selected fleet: %s" % (sender, selection_label(ctx)))
             ctx.say("nothing sent: no live seat besides %s" % sender)
             return EXIT_PARTIAL
         raise UsageError("send needs a target and a text, or --file")
     targets = resolve_targets(ctx, names, agents)
     repo = ctx.fleet.repo
-    answers = inbox.resolve(repo, reply_to).id if reply_to else None
+    answers = reply_reference(ctx, reply_to) if reply_to else None
     fyi = fyi or is_fyi(text)
     mode = "queue" if queue else "now" if now else "default"
     queued_by = queued_by_for(mode, fyi, bool(when_ready_ms))
@@ -739,16 +804,24 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
     note = inbox_note(ctx, sender, bool(as_name))  # design 23.1: mail before reports; it only reads
     if note:
         ctx.say(note)
+    ctx.say("sender: %s; selected fleet: %s" % (sender, selection_label(ctx)))
     for target in targets:
         stamp = inbox.now_utc()
-        message = Message(id=inbox.new_id(stamp, taken), sender=sender, to=target.name, time=inbox.iso_local(stamp),
+        message = Message(id="" if target.destination and not ctx.dry_run else inbox.new_id(stamp, taken), sender=sender, to=target.name, time=inbox.iso_local(stamp),
                           body=text, fyi=fyi, reply_to=answers,
                           ttl=inbox.iso_local(stamp + lifetime) if lifetime else None, file=text_file,
                           queued_by=queued_by, priority=1 if urgent else None)
-        lines, code = _send_one(ctx, target, message, mode, when_ready_ms,
-                                os.path.abspath(text_file) if text_file else None, observed)
+        log_file = os.path.abspath(text_file) if text_file else None
+        if target.destination:
+            lines, code = _send_routed(ctx, target, message, mode, when_ready_ms, log_file, observed, taken)
+        else:
+            lines, code = _send_one(ctx, target, message, mode, when_ready_ms, log_file, observed)
         for line in lines:
-            ctx.say(line)
+            owner = target.destination.path if target.destination else ctx.fleet.path
+            route = ("; %s -> %s; origin %s" % (target.requested, target.name, ctx.fleet.path)) if target.destination else ""
+            reason = "; source-owned: %s" % target.route_reason if target.route_reason else ""
+            fyi_pull = "; available to pull inbox immediately; native delivery remains deferred" if message.fyi and code == EXIT_OK and (ctx.dry_run or message.box == NEW) else ""
+            ctx.say(line + "; mailbox: %s :: %s%s%s%s" % (owner, target.name, route, reason, fyi_pull))
         codes.append(code)
     if agents:
         seen.observe_agents(ctx, agents, observed)
@@ -785,6 +858,67 @@ def inbox_note(ctx: Ctx, name: str, explicit: bool) -> Optional[str]:
 Lines = Tuple[List[str], int]
 
 
+def _send_routed(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_ms: Optional[int],
+                 log_file: Optional[str], observed: Dict[str, str], taken: Set[str]) -> Lines:
+    """Create one authoritative destination queue, then reuse ordinary send policy."""
+    import copy
+    from herdr_fleet.context import Ctx as Context
+    source = os.path.realpath(ctx.fleet.repo)
+    destination = os.path.realpath(target.destination.repo)
+    message.origin_fleet, message.destination_fleet, message.requested_to = source, destination, target.requested
+    owner = Context(ctx.herdr, ctx.env, ctx.clock, ctx.stdout, ctx.stderr, destination,
+                    file=target.destination.path, dry_run=ctx.dry_run)
+    owner._fleet = target.destination
+    if ctx.dry_run:
+        return _route(owner, target, message, mode, when_ready_ms, log_file, {})
+    created = False
+    try:
+        with crossfleet.reserved((source, destination)):
+            crossfleet.safe_mailbox(source, message.to)
+            crossfleet.safe_mailbox(destination, message.to)
+            with inbox.locked(destination, message.to):
+                # Revalidate after locks, before writing either inbox tree.
+                crossfleet.validated_fleet(source)
+                crossfleet.validated_fleet(destination)
+                taken.update(inbox.taken_shorts(source) | inbox.taken_shorts(destination))
+                message.id = inbox.new_id(inbox.now_utc(), taken)
+                message.route_bytes = inbox.size_of(inbox.direct_text(message))
+                message.origin_send_order = len(read(source))
+                message.destination_send_order = len(read(destination))
+                inbox.write(destination, message)
+                created = True  # authoritative success; no fallback/replacement after here
+                receipt = copy.copy(message)
+                receipt.history_only = True
+                inbox.write(source, receipt, CUR)
+                append(destination, crossfleet.queued_entry(message, destination))
+                append(source, crossfleet.queued_entry(message, source))
+    except (OSError, ValueError, UsageError) as exc:
+        if not created and message.id:
+            for box in (NEW, CUR):
+                path = os.path.join(inbox.box_dir(destination, message.to, box), message.id + ".md")
+                try:
+                    if not os.path.islink(path) and os.path.isfile(path):
+                        existing = inbox.load_headers(path, box)
+                        if not existing.history_only and crossfleet.receipt_matches(existing, message):
+                            created = True  # atomic replace succeeded even if its final stat/write result failed
+                            message.path, message.box = path, box
+                except (OSError, ValueError):
+                    pass
+        if created:
+            return ["queued at destination for %s #%s; source receipt/log error: %s; "
+                    "original destination message retained, no replacement" % (message.to, message.short, exc)], EXIT_FAIL
+        return ["failed %s: destination queue creation failed (%s); no source pending copy created"
+                % (target.requested, exc)], EXIT_FAIL
+    try:
+        result = _route(owner, target, message, mode, when_ready_ms, log_file, {})
+        if not os.path.exists(message.path):
+            message.box = CUR
+        return result
+    except (HerdrError, OSError) as exc:
+        return ["failed native delivery for %s: %s; original destination queue retained #%s"
+                % (message.to, exc, message.short)], EXIT_FAIL
+
+
 def _send_one(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_ms: Optional[int],
               log_file: Optional[str], observed: Dict[str, str]) -> Lines:
     """Write the file, then apply the row of design 18.3 for the target's state."""
@@ -807,6 +941,8 @@ def _send_one(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_
 def _log_send(ctx: Ctx, target: Target, message: Message, delivery: str, log_file: Optional[str]) -> None:
     """Log the ``send`` entry here and, for a live agent of another fleet, there too with
     the body in that fleet's ``inbox/<target>/cur/`` (design 20.8)."""
+    if message.origin_fleet:
+        return  # the sole queued send was recorded under its owning mailbox lock
     entry = send_entry(message, delivery, log_file)
     record(ctx, entry)
     if target.other:
@@ -856,10 +992,13 @@ def _route(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_ms:
     if ctx.dry_run:
         return [_would_send(ctx, target, message, state, mode)], EXIT_OK
     with inbox.locked(ctx.fleet.repo, target.name):
-        drop = prompt_mailbox(ctx, target.name, str(target.herdr), allow, "send", own=message, mirror=target.other)
+        drop = prompt_mailbox(ctx, target.name, str(target.herdr), allow, "send",
+                              own=None if message.origin_fleet else message, mirror=target.other)
     extra = len(drop.carried or drop.waiting) - 1
     queued_note = " with %d queued" % extra if extra > 0 else ""
     shown = drop.state or state
+    if drop.status == "empty" and message.origin_fleet:
+        return ["already consumed from destination mailbox for %s #%s" % (target.name, message.short)], EXIT_OK
     if drop.status == "sent":
         _log_send(ctx, target, message, "sent", log_file)
         urgent = "; " + URGENT_TYPED if message.urgent and shown == "working" else ""
@@ -953,6 +1092,13 @@ def _refused(ctx: Ctx, target: Target, message: Message, state: str, log_file: O
     """``--now`` to a seat that cannot take it: nothing sent, the file goes to ``cur/``."""
     if ctx.dry_run:
         return ["would refuse %s (%s): nothing sent" % (target.name, state_words(state))], EXIT_OK
+    if message.origin_fleet:
+        with inbox.locked(ctx.fleet.repo, message.to):
+            if not os.path.exists(message.path):
+                return ["already consumed from destination mailbox for %s #%s" % (message.to, message.short)], EXIT_OK
+            inbox.move(ctx.fleet.repo, message, CUR)
+            record(ctx, disposal_entry("dropped", message, "send --now refused"))
+        return ["refused %s (%s): nothing sent" % (target.name, state_words(state))], EXIT_FAIL
     try:
         inbox.move(ctx.fleet.repo, message, CUR)
     except OSError as exc:
@@ -1012,6 +1158,14 @@ def agent_state(ctx: Ctx, target: Optional[str]) -> str:
 
 
 # -- ack ------------------------------------------------------------------------------------------
+
+
+def log_ack(ctx: Ctx, entry: Dict) -> None:
+    append(ctx.fleet.repo, entry)
+    try:
+        crossfleet.terminal(ctx, entry)
+    except (OSError, ValueError, UsageError) as exc:
+        ctx.warn("cannot mirror acknowledgement receipt: %s" % exc)
 
 
 def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Optional[str] = None,
@@ -1085,8 +1239,8 @@ def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Opti
                 ctx.say("nothing owed for #%s" % inbox.short_of(value))
                 continue
             if not ctx.dry_run:
-                append(repo, ack_entry(debt["to"], debt["from"], ident=value,
-                                       by=caller if reason is not None else None, reason=reason))
+                log_ack(ctx, ack_entry(debt["to"], debt["from"], ident=value,
+                                      by=caller if reason is not None else None, reason=reason))
             whose = ", owed by %s" % debt["to"] if debt["to"] != caller else ""
             why = "; reason: %s" % reason if reason is not None else ""
             ctx.say("%s #%s from %s since %s (%s)%s%s" % (verb, inbox.short_of(value), debt["from"],
@@ -1098,6 +1252,12 @@ def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Opti
             continue
         if not ctx.dry_run:
             append(repo, ack_entry(caller, value))
+            for _, item in unsettled(entries):
+                if item.get("id") and item["to"] == caller and item["from"] == value:
+                    try:
+                        crossfleet.terminal(ctx, ack_entry(caller, value, ident=item["id"]))
+                    except (OSError, ValueError, UsageError) as exc:
+                        ctx.warn("cannot mirror acknowledgement receipt: %s" % exc)
         ctx.say("%s %s since %s (%s)" % (verb, value, since_label(debt["since"]), debt["first_line"]))
     return EXIT_OK
 
@@ -1130,7 +1290,7 @@ def _ack_older(ctx: Ctx, entries: Sequence[Dict], caller: str, items: Sequence[T
         label = "since %s, %s ago (%s)" % (since_label(item["since"]), inbox.age_label(age(item)), item["first_line"])
         if item.get("id"):
             if not ctx.dry_run:
-                append(ctx.fleet.repo, ack_entry(caller, item["from"], ident=item["id"]))
+                log_ack(ctx, ack_entry(caller, item["from"], ident=item["id"]))
             ctx.say("%s #%s from %s %s" % (verb, inbox.short_of(item["id"]), item["from"], label))
             continue
         sender = item["from"]

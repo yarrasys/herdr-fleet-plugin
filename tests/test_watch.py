@@ -356,7 +356,8 @@ class RealThreads(LiveFleet):
 class Status(LiveFleet):
     def test_watcher_line_and_json(self):
         data = json.loads(self.run_cli("status", "--json")[1])
-        self.assertEqual(data["watcher"], {"running": False, "pid": None, "since": None})
+        self.assertEqual(data["watcher"], {"running": False, "pid": None, "since": None,
+                                           "launch": {"version": None, "commit": None}, "comparison": "unknown"})
         self.assertNotIn("watcher:", self.run_cli("status")[1])  # nothing queued: no line
         put(self.repo, "sample-dev", "a")
         put(self.repo, "sample-dev", "b")

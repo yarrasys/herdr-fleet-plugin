@@ -687,38 +687,89 @@ def op_ui(ctx: Ctx, entrypoint: str) -> None:
 
 
 LAUNCHER_MARKER = "herdr-fleet launcher"
-LAUNCHER_TEMPLATE = """#!/bin/sh
-# herdr-fleet launcher, written by `herdr-fleet install-cli`. Runs the copy of herdr-fleet that herdr has
-# installed (plugin yarrasys.fleet), so fleet seats never run a half-edited development checkout.
-# HERDR_FLEET_BIN=<path to a bin/herdr-fleet> runs that copy instead. Falls back to FALLBACK when herdr
-# cannot be asked.
-FALLBACK=__FALLBACK__
-if [ -n "$HERDR_FLEET_BIN" ]; then exec python3 "$HERDR_FLEET_BIN" "$@"; fi
-ROOT=$(herdr plugin list --json 2>/dev/null | python3 -c '
-import json, os, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
+# The launcher must resolve its installation before importing any plugin code.
+# Keep the bootstrap self-contained so a registry failure cannot run this checkout.
+LAUNCHER_PROGRAM = r"""import json
+import os
+import subprocess
+import sys
+
+args = sys.argv[1:]
+# Only the inbox subcommand's actual option is a hook; message text is opaque.
+options = args[1:args.index('--')] if '--' in args else args[1:]
+hook = bool(args and args[0] == 'inbox' and any(
+    option == '--hook' or option.startswith('--hook=') for option in options))
+
+def fail(reason, code=1):
+    if hook:
+        sys.exit(0)
+    sys.stderr.write('herdr-fleet launcher: ' + reason + '\n')
+    sys.exit(code)
+
+override = os.environ.get('HERDR_FLEET_BIN')
+if override:
+    entry = os.path.abspath(os.path.expanduser(override))
+    provenance = 'explicit HERDR_FLEET_BIN override ' + entry
+else:
+    binary = os.environ.get('HERDR_BIN_PATH') or 'herdr'
+    try:
+        result = subprocess.run([binary, 'plugin', 'list', '--json'], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, universal_newlines=True,
+                                encoding='utf-8', errors='replace', stdin=subprocess.DEVNULL)
+    except (OSError, ValueError) as exc:
+        fail('cannot read installed plugin registry via %s: %s' % (binary, exc), 127)
+    if result.returncode:
+        fail('registry lookup via %s failed (exit %s): %s' %
+             (binary, result.returncode, result.stderr.strip() or 'no diagnostic'),
+             result.returncode if result.returncode > 0 else 128 - result.returncode)
+    try:
+        data = json.loads(result.stdout)
+        plugins = data['result']['plugins']
+        if not isinstance(plugins, list) or any(not isinstance(p, dict) for p in plugins):
+            raise ValueError('expected result.plugins array of records')
+    except (ValueError, TypeError, KeyError) as exc:
+        fail('malformed plugin registry output via %s: %s' % (binary, exc))
+    matches = [p for p in plugins if p.get('plugin_id') == 'yarrasys.fleet' and p.get('enabled') is True]
+    if not matches:
+        fail('registry has no enabled exact-id yarrasys.fleet installation; inspect herdr plugin list --json')
+    if len(matches) != 1:
+        fail('registry has multiple enabled exact-id yarrasys.fleet installations')
+    manifest = matches[0].get('manifest_path')
+    if (not isinstance(manifest, str) or not os.path.isabs(manifest)
+            or any(c in manifest for c in '\r\n\0') or not os.path.isfile(manifest)):
+        fail('enabled yarrasys.fleet registration has an invalid manifest_path')
+    entry = os.path.join(os.path.dirname(os.path.realpath(manifest)), 'bin', 'herdr-fleet')
+    provenance = 'enabled yarrasys.fleet installation ' + entry
+if not os.path.isfile(entry) or not os.access(entry, os.R_OK | os.X_OK):
+    fail('missing or inaccessible executable for ' + provenance)
+if hook:
+    if not os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(entry)), 'herdr_fleet', 'hooks.py')):
+        sys.exit(0)
+    # An old or damaged CLI must not leak errors into the host agent's hook stream.
+    try:
+        result = subprocess.run([sys.executable, entry] + args, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+    except (OSError, ValueError):
+        sys.exit(0)
+    if result.returncode == 0:
+        sys.stdout.buffer.write(result.stdout)
     sys.exit(0)
-for plugin in data.get("result", {}).get("plugins", []):
-    if "yarrasys.fleet" in json.dumps(plugin) and plugin.get("enabled", True):
-        manifest = plugin.get("manifest_path") or ""
-        if manifest:
-            print(os.path.dirname(manifest))
-            break
-' 2>/dev/null)
-# A hook call (`inbox --hook ...`) must never disturb the agent: when the installed copy predates
-# hooks (no herdr_fleet/hooks.py), exit silently instead of failing on the unknown option.
-case " $* " in *" --hook "*) if [ -n "$ROOT" ] && [ ! -f "$ROOT/herdr_fleet/hooks.py" ]; then exit 0; fi;; esac
-if [ -n "$ROOT" ] && [ -f "$ROOT/bin/herdr-fleet" ]; then exec python3 "$ROOT/bin/herdr-fleet" "$@"; fi
-exec python3 "$FALLBACK" "$@"
+try:
+    os.execv(sys.executable, [sys.executable, entry] + args)
+except (OSError, ValueError) as exc:
+    fail('cannot execute %s: %s' % (provenance, exc))
 """
 
 
 def launcher_text(fallback: str) -> str:
-    """The launcher ``install-cli`` writes: it runs the plugin copy herdr installed, or
-    ``$HERDR_FLEET_BIN``, or ``fallback`` (the bin/herdr-fleet that ran install-cli)."""
-    return LAUNCHER_TEMPLATE.replace("__FALLBACK__", shlex.quote(fallback))
+    """Generate the installed-copy launcher; the former fallback is never executed.
+
+    The argument remains for callers of the existing helper. Development selection
+    is explicit through HERDR_FLEET_BIN or install-cli --dev.
+    """
+    return ("#!/bin/sh\n# herdr-fleet launcher, written by `herdr-fleet install-cli`.\n"
+            "# Runs the enabled exact-id yarrasys.fleet registration; lookup failures stop here.\n"
+            "exec python3 -c " + shlex.quote(LAUNCHER_PROGRAM) + ' "$@"\n')
 
 
 def _is_launcher(path: str) -> bool:
@@ -754,8 +805,8 @@ def op_install_cli(root: str, directory: Optional[str], out: TextIO, path_env: s
             out.write("launcher already installed: %s\n" % target)
         else:
             _atomic(folder, target, lambda tmp: _write_launcher(tmp, text))
-            out.write("wrote launcher %s: runs the herdr-fleet that herdr installed (falls back to %s; "
-                      "HERDR_FLEET_BIN overrides)\n" % (target, source))
+            out.write("wrote launcher %s: runs the enabled yarrasys.fleet installation; registry failures "
+                      "stop with an error (HERDR_FLEET_BIN explicitly overrides)\n" % target)
     if folder not in path_env.split(os.pathsep):
         out.write("note: %s is not on PATH\n" % folder)
     return 0

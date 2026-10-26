@@ -31,9 +31,31 @@ from herdr_fleet.cli import main  # noqa: E402
 
 CALLER_WS = "w1"
 CALLER_PANE = "w1:p1"
+
+
+def send_outcomes(output: str) -> str:
+    """Policy fixtures compare the outcome column; section 31 tests the full identity envelope.
+
+    Explicitly used at assertions, never by run_cli or the safety call-log checks.
+    """
+    if not any(line.startswith("sender: ") for line in output.splitlines()):
+        return output
+    return "\n".join(line.split("; mailbox:", 1)[0] for line in output.splitlines()
+                     if not line.startswith("sender: ")) + ("\n" if output.endswith("\n") else "")
+
+
+def inbox_content(output: str) -> str:
+    """Separate a human inbox's identity heading from its existing rendered content."""
+    return output.split("\n", 1)[1] if output.startswith("inbox: ") else output
+
+
+def policy_output(output: str) -> str:
+    return inbox_content(send_outcomes(output))
+
+
 # Design 18.5: `inbox` asks herdr only who the caller is (and nothing at all with --as);
 # 18.7: `inbox --hook` only `agent get` on its own pane.
-INBOX_CALLS = (["pane", "current"], ["agent", "get"])
+INBOX_CALLS = (["pane", "current"], ["agent", "get"], ["pane", "get"], ["pane", "process-info"])
 HOOK_CALLS = (["agent", "get"],)
 # Design 18.6: the watcher runs agent wait/get/list/prompt and notification show, plus the
 # local `herdr --version` of the common preconditions; design 21.2: the presence guard's

@@ -37,7 +37,7 @@ from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
 from herdr_fleet.messages import (HOLD, OWNER, Drop, agent_state, caller_record, compose_prompt, delivered_entry,
                                   dry_hold, expire_due, first_line, notify_owner, place, prompt_mailbox, queued_in,
-                                  read, record, settle, since_label)
+                                  read, record, selection_label, settle, since_label)
 from herdr_fleet.seats import SEND_ALLOWED, SETTLED, state_words
 
 # -- deliver ---------------------------------------------------------------------------------
@@ -188,9 +188,10 @@ def _line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
 
 def lookup_caller(ctx: Ctx, as_name: Optional[str]) -> str:
     """``--as`` (no herdr command at all), else the agent in the caller's pane as ``send``
-    finds it (``pane current --current`` and ``agent get``), else ``owner``. The state
+    finds it (verified caller pane and ``agent get``); only a verified shell or outside
+    Herdr uses ``owner``. Failed caller lookup requires explicit ``--as``. The state
     that ``agent get`` answered is recorded for a seat (design 20.5)."""
-    if not as_name and ctx.inside_herdr() and ctx.invocation.pane_id:
+    if not as_name and ctx.inside_herdr() and ctx.env.get("HERDR_PANE_ID"):
         resolve_caller(ctx)
     name, record_ = caller_record(ctx, as_name)
     if record_.get("agent_status"):
@@ -231,15 +232,25 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
     if full and not (read_all or history is not None):
         raise UsageError("--full goes with --read or --history")
     limit = None if full else ctx.fleet.inbox_print_max
+    caller = lookup_caller(ctx, as_name)
+    identity = "inbox: %s; selected fleet: %s; %s" % (
+        caller, selection_label(ctx), getattr(ctx, "identity_reason", "explicit --as"))
+    if as_json or count:
+        ctx.warn(identity)
+    else:
+        ctx.say(identity)
     if redeliver:
         return _redeliver(ctx, redeliver, as_json)
-    caller = lookup_caller(ctx, as_name)
     if history is not None:
         return _history(ctx, caller, history, as_json, limit)
     deadline = None if timeout_ms is None else ctx.clock.monotonic() + timeout_ms / 1000.0
     while True:
         if wait and not _await_mail(ctx, caller, deadline):
-            ctx.say("nothing arrived in %s" % wait_label(timeout_ms or 0))
+            if as_json:
+                ctx.say("[]")
+                ctx.warn("nothing arrived for %s in %s" % (caller, wait_label(timeout_ms or 0)))
+            else:
+                ctx.say("nothing arrived in %s" % wait_label(timeout_ms or 0))
             return EXIT_PARTIAL
         messages = _take(ctx, caller, read_all)
         if messages or not wait:  # empty after the wait: the watcher took it first; wait on
@@ -308,11 +319,18 @@ def _as_dict(message: Message, body: bool = False) -> Dict:
         item["body"] = message.body
     if message.timer:
         item.update(timer=message.timer, scheduled_for=message.scheduled_for)
+    if message.origin_fleet:
+        item.update(origin_fleet=message.origin_fleet, destination_fleet=message.destination_fleet,
+                    requested_to=message.requested_to, history_only=message.history_only)
     return item
 
 
 def _redeliver(ctx: Ctx, ref: str, as_json: bool) -> int:
     message = inbox.resolve(ctx.fleet.repo, ref)
+    if message.history_only:
+        raise UsageError("#%s is a nonpending source receipt, not a delivered source queue; inspect its "
+                         "destination with --fleet %s rather than redelivering the history copy"
+                         % (message.short, os.path.join(message.destination_fleet or "PATH", ".herdr", "fleet.toml")))
     if message.box != CUR:
         raise UsageError("#%s is still queued for %s (in new/), so there is nothing to redeliver"
                          % (message.short, message.to))
@@ -349,7 +367,8 @@ def _history(ctx: Ctx, caller: str, other: str, as_json: bool, limit: Optional[i
     queued_ids = {m.id for mailbox in (caller, other) for m in inbox.read_box(repo, mailbox, NEW, warnings)}
     for warning in warnings:
         ctx.warn(warning)
-    files = [m for m in found if fate.get(m.id) not in ("expired", "dropped", "refused")]
+    files = [m for m in found if fate.get(m.id) not in ("expired", "dropped", "refused")
+             and (not m.history_only or fate.get(m.id) in ("sent", "unconfirmed", "delivered"))]
     filed = {m.id for m in found} | queued_ids
     pair = {(caller, other), (other, caller)}
     log_only = [e for e in entries if e.get("kind", "send") == "send" and (str(e["from"]), str(e["to"])) in pair

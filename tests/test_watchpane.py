@@ -205,7 +205,7 @@ class Skips(StripCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.argvs("plugin", "pane", "open"), [])
         self.assertNotIn("watch", self.read_state())
-        self.assertNotIn("watcher", out)
+        self.assertNotIn("watcher:", out)
 
     def test_watch_false_in_the_fleet_file(self):
         self.write_fleet(with_top(THREE_SEATS, "watch = false"))
@@ -429,7 +429,7 @@ class Down(StripCase):
         self.assertEqual(code, 0, out)
         code, out, _ = self.run_cli("restart", "sample-dev")
         self.assertEqual(code, 0, out)
-        self.assertNotIn("watcher", out)
+        self.assertNotIn("watcher:", out)
         self.assertEqual(len(self.argvs("plugin", "pane", "open")), 1)
         self.assertEqual(self.read_state()["watch"]["pane_id"], self.strip_pane)
 

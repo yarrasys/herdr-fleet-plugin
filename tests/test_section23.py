@@ -22,7 +22,7 @@ import unittest
 from unittest import mock
 
 import fake_herdr
-from support import CALLER_PANE, FakeClock, LiveFleet, THREE_SEATS
+from support import policy_output, CALLER_PANE, FakeClock, LiveFleet, THREE_SEATS
 from herdr_fleet import inbox, kickoff, seats
 from herdr_fleet.herdr import FORBIDDEN, SENDABLE_KEYS, Herdr, HerdrError
 from herdr_fleet.inbox import CUR, NEW
@@ -114,7 +114,7 @@ class NoteFirst(S23):
         message = put(self.repo, "caller", "for you")
         code, out, _ = self.run_cli("send", "sample-dev", "hi")
         self.assertEqual(code, 0, out)
-        lines = out.splitlines()
+        lines = policy_output(out).splitlines()
         self.assertEqual(lines[0], "note: 1 unread from sample-orchestrator (#%s, %s); read it before you go on: "
                                    "herdr-fleet inbox --read" % (message.short, inbox.time_label(message.time)))
         self.assertRegex(lines[1], r"^sent to sample-dev \(idle\), \d+ B$")
@@ -126,7 +126,7 @@ class NoteFirst(S23):
         put(self.repo, "caller", "b", sender="sample-orchestrator", when=now - datetime.timedelta(minutes=20))
         put(self.repo, "caller", "c", sender="sample-reviewer", when=now - datetime.timedelta(minutes=10))
         out = self.run_cli("send", "sample-dev", "hi")[1]
-        self.assertEqual(out.splitlines()[0], "note: 3 unread from sample-reviewer and sample-orchestrator (oldest "
+        self.assertEqual(policy_output(out).splitlines()[0], "note: 3 unread from sample-reviewer and sample-orchestrator (oldest "
                                               "#%s, %s); read them before you go on: herdr-fleet inbox --read"
                          % (first.short, inbox.time_label(first.time)))
         put(self.repo, "caller", "d", sender="owner")
@@ -137,13 +137,13 @@ class NoteFirst(S23):
         put(self.repo, "sample-dev", "for dev", sender="sample-reviewer")
         self.status_of("w2:p2", "working")  # nothing delivers it meanwhile
         out = self.run_cli("send", "--as", "sample-dev", "sample-orchestrator", "hi")[1]
-        self.assertRegex(out.splitlines()[0], r"^note: 1 unread from sample-reviewer \(%s, %s\); read it before you "
+        self.assertRegex(policy_output(out).splitlines()[0], r"^note: 1 unread from sample-reviewer \(%s, %s\); read it before you "
                                               r"go on: herdr-fleet inbox --as sample-dev --read$" % (SHORT, HHMM))
 
     def test_dry_runs_print_it_too_and_nothing_moves(self):
         put(self.repo, "caller", "for you")
         code, out, _ = self.run_cli("send", "--dry-run", "sample-dev", "hi")
-        lines = out.splitlines()
+        lines = policy_output(out).splitlines()
         self.assertTrue(lines[0].startswith("note: 1 unread from sample-orchestrator"), out)
         self.assertRegex(lines[1], r"^would send to sample-dev \(idle\), \d+ B$")
         self.assertEqual(len(box(self.repo, "caller", NEW)), 1)
@@ -157,18 +157,18 @@ class NoteFirst(S23):
     def test_a_plain_send_queued_to_a_working_seat_says_when_it_lands(self):
         self.status_of("w2:p2", "working")
         out = self.run_cli("send", "sample-dev", "when you are free")[1]
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(working\) %s, position 1 of 1; "
+        self.assertRegex(policy_output(out).strip(), r"^queued in herdr-fleet for sample-dev \(working\) %s, position 1 of 1; "
                                       r"lands at its next idle, or now with --now$" % SHORT)
         dry = self.run_cli("send", "--dry-run", "sample-dev", "x")[1]
-        self.assertEqual(dry.strip(), "would queue in herdr-fleet for sample-dev (working); lands at its next idle, "
+        self.assertEqual(policy_output(dry).strip(), "would queue in herdr-fleet for sample-dev (working); lands at its next idle, "
                                       "or now with --now")
         for flags in (["--fyi"], ["--queue"], ["--when-ready", "1000"]):
             with self.subTest(flags=flags):
-                line = self.run_cli("send", *(flags + ["sample-dev", "y"]))[1].strip()
+                line = policy_output(self.run_cli("send", *(flags + ["sample-dev", "y"]))[1]).strip()
                 self.assertTrue(line.startswith("queued in herdr-fleet for sample-dev (working"), line)
                 self.assertNotIn("lands at", line)
         self.status_of("w2:p2", "idle")
-        first = self.run_cli("send", "--queue", "sample-dev", "z")[1].splitlines()[0]
+        first = policy_output(self.run_cli("send", "--queue", "sample-dev", "z")[1]).splitlines()[0]
         self.assertRegex(first, r"^queued in herdr-fleet for sample-dev \(idle\) %s, position \d+ of \d+$" % SHORT)
 
 
@@ -180,7 +180,7 @@ class InboxWait(S23):
         message = put(self.repo, "caller", "Review parser change")
         code, out, _ = self.run_cli("inbox", "--wait", "--timeout", "600000")
         self.assertEqual(code, 0, out)
-        self.assertRegex(out, r"^\[from sample-orchestrator at %s %s\]\nReview parser change\n$" % (HHMM, SHORT))
+        self.assertRegex(policy_output(out), r"^\[from sample-orchestrator at %s %s\]\nReview parser change\n$" % (HHMM, SHORT))
         self.assertEqual(self.clock.slept, 0)
         self.assertEqual(box(self.repo, "caller", CUR), [message.id])
         self.assertEqual([(e["kind"], e["via"]) for e in log_entries(self.repo)], [("delivered", "inbox")])
@@ -197,10 +197,10 @@ class InboxWait(S23):
 
     def test_timeout(self):
         code, out, _ = self.run_cli("inbox", "--wait", "--timeout", "600000")
-        self.assertEqual((code, out), (3, "nothing arrived in 10m\n"))
+        self.assertEqual((code, policy_output(out)), (3, "nothing arrived in 10m\n"))
         self.assertEqual(self.clock.slept, 600.0)
         code, out, _ = self.run_cli("inbox", "--wait", "--timeout", "30000")
-        self.assertEqual((code, out), (3, "nothing arrived in 30 s\n"))
+        self.assertEqual((code, policy_output(out)), (3, "nothing arrived in 30 s\n"))
 
     def test_fyis_count(self):
         put(self.repo, "caller", "cleanup done", fyi=True)
@@ -211,7 +211,7 @@ class InboxWait(S23):
     def test_a_message_past_its_ttl_does_not_end_the_wait(self):
         put(self.repo, "caller", "stale", ttl=inbox.now_utc() - datetime.timedelta(minutes=1))
         code, out, _ = self.run_cli("inbox", "--wait", "--timeout", "5000")
-        self.assertEqual((code, out), (3, "nothing arrived in 5 s\n"))
+        self.assertEqual((code, policy_output(out)), (3, "nothing arrived in 5 s\n"))
         self.clock = ArrivalClock(2, lambda: put(self.repo, "caller", "fresh"))
         code, out, _ = self.run_cli("inbox", "--wait", "--timeout", "5000")
         self.assertEqual(code, 0)
@@ -285,7 +285,7 @@ class Sender(S23):
         self.assertEqual(log_entries(self.repo)[-1]["from"], WINNER)
         put(self.repo, WINNER, "for the contact")
         out = self.run_cli("inbox")[1]
-        self.assertRegex(out, r"^1\. %s  %s  sample-orchestrator  \[queued\]  for the contact$" % (SHORT, HHMM))
+        self.assertRegex(policy_output(out), r"^1\. %s  %s  sample-orchestrator  \[queued\]  for the contact$" % (SHORT, HHMM))
 
     def test_an_unnamed_agent_with_no_contact_is_a_usage_error(self):
         self.unnamed_caller()
@@ -304,7 +304,8 @@ class Sender(S23):
         self.assertIn("has no herdr name (it matches the contacts partner-workspace and winner-two); pass --as", err)
 
     def test_owner_only_from_a_shell_pane_or_outside_herdr(self):
-        self.world["panes"][CALLER_PANE]["agent"] = None  # the owner at a shell
+        self.world["panes"][CALLER_PANE]["procs"] = [dict(fake_herdr.SHELL)]
+        self.world["panes"][CALLER_PANE]["agent"] = None  # the owner at a verified shell
         self.run_cli("send", "sample-dev", "from the shell")
         self.assertRegex(self.prompts_to("sample-dev")[0], r"^\[from owner %s\] " % SHORT)
         put(self.repo, "owner", "for the owner")
@@ -356,7 +357,7 @@ class AckReason(S23):
         short = ident[-6:]
         code, out, _ = self.run_cli("ack", "#" + short, "--reason", "superseded")
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.strip(), r"^acked #%s from sample-orchestrator since %s \(please review the parser\), owed "
+        self.assertRegex(policy_output(out).strip(), r"^acked #%s from sample-orchestrator since %s \(please review the parser\), owed "
                                       r"by sample-dev; reason: superseded$" % (short, HHMM))
         entry = log_entries(self.repo)[-1]
         self.assertEqual({k: entry[k] for k in ("from", "to", "kind", "id", "by", "reason")},
@@ -382,7 +383,7 @@ class AckReason(S23):
         ident = self.debt()
         before = self.log_text()
         out = self.run_cli("ack", "--as", "sample-dev", "#" + ident[-6:], "--reason", "done", "--dry-run")[1]
-        self.assertRegex(out.strip(), r"^would ack #%s from sample-orchestrator since %s \(please review the parser\); "
+        self.assertRegex(policy_output(out).strip(), r"^would ack #%s from sample-orchestrator since %s \(please review the parser\); "
                                       r"reason: done$" % (ident[-6:], HHMM))
         self.assertEqual(self.log_text(), before)
         self.run_cli("ack", "--as", "sample-dev", "#" + ident[-6:], "--reason", "done")
@@ -426,9 +427,9 @@ class Wording(S23):
     def test_send_deliver_and_the_lifecycle_commands(self):
         self.status_of("w2:p2", "blocked")
         out = self.run_cli("send", "sample-dev", "a")[1]
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(%s\) %s, position 1 of 1$"
+        self.assertRegex(policy_output(out).strip(), r"^queued in herdr-fleet for sample-dev \(%s\) %s, position 1 of 1$"
                          % (self.BLOCKED, SHORT))
-        self.assertEqual(self.run_cli("send", "--now", "sample-dev", "b")[1].strip(),
+        self.assertEqual(policy_output(self.run_cli("send", "--now", "sample-dev", "b")[1]).strip(),
                          "refused sample-dev (%s): nothing sent" % self.BLOCKED)
         self.assertEqual(self.run_cli("deliver", "sample-dev")[1].strip(),
                          "sample-dev: %s, 1 left queued" % self.BLOCKED)
@@ -447,13 +448,13 @@ class Wording(S23):
     def test_when_ready(self):
         self.status_of("w2:p2", "blocked")
         out = self.run_cli("send", "--when-ready", "1000", "sample-dev", "a")[1]
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(blocked after --when-ready 1000 ms: a "
+        self.assertRegex(policy_output(out).strip(), r"^queued in herdr-fleet for sample-dev \(blocked after --when-ready 1000 ms: a "
                                       r"dialog is open\) %s, position 1 of 1$" % SHORT)
 
     def test_the_status_column_keeps_the_bare_state(self):
         self.status_of("w2:p2", "blocked")
         out = self.run_cli("status")[1]
-        (row,) = [l for l in out.splitlines() if l.startswith("sample-dev ")]
+        (row,) = [l for l in policy_output(out).splitlines() if l.startswith("sample-dev ")]
         self.assertIn(" blocked", row)
         self.assertNotIn("dialog", out)
 
@@ -665,7 +666,7 @@ kind = "agy"
     def test_codex_has_no_keys_until_configured(self):
         self.status_of("w2:p3", "working")
         code, out, _ = self.run_cli("interrupt", "sample-reviewer")
-        self.assertEqual((code, out.strip()), (3, 'no interrupt keys known for codex; set [interrupt] codex = '
+        self.assertEqual((code, policy_output(out).strip()), (3, 'no interrupt keys known for codex; set [interrupt] codex = '
                                                  '["ctrl+c"]'))
         self.assertEqual(self.keys(), [])
         self.write_fleet(self.read_fleet() + '\n[interrupt]\ncodex = ["ctrl+c"]\n')
@@ -712,7 +713,7 @@ kind = "agy"
         self.assertEqual(self.run_cli("interrupt", "sample-reviewer")[0], 3)
         self.assertEqual(self.keys(), [])
         out = self.run_cli("doctor")[1]
-        self.assertRegex(out, r"warn  plugin config: .*config\.toml: \[interrupt\]\.codex: 'ctrl\+z' not allowed")
+        self.assertRegex(policy_output(out), r"warn  plugin config: .*config\.toml: \[interrupt\]\.codex: 'ctrl\+z' not allowed")
 
     def test_every_other_state_is_refused(self):
         for state, line in (("idle", "nothing to interrupt: sample-dev is idle"),
@@ -730,10 +731,10 @@ kind = "agy"
         self.status_of("w2:p2", "working")
         self.world["behaviors"]["interrupt_results"] = {"sample-dev": ["working", "absent"]}
         code, out, _ = self.run_cli("interrupt", "sample-dev")
-        self.assertEqual((code, out), (3, "sample-dev still working after 10 s; nothing more sent\n"))
+        self.assertEqual((code, policy_output(out)), (3, "sample-dev still working after 10 s; nothing more sent\n"))
         self.assertEqual(log_entries(self.repo)[-1]["result"], "working")
         code, out, _ = self.run_cli("interrupt", "sample-dev", "--wait", "2500")
-        self.assertEqual((code, out), (3, "sample-dev is absent after the keys; nothing more sent\n"))
+        self.assertEqual((code, policy_output(out)), (3, "sample-dev is absent after the keys; nothing more sent\n"))
         self.assertEqual(self.argvs("agent", "wait")[0][-1], "10000")
         self.assertEqual(self.keys(), [["ctrl+c"], ["ctrl+c"]])
 
@@ -939,10 +940,10 @@ class TextInTheInput(S23):
     def test_send_queues_and_now_refuses(self):
         code, out, _ = self.run_cli("send", "sample-dev", "ping")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(idle, text in its input \(w2:p2\); "
+        self.assertRegex(policy_output(out).strip(), r"^queued in herdr-fleet for sample-dev \(idle, text in its input \(w2:p2\); "
                                       r"press Ctrl-U there to clear it\) %s, position 1 of 1$" % SHORT)
         code, out, _ = self.run_cli("send", "--now", "sample-dev", "now")
-        self.assertEqual((code, out.strip()), (1, "refused sample-dev (idle, %s): nothing sent" % IN_INPUT))
+        self.assertEqual((code, policy_output(out).strip()), (1, "refused sample-dev (idle, %s): nothing sent" % IN_INPUT))
         self.assertEqual(self.prompts_to("sample-dev"), [])
 
     def test_deliver_and_kickoff_hold(self):
@@ -1021,7 +1022,7 @@ class InterruptCleanup(S23):
         self.world["canned"] = [{"prefix": ["agent", "send-keys", "sample-dev", "ctrl+u"],
                                  "stdout": {"result": {"type": "ok"}}}]  # the key changes nothing
         code, out, _ = self.run_cli("interrupt", "sample-dev")
-        self.assertEqual((code, out), (3, "interrupted sample-dev (done); its input still holds text; press Ctrl-U "
+        self.assertEqual((code, policy_output(out)), (3, "interrupted sample-dev (done); its input still holds text; press Ctrl-U "
                                           "there before sending it anything\n"))
         self.assertEqual(self.keys(), [["ctrl+c"], ["ctrl+u"]])
         self.assertEqual(log_entries(self.repo)[-1]["keys"], ["ctrl+c", "ctrl+u"])

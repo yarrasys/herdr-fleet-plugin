@@ -527,7 +527,7 @@ class Sim:
     def _pane_record(self, pid: str) -> Dict:
         p = self.w["panes"][pid]
         title = p.get("title") or ""
-        rec = {"cwd": p["cwd"], "foreground_cwd": p["cwd"], "focused": bool(p.get("focused")), "pane_id": pid,
+        rec = {"cwd": p["cwd"], "foreground_cwd": p.get("foreground_cwd", p["cwd"]), "focused": bool(p.get("focused")), "pane_id": pid,
                "revision": 1, "scroll": {"max_offset_from_bottom": 0, "offset_from_bottom": 0,
                                          "viewport_rows": 40},
                "tab_id": p["tab_id"], "terminal_id": "term_" + pid,

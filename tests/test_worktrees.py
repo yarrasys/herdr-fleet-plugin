@@ -113,7 +113,7 @@ class Worktrees(GitCase):
     def test_status_hint_only_when_a_seat_declares_worktrees(self):
         self.fleet_ws()
         out = self.run_cli("status")[1]
-        self.assertEqual(out.splitlines()[-1], "worktrees: see herdr-fleet worktrees")
+        self.assertIn("worktrees: see herdr-fleet worktrees", out.splitlines())
         self.assertNotIn("wt-new", out)  # status lists no worktrees
         self.write_fleet(self.read_fleet().replace('worktrees = ["%s/wt-new*", "%s/wt-detached"]'
                                                    % (self.real, self.tmp), ""))

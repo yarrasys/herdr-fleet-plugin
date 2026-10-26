@@ -19,7 +19,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from herdr_fleet import (MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, hooks, inbox, messages,
                          permissions, presence)
-from herdr_fleet import labels, seen, watchpane
+from herdr_fleet import build_identity, labels, seen, watchpane
 from herdr_fleet.context import Ctx
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import Herdr, HerdrError, describe
@@ -158,6 +158,9 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
     }
     data["queued"], data["queued_oldest"] = queued_summary(fleet)
     data["watcher"] = watchpane.watcher_status(ctx)
+    data["cli"] = dict(build_identity.current())
+    data["watcher"]["comparison"] = (build_identity.compare(data["cli"], data["watcher"]["launch"])
+                                       if data["watcher"].get("running") else "unknown")
     if integrations:
         data["integrations"] = integration_rows(herdr, fleet.kinds())
     return data
@@ -285,6 +288,14 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
         lines.append("integration %s: %s%s" % (row["kind"], row["line"] or row["status"], mark))
     if worktrees_hint:
         lines.append("worktrees: see herdr-fleet worktrees")
+    if data.get("cli"):
+        lines.append("CLI build: " + build_identity.label(data["cli"]))
+        lines.append("watcher launch: %s; %s" % (build_identity.label(watcher.get("launch") or {}),
+                                                watcher.get("comparison", "unknown")))
+        if watcher.get("comparison") == "stale":
+            lines.append("watcher-only reload: stop only the watcher with Ctrl-C in its pane, then run "
+                         "herdr-fleet watch --fleet %s there; leave coding-agent panes/sessions running."
+                         % shlex.quote(str(data.get("fleet_file") or "PATH")))
     return "\n".join(lines)
 
 

@@ -14,7 +14,7 @@ import re
 import unittest
 
 import fake_herdr
-from support import CALLER_PANE, FleetCase, LiveFleet, typed_ahead_allowed
+from support import CALLER_PANE, FleetCase, LiveFleet, typed_ahead_allowed, policy_output
 from herdr_fleet import inbox, presence, watch
 from herdr_fleet.herdr import Herdr
 from herdr_fleet.inbox import CUR, NEW
@@ -189,7 +189,7 @@ class Doctor(FleetCase):
         fake_herdr.put_agent(self.world, "w2:p1", "gemini", "c")  # live kind differs from the file
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0, out)
-        lines = [l for l in out.splitlines() if "presence" in l]
+        lines = [l for l in policy_output(out).splitlines() if "presence" in l]
         self.assertEqual(lines, ["info  presence: no prompt glyph for kind pi; its seats are not held while the "
                                  "owner types",
                                  "info  presence: no prompt glyph for kind gemini; its seats are not held while "
@@ -222,7 +222,7 @@ class OwnerTyping(LiveFleet):
     def test_send_queues_on_refusal(self):
         code, out, _ = self.run_cli("send", "--as", "sample-orchestrator", "sample-dev", "ping")
         self.assertEqual(code, 0, out)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(idle, %s\) %s, position 1 of 1$"
+        self.assertRegex(policy_output(out).strip(), r"^queued in herdr-fleet for sample-dev \(idle, %s\) %s, position 1 of 1$"
                          % (TYPING, SHORT))
         self.assertEqual(self.prompts_to("sample-dev"), [])
         self.assertIn("queued_by: refusal", self.header("sample-dev"))
@@ -230,26 +230,26 @@ class OwnerTyping(LiveFleet):
         self.assertEqual((entry["kind"], entry["delivery"]), ("send", "queued"))
         self.clear()  # the owner submitted or deleted the line: the next delivery goes
         code, out, _ = self.run_cli("deliver")
-        self.assertRegex(out.strip(), r"^delivered 1 to sample-dev \(idle\), \d+ B$")
+        self.assertRegex(policy_output(out).strip(), r"^delivered 1 to sample-dev \(idle\), \d+ B$")
         self.assertIn("ping", self.prompts_to("sample-dev")[0])
 
     def test_send_now_is_refused(self):
         code, out, _ = self.run_cli("send", "--now", "sample-dev", "ping")
         self.assertEqual(code, 1)
-        self.assertEqual(out.strip(), "refused sample-dev (idle, %s): nothing sent" % TYPING)
+        self.assertEqual(policy_output(out).strip(), "refused sample-dev (idle, %s): nothing sent" % TYPING)
         (entry,) = log_entries(self.repo)
         self.assertEqual(entry["delivery"], "refused")
         self.assertEqual(box(self.repo, "sample-dev", CUR), [entry["id"]])
         self.assertEqual(box(self.repo, "sample-dev", NEW), [])
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("send", "--now", "sample-dev", "ping again")
-        self.assertEqual((code, out.strip()), (1, "refused sample-dev (working, %s): nothing sent" % TYPING))
+        self.assertEqual((code, policy_output(out).strip()), (1, "refused sample-dev (working, %s): nothing sent" % TYPING))
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
     def test_other_targets_of_the_same_send_still_go(self):
         code, out, _ = self.run_cli("send", "sample-dev", "sample-reviewer", "standup")
         self.assertEqual(code, 0)
-        lines = out.splitlines()
+        lines = policy_output(out).splitlines()
         self.assertTrue(lines[0].startswith("queued in herdr-fleet for sample-dev (idle, %s)" % TYPING), lines)
         self.assertRegex(lines[1], r"^sent to sample-reviewer \(idle\), \d+ B$")
 
@@ -259,7 +259,7 @@ class OwnerTyping(LiveFleet):
         for argv in (["deliver"], ["deliver", "sample-dev"], ["watch", "--once"]):
             with self.subTest(argv=argv):
                 code, out, _ = self.run_cli(*argv)
-                self.assertEqual((code, out.strip()), (0, "sample-dev: %s, 2 left queued" % TYPING))
+                self.assertEqual((code, policy_output(out).strip()), (0, "sample-dev: %s, 2 left queued" % TYPING))
         self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 2)
         self.assertEqual(self.argvs("agent", "prompt"), [])
         self.assertEqual(self.world["notifications"], [])
@@ -268,7 +268,7 @@ class OwnerTyping(LiveFleet):
         put(self.repo, "sample-dev", "one")
         self.status_of("w2:p2", "working")
         code, out, _ = self.run_cli("deliver", "sample-dev", "--now")
-        self.assertEqual((code, out.strip()), (0, "sample-dev: %s, 1 left queued" % TYPING))
+        self.assertEqual((code, policy_output(out).strip()), (0, "sample-dev: %s, 1 left queued" % TYPING))
         self.assertEqual(self.argvs("agent", "prompt"), [])
 
     def test_the_flush_before_send_is_held(self):
@@ -277,7 +277,7 @@ class OwnerTyping(LiveFleet):
         self.status_of("w2:p2", "idle")
         code, out, _ = self.run_cli("send", "--queue", "sample-dev", "second")
         self.assertEqual(code, 0)
-        lines = out.splitlines()
+        lines = policy_output(out).splitlines()
         self.assertRegex(lines[0], r"^queued in herdr-fleet for sample-dev \(idle\) %s, position 2 of 2$" % SHORT)
         self.assertEqual(lines[1], "sample-dev: %s, 1 left queued" % TYPING)
         self.assertEqual(self.argvs("agent", "prompt"), [])
@@ -315,13 +315,13 @@ class OwnerTyping(LiveFleet):
 
     def test_dry_runs_say_would_hold(self):
         code, out, _ = self.run_cli("send", "--dry-run", "sample-dev", "ping")
-        self.assertEqual((code, out.strip()), (0, "would queue in herdr-fleet for sample-dev (idle); would hold: %s"
+        self.assertEqual((code, policy_output(out).strip()), (0, "would queue in herdr-fleet for sample-dev (idle); would hold: %s"
                                                % TYPING))
         code, out, _ = self.run_cli("send", "--dry-run", "--now", "sample-dev", "ping")
-        self.assertEqual(out.strip(), "would refuse sample-dev (idle): nothing sent; would hold: %s" % TYPING)
+        self.assertEqual(policy_output(out).strip(), "would refuse sample-dev (idle): nothing sent; would hold: %s" % TYPING)
         put(self.repo, "sample-dev", "one")
         code, out, _ = self.run_cli("deliver", "--dry-run")
-        self.assertEqual(out.strip(), "sample-dev: would hold: %s, 1 left queued" % TYPING)
+        self.assertEqual(policy_output(out).strip(), "sample-dev: would hold: %s, 1 left queued" % TYPING)
         code, out, _ = self.run_cli("restart", "--dry-run", "sample-dev")
         self.assertIn("sample-dev: plan - would hold: %s (the quit is refused while the owner types there)" % TYPING,
                       out)
@@ -338,7 +338,7 @@ class OwnerTyping(LiveFleet):
     def test_a_seat_the_owner_only_looks_at_is_delivered_to(self):
         self.clear()
         code, out, _ = self.run_cli("send", "sample-dev", "ping")
-        self.assertRegex(out.strip(), r"^sent to sample-dev \(idle\), \d+ B$")
+        self.assertRegex(policy_output(out).strip(), r"^sent to sample-dev \(idle\), \d+ B$")
         (prompt,) = [c for c in self.calls() if c["argv"][:2] == ["agent", "prompt"]]
         self.assertFalse(prompt["info"]["owner_typing"])
         kinds = [c["argv"][:2] for c in self.calls()]
@@ -348,7 +348,7 @@ class OwnerTyping(LiveFleet):
         fake_herdr.focus(self.world, "w2:p1")  # the owner clicked into the orchestrator's pane
         code, out, _ = self.run_cli("send", "sample-dev", "ping")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(idle, %s\) %s, position 1 of 1$"
+        self.assertRegex(policy_output(out).strip(), r"^queued in herdr-fleet for sample-dev \(idle, %s\) %s, position 1 of 1$"
                          % (re.escape(IN_INPUT), SHORT))
         self.assertEqual(self.prompts_to("sample-dev"), [])
 
@@ -494,17 +494,17 @@ class WorkingSeats(LiveFleet):
                 prompted = len(self.prompts_to("sample-dev")) - before
                 if outcome == "sent":
                     self.assertEqual(prompted, 1)
-                    self.assertTrue(out.startswith("sent to sample-dev (%s)" % place("working")), out)
+                    self.assertTrue(policy_output(out).startswith("sent to sample-dev (%s)" % place("working")), out)
                 else:
                     self.assertEqual(prompted, 0)
-                    self.assertTrue(out.startswith("queued in herdr-fleet for sample-dev (working"), out)
+                    self.assertTrue(policy_output(out).startswith("queued in herdr-fleet for sample-dev (working"), out)
 
     def test_now_carries_the_queue_in_front_and_urgent_says_it_cannot_reorder(self):
         self.status_of("w2:p2", "working")
         self.run_cli("send", "sample-dev", "first")
         code, out, _ = self.run_cli("send", "--now", "--urgent", "sample-dev", "second")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^sent to sample-dev \(%s\) with 1 queued, \d+ B; %s$"
+        self.assertRegex(policy_output(out).strip(), r"^sent to sample-dev \(%s\) with 1 queued, \d+ B; %s$"
                          % (WORKING, re.escape(URGENT_TYPED)))
         (prompt,) = self.prompts_to("sample-dev")
         self.assertLess(prompt.index("second"), prompt.index("first"))  # urgent first, in the mailbox only
@@ -518,11 +518,11 @@ class WorkingSeats(LiveFleet):
             with self.subTest(argv=argv):
                 code, out, _ = self.run_cli("send", *argv)
                 self.assertEqual(code, 0)
-                self.assertEqual(len(out.strip().splitlines()), 1, out)
+                self.assertEqual(len(policy_output(out).strip().splitlines()), 1, out)
         self.assertEqual(self.argvs("agent", "prompt"), [])
         self.status_of("w2:p2", "done")
         code, out, _ = self.run_cli("send", "sample-dev", "now it is done")
-        self.assertRegex(out.strip(), r"^sent to sample-dev \(done\) with 4 queued, \d+ B$")
+        self.assertRegex(policy_output(out).strip(), r"^sent to sample-dev \(done\) with 4 queued, \d+ B$")
 
     def test_deliver_leaves_a_working_seats_refusal_mailbox_queued(self):
         self.status_of("w2:p2", "blocked")
@@ -533,7 +533,7 @@ class WorkingSeats(LiveFleet):
                 self.assertEqual(self.run_cli(*argv)[1].strip(), "sample-dev: working, 1 left queued")
         self.assertEqual(self.argvs("agent", "prompt"), [])
         code, out, _ = self.run_cli("deliver", "sample-dev", "--now")
-        self.assertRegex(out.strip(), r"^delivered 1 to sample-dev \(%s\), \d+ B$" % WORKING)
+        self.assertRegex(policy_output(out).strip(), r"^delivered 1 to sample-dev \(%s\), \d+ B$" % WORKING)
 
     def test_a_seat_that_turned_working_before_the_prompt_keeps_the_message(self):
         working = {"id": "cli:agent:get", "result": {"type": "agent_info", "agent": {
@@ -544,7 +544,7 @@ class WorkingSeats(LiveFleet):
                                 {"prefix": ["agent", "get", "sample-dev"], "stdout": working, "times": 1}]
         code, out, _ = self.run_cli("send", "sample-dev", "ping")
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r"^queued in herdr-fleet for sample-dev \(working\) %s, position 1 of 1; lands "
+        self.assertRegex(policy_output(out).strip(), r"^queued in herdr-fleet for sample-dev \(working\) %s, position 1 of 1; lands "
                                       r"at its next idle, or now with --now$" % SHORT)
         self.assertEqual(self.argvs("agent", "prompt"), [])
 

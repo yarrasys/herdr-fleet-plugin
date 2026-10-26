@@ -67,7 +67,7 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from herdr_fleet import board, inbox, presence, seen, timers, tui
+from herdr_fleet import board, build_identity, inbox, presence, seen, timers, tui
 from herdr_fleet.context import EXIT_OK, Ctx, OpError, UsageError
 from herdr_fleet.fleetfile import FleetError
 from herdr_fleet.herdr import HerdrError, describe
@@ -141,9 +141,10 @@ def watcher_status(repo: str) -> Dict:
     """``{"running", "pid", "since"}`` for ``status`` (a lock naming a dead pid is not running)."""
     data = read_lock(repo)
     pid = _pid(data)
+    launch = build_identity.validated((data or {}).get("launch"))
     if pid and pid_alive(pid):
-        return {"running": True, "pid": pid, "since": (data or {}).get("started")}
-    return {"running": False, "pid": None, "since": None}
+        return {"running": True, "pid": pid, "since": (data or {}).get("started"), "launch": launch}
+    return {"running": False, "pid": None, "since": None, "launch": launch}
 
 
 def watcher_line(status: Dict) -> str:
@@ -157,7 +158,8 @@ def watcher_line(status: Dict) -> str:
 def acquire(repo: str, fleet_path: str, pid: Optional[int] = None) -> Dict:
     """Write ``.herdr/watch.lock``, or raise OpError when a live watcher holds it. The file
     is created with a hard link, so of two watchers starting at once only one gets it."""
-    data = {"pid": pid or os.getpid(), "started": now_iso(), "fleet": fleet_path}
+    data = {"pid": pid or os.getpid(), "started": now_iso(), "fleet": fleet_path,
+            "launch": dict(build_identity.current())}
     folder = os.path.join(repo, ".herdr")
     os.makedirs(folder, exist_ok=True)
     ensure_gitignore(folder)

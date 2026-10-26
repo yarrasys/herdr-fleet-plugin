@@ -294,7 +294,7 @@ class UiAndMenu(LiveFleet):
 
 class InstallCli(FleetCase):
     """install-cli writes a launcher that runs the plugin copy herdr installed (0.6.0);
-    --dev links this checkout. The launcher itself calls herdr, so it is never run here."""
+    --dev links this checkout. Subprocess provenance cases use an isolated fake registry in test_section31."""
 
     fleet_text = None
 
@@ -315,11 +315,10 @@ class InstallCli(FleetCase):
         text = self.read_target()
         self.assertEqual(text, launcher_text(self.source))
         self.assertTrue(text.startswith("#!/bin/sh\n# herdr-fleet launcher, written by `herdr-fleet install-cli`."))
-        self.assertIn("\nFALLBACK=%s\n" % self.source, text)
-        self.assertIn('\nif [ -n "$HERDR_FLEET_BIN" ]; then exec python3 "$HERDR_FLEET_BIN" "$@"; fi\n', text)
-        self.assertIn("herdr plugin list --json", text)
-        self.assertIn('"yarrasys.fleet" in json.dumps(plugin)', text)
-        self.assertTrue(text.endswith('exec python3 "$FALLBACK" "$@"\n'))
+        self.assertNotIn(self.source, text)  # no captured checkout fallback
+        self.assertIn("HERDR_FLEET_BIN", text)
+        self.assertIn("HERDR_BIN_PATH", text)
+        self.assertIn("plugin_id", text)
         self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o755)
         self.assertIn("wrote launcher %s" % self.path, out)
         self.assertIn("plugin root:", out)

@@ -78,7 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-watch", action="store_true",
                    help="do not start the watcher strip (watch = false in the fleet file does the same)")
 
-    p = sub.add_parser("status", parents=[common], help="show every seat, its state and drift")
+    p = sub.add_parser("status", parents=[common], help="show every seat, its state and drift",
+                       description="Show seats, queues and CLI/watcher launch version/commit identity. "
+                                   "Known differences are stale; missing evidence is unknown. No automatic reload.")
     p.add_argument("--json", action="store_true", help="print one JSON object")
     p.add_argument("--hold", action="store_true", help="wait for Enter before exiting (overlay pane)")
     p.add_argument("--context", action="store_true",
@@ -114,13 +116,14 @@ def build_parser() -> argparse.ArgumentParser:
                                    "the seat's pane: it stays queued (--now: refused). FYIs normally stay queued; "
                                    "explicit delivery or a pending refusal request can deliver them immediately. "
                                    "owner gets a herdr notification. Here --file is the text; pick a fleet "
-                                   "file with --fleet PATH.")
+                                   "file with --fleet PATH. New cross-fleet sends use a uniquely named destination seat's "
+                                   "existing fleet mailbox; output names sender, selected fleet and holding mailbox.")
     p.add_argument("words", nargs="*", metavar="TARGET... [TEXT]",
                    help="seat, contact, owner or live agent names, then the text; with --file every item is a "
                         "target, and with --all a single item is the text. Options may go anywhere.")
     p.add_argument("--file", dest="message_file", metavar="PATH", help="read the text from this UTF-8 file")
     p.add_argument("--as", dest="as_name", metavar="NAME",
-                   help="sender name (default: your pane's agent, or the contact it matches; owner from a shell)")
+                   help="sender name (default: your pane's agent, or the contact it matches; owner outside Herdr or from a verified shell; lookup failures need --as NAME)")
     p.add_argument("--when-ready", dest="when_ready", metavar="MS", type=int,
                    help="wait up to MS ms for each target to be idle or done; queue if still not ready "
                         "(--now refuses)")
@@ -135,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="deliver now, typed ahead into a working seat's own input, or refuse (blocked, "
                            "unknown, absent, owner typing there: exit 1); never queue")
     p.add_argument("--reply-to", dest="reply_to", metavar="ID",
-                   help="the message this answers (#3f2a9c or a full id); settles exactly that one")
+                   help="the message in the selected fleet this answers (#3f2a9c or a full id); settles exactly that one")
     p.add_argument("--ttl", metavar="DURATION",
                    help="drop it undelivered if still queued after DURATION (30m, 2h, 1d)")
     p.add_argument("--urgent", action="store_true",
@@ -158,9 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("inbox", parents=[fleet], help="your own queued messages: list, read, wait, count, history",
                        description="Your mailbox (.herdr/inbox/<you>): by default list what is queued. Runs no "
-                                   "herdr command except finding who you are, and none with --as.")
+                                   "herdr command except finding who you are, and none with --as. Human output names the "
+                                   "selected identity/fleet; JSON/count diagnostics go to stderr. Failed caller "
+                                   "lookup inside Herdr needs explicit --as NAME.")
     p.add_argument("--as", dest="as_name", metavar="NAME",
-                   help="whose mailbox (default: your pane's agent, or the contact it matches; owner from a shell)")
+                   help="whose mailbox (default: your pane's agent, or the contact it matches; owner outside Herdr or from a verified shell; lookup failures need --as NAME)")
     action = p.add_mutually_exclusive_group()
     action.add_argument("--read", action="store_true", help="print every queued message in full and mark it read")
     action.add_argument("--count", action="store_true", help="print the number of queued messages only")
@@ -226,7 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason", metavar="TEXT",
                    help="with message ids only: close each one's debt whoever owes it (logged with you as `by`)")
     p.add_argument("--as", dest="as_name", metavar="NAME",
-                   help="who you are (default: your pane's agent, or the contact it matches; owner from a shell)")
+                   help="who you are (default: your pane's agent, or the contact it matches; owner outside Herdr or from a verified shell; lookup failures need --as NAME)")
     p.add_argument("--dry-run", action="store_true", help="list what would be acknowledged and write nothing")
 
     p = sub.add_parser("log", parents=[common], help="show the message log (.herdr/messages.jsonl)")
@@ -296,7 +301,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("install-cli", help="put a herdr-fleet launcher into DIR so agents can run it by name",
                        description="Write DIR/herdr-fleet, a launcher that runs the copy of herdr-fleet herdr "
-                                   "installed (HERDR_FLEET_BIN overrides; this checkout is the fallback). --dev "
+                                   "installed (enabled exact-id registration; registry errors stop, no fallback). "
+                                   "HERDR_FLEET_BIN explicitly overrides. --dev "
                                    "symlinks this checkout instead.")
     p.add_argument("--dir", metavar="DIR", help="target directory (default ~/.local/bin)")
     p.add_argument("--dev", action="store_true", help="symlink this checkout's bin/herdr-fleet instead (developers)")
