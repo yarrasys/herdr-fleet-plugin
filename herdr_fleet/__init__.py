@@ -12,9 +12,11 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
   ``tile``: re-tile live seats with pane moves; ``checks``: read-only drift,
   status, doctor.
 - ``seats``: the per-seat lifecycle against herdr (shell check, start with
-  retry, the only prompt path, the quit procedure with its one Enter on the
-  exit confirmation, the interrupt keys); ``presence``: the guard that sends
-  nothing while the owner is typing in a seat's pane.
+  retry and the timeout classification, the only prompt path, the quit procedure
+  with its one Enter on the exit confirmation, the interrupt keys); ``presence``:
+  the guard that sends nothing while the owner is typing in a seat's pane (it reads
+  the screen with escapes, so Claude Code's faint suggestion is no text);
+  ``handover``: ``restart|swap NAME --handover`` and the helper pane that does it.
 - ``herdr``: the only module that executes the herdr binary.
 - ``fleetfile`` / ``state``: the two files on disk; ``kickoff``: templates.
 - ``context``: per-invocation context and preconditions; ``menu``: the popups
@@ -41,7 +43,7 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 
 import os
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

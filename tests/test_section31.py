@@ -615,7 +615,7 @@ class BuildIdentity(unittest.TestCase):
             second = build_identity.current()
             self.assertEqual(first, second)
             self.assertIsNone(first["commit"])
-            self.assertEqual(first["version"], "0.16.0")
+            self.assertEqual(first["version"], "0.17.0")
             self.assertEqual(git.call_count, 1)
 
     def test_only_full_checkout_commit_is_retained_and_ancestor_git_is_not_invented(self):

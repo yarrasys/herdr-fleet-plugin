@@ -30,6 +30,33 @@ acts, writes it back and appends one JSON line to the call log (env
   after a successful wait the agent's status becomes the next one, as when it
   starts working during a debounce), ``argv_absent`` (agent processes carry
   ``cmdline`` but no ``argv``).
+- Lost and slow starts (design 32.1, herdr 0.9.5 with ``--timeout``): ``start_lost``
+  ({name: n}): the first n ``agent start`` calls for the name answer ``timeout``
+  (``timed out waiting for agent startup``) and leave the pane at its bare shell, as a
+  command garbled by mouse reports does; ``start_slow`` ({name: n}): ``agent start``
+  answers ``timeout`` with a process of the kind in the foreground, and the agent appears
+  (idle) on the n-th ``agent get`` of its pane or name; ``start_timeout`` ({name:
+  status}): the agent is registered in that state but the start answers ``timeout``.
+  ``process-info`` records whether the pane was then at a bare shell (``shell``), and an
+  ``agent start`` refused as busy records ``busy``.
+- Reading a working seat (32.3): with ``agent_not_idle`` (true, or a list of names) an
+  ``agent read`` without ``--source visible`` of a ``working`` agent answers
+  ``agent_not_idle`` as live herdr does for alternate-screen history; every ``agent read``
+  records its ``source``.
+- Menus for the guard (32.2): ``show_menu(world, pane, reads)`` puts a highlighted
+  numbered menu on the pane for the next ``reads`` ``pane read`` calls (``agent read``
+  shows it too while it lasts, without counting).
+- ``plugin pane open --placement tab --workspace W`` (32.5) opens the pane in a new tab of
+  W; the ``handover`` entrypoint's pane runs ``python3 <root>/bin/herdr-fleet handover``.
+- Faint suggestions (32.8): a scripted screen may carry escape sequences (``suggest``).
+  ``pane read`` and ``agent read`` print them only with ``--format ansi`` (or ``--ansi``),
+  and strip them otherwise, as herdr does. The fake's own judgement of a prompt line
+  (``owner_typing``, ``input_held``, ``input_text``) drops text drawn faint for Claude
+  only (its own table, ``FAINT``), so a suggestion is an empty line and typed text is not.
+- An older herdr (review of 32): ``no_ansi_format`` makes ``pane read`` and ``agent read``
+  with ``--format``/``--ansi`` answer exit 2 (a usage error), ``no_start_timeout`` the same
+  for ``agent start --timeout`` (logged ``usage``: nothing was started), and
+  ``pane_read_errors`` ({pane: code}) makes ``pane read`` of that pane fail.
 - ``agent get``/``agent list`` records carry ``agent_session`` only when a test set
   one with ``put_agent(..., session=...)`` (live herdr 0.9.5 shape, e.g.
   ``claude_session(uuid)``; ``None`` gives ``"agent_session": null``); by
@@ -298,6 +325,27 @@ def shows_exit_dialog(screen: str) -> bool:
     return any(line.strip().startswith("\u276f") and "Exit and stop tasks" in line for line in screen.splitlines())
 
 
+# Design 32.2: a menu a seat may show when it has just turned done (synthetic, in the shape of
+# a Codex rate-limit question): no empty prompt line, a highlighted numbered choice.
+MENU = "\n".join([
+    "• Done.",
+    "",
+    RULE,
+    "  Approaching rate limits",
+    "  Switch to gpt-6-astra-mini for lower credit usage?",
+    "",
+    "› 1. Switch to gpt-6-astra-mini",
+    "  2. Keep current model",
+    "  3. Keep current model (never show again)",
+    "",
+    "  Press enter to confirm or esc to go back"]) + "\n"
+
+
+def show_menu(world: Dict, pane: str, reads: int, screen: Optional[str] = None) -> None:
+    """The pane shows ``screen`` (default MENU) for the next ``reads`` ``pane read`` calls."""
+    world.setdefault("menus", {})[pane] = {"reads": int(reads), "screen": screen or MENU}
+
+
 def set_screen(world: Dict, pane: str, text: Optional[str]) -> None:
     """Script a screen verbatim (None: back to the default for the pane's agent)."""
     screens = world.setdefault("screens", {})
@@ -308,21 +356,71 @@ def set_screen(world: Dict, pane: str, text: Optional[str]) -> None:
 
 
 def screen_of(world: Dict, pane: str) -> str:
+    menu = (world.get("menus") or {}).get(pane)
+    if menu and menu["reads"] > 0:
+        return menu["screen"]
     screens = world.get("screens") or {}
     return screens[pane] if pane in screens else default_screen(world, pane)
 
 
+ANSI = re.compile(r"\x1b\[[0-9;:]*[A-Za-z]")  # the escapes the fake's scripted screens use
+FAINT = ("claude",)  # design 32.8, the fake's own table: Claude Code draws its suggestion faint
+
+
+def plain(text: str) -> str:
+    """``text`` without escape sequences, as ``pane read`` prints it without ``--format ansi``."""
+    return ANSI.sub("", text)
+
+
+def unfaint(line: str) -> str:
+    """The characters of ``line`` that are not faint: SGR 2 starts faint, 22, 0 or an empty
+    SGR end it; extended colours (38;2;r;g;b, 38;5;n) neither start nor end it."""
+    out, faint, last = [], False, 0
+    for match in ANSI.finditer(line):
+        if not faint:
+            out.append(line[last:match.start()])
+        last = match.end()
+        code = match.group(0)
+        if not code.endswith("m"):
+            continue
+        params, skip = code[2:-1].split(";"), 0
+        for index, param in enumerate(params):
+            if skip:
+                skip -= 1
+            elif param in ("38", "48", "58"):
+                skip = 4 if params[index + 1:index + 2] == ["2"] else 2
+            elif param in ("", "0", "22"):
+                faint = False
+            elif param == "2":
+                faint = True
+    if not faint:
+        out.append(line[last:])
+    return "".join(out)
+
+
 def prompt_of(kind: str, text: str) -> Optional[str]:
     """The text on the last prompt line of ``text`` for ``kind`` (this module's own glyph
-    table), or None when no line starts with the kind's glyph."""
+    table), or None when no line starts with the kind's glyph. Escapes are ignored, and for
+    a kind in FAINT so is every faint character (design 32.8)."""
     found = None
     for line in text.splitlines()[-12:]:
-        stripped = line.strip()
+        stripped = plain(line).strip()
         for glyph in GLYPHS.get(kind, ()):
             if stripped.startswith(glyph):
-                found = stripped[len(glyph):].strip()
+                body = plain(unfaint(line)).strip() if kind in FAINT else stripped
+                found = body[len(glyph):].strip() if body.startswith(glyph) else body
                 break
     return found
+
+
+def suggest(world: Dict, pane: str, suggestion: str, typed: str = "", kind: str = "claude") -> None:
+    """Design 32.8: the pane's prompt line shows ``typed`` and then ``suggestion`` drawn faint,
+    with the escapes live herdr 0.9.5 printed for a Claude Code seat (``❯``, a no-break space, SGR 0,
+    SGR 2, the suggestion, SGR 0)."""
+    glyph = GLYPHS.get(kind, (">",))[0]
+    line = glyph + "\xa0" + typed + "\x1b[0m\x1b[2m" + suggestion + "\x1b[0m"
+    world.setdefault("screens", {})[pane] = "\n".join(
+        ["\u23fa Done.", "", RULE, line, RULE, STATUS.get(kind, "  ready")]) + "\n"
 
 
 # A fresh Claude Code session suggests a prompt in its empty input line (`❯ Try "fix lint
@@ -380,7 +478,8 @@ def clear_prompt(world: Dict, pane: str) -> None:
 
 
 # Plugin panes carry their manifest title as their name (live herdr 0.9.5).
-PLUGIN_TITLES = {"watch": "Fleet watch", "status": "Fleet status", "manage": "Fleet", "go": "Fleet: go"}
+PLUGIN_TITLES = {"watch": "Fleet watch", "status": "Fleet status", "manage": "Fleet", "go": "Fleet: go",
+                 "handover": "Fleet handover"}
 
 
 def read_toml(path: Optional[str]) -> Dict:
@@ -620,7 +719,23 @@ class Sim:
         self.info["states"] = {str(a["name"]): a.get("agent_status") for a in agents if a.get("name")}  # design 24.5
         return _ok({"agents": agents, "type": "agent_list"}, "cli:agent:list")
 
+    def _pending(self, target: str) -> Optional[str]:
+        """The pane where a slow start (``start_slow``) is still coming up for ``target``."""
+        for pid, p in self.w["panes"].items():
+            pending = p.get("pending")
+            if pending and not p["agent"] and (pid == target or pending["agent"].get("name") == target):
+                return pid
+        return None
+
     def _agent_get(self, args: List[str]) -> Result:
+        slow = self._pending(args[0])
+        if slow is not None:  # start_slow: the agent appears on the n-th read
+            pending = self.w["panes"][slow]["pending"]
+            pending["reads"] -= 1
+            if pending["reads"] > 0:
+                return _err("agent_not_found", "no agent for %s" % args[0])
+            self.w["panes"][slow]["agent"] = pending["agent"]
+            del self.w["panes"][slow]["pending"]
         pid = self._resolve(args[0])
         if pid is None:
             return _err("agent_not_found", "no agent for %s" % args[0])
@@ -643,6 +758,9 @@ class Sim:
 
     def _agent_start(self, args: List[str]) -> Result:
         pos, opts, rest = _opts(args, ("--kind", "--pane", "--timeout"))
+        if "--timeout" in opts and self.b.get("no_start_timeout"):  # an older herdr: clap rejects the line
+            self.info["usage"] = True
+            return 2, "", "error: unexpected argument '--timeout' found\n"
         name, kind, pid = pos[0], opts["--kind"][0], opts["--pane"][0]
         if kind not in self.w["kinds"]:
             return 2, "", "error: invalid value '%s' for '--kind <KIND>'\n" % kind
@@ -654,12 +772,30 @@ class Sim:
             return _err("agent_pane_busy", "pane %s is not at an interactive shell prompt" % pid)
         if p["busy"] > 0:
             p["busy"] -= 1
+            self.info["busy"] = True
             return _err("agent_pane_busy", "pane %s is not at an interactive shell prompt" % pid)
         if self._resolve(name) is not None:
             return _err("agent_name_taken", "agent name %s is already in use" % name)
         error = self.b.get("start_errors", {}).get(name)
         if error:
             return _err(error["code"], error["message"])
+        lost = self.b.get("start_lost", {})
+        if lost.get(name, 0) > 0:  # design 32.1: the command never ran; the pane is at its shell
+            lost[name] -= 1
+            self.info["lost"] = True
+            return _err("timeout", "timed out waiting for agent startup")
+        slow = self.b.get("start_slow", {}).get(name)
+        if slow is not None:  # its process runs, but herdr sees the agent only later
+            p["procs"] = [agent_proc(kind, rest, p["cwd"], self.b.get("argv_absent", False))]
+            p["pending"] = {"agent": {"agent": kind, "agent_status": "idle", "name": name}, "reads": int(slow)}
+            del self.b["start_slow"][name]
+            return _err("timeout", "timed out waiting for agent startup")
+        late = self.b.get("start_timeout", {}).get(name)
+        if late is not None:  # registered in that state, but not ready before the timeout
+            p["agent"] = {"agent": kind, "agent_status": late, "name": name}
+            p["procs"] = [agent_proc(kind, rest, p["cwd"], self.b.get("argv_absent", False))]
+            del self.b["start_timeout"][name]
+            return _err("timeout", "timed out waiting for agent startup")
         transient = self.b.get("start_not_ready_transient", {}).get(name)
         blocked = name in self.b.get("start_not_ready", []) or transient is not None
         p["agent"] = {"agent": kind, "agent_status": "blocked" if blocked else "idle", "name": name}
@@ -737,17 +873,27 @@ class Sim:
         ``pane read`` (design 23.6, 23.7)."""
         pos, opts, _ = _opts(args, ("--lines", "--source", "--format"))
         target = pos[0] if pos else ""
+        if ("--format" in opts or "--ansi" in opts) and self.b.get("no_ansi_format"):
+            return 2, "", "error: unexpected argument '--format' found\n"
         pid = self._resolve(target)
         self.info["target"] = target
         if pid is None:
             return _err("agent_not_found", "no agent for %s" % target)
         count = int((opts.get("--lines") or ["0"])[0] or 0)
+        source = (opts.get("--source") or [None])[0]
         agent = self.w["panes"][pid]["agent"]
-        lines = screen_of(self.w, pid).splitlines()
-        shown = lines[-count:] if count > 0 else lines
-        line = prompt_of(agent["agent"], "\n".join(shown))
-        self.info.update(pane=pid, lines=count, name=agent.get("name"),
-                         input_text=line_holds_text(agent["agent"], line))  # design 23.11, for ctrl+u
+        self.info.update(pane=pid, lines=count, name=agent.get("name"), source=source)
+        refusing = self.b.get("agent_not_idle")
+        if (source != "visible" and agent["agent_status"] == "working"
+                and (refusing is True or (isinstance(refusing, list) and agent.get("name") in refusing))):
+            return _err("agent_not_idle", "cannot read %d lines while %s is working: its alternate-screen history "
+                        "can only be captured by scrolling while idle." % (count, agent.get("name") or pid))
+        raw = screen_of(self.w, pid).splitlines()
+        judged = raw[-count:] if count > 0 else raw
+        line = prompt_of(agent["agent"], "\n".join(judged))
+        self.info.update(input_text=line_holds_text(agent["agent"], line))  # design 23.11, for ctrl+u
+        ansi = "ansi" in (opts.get("--format") or []) or "--ansi" in opts
+        shown = judged if ansi else [plain(item) for item in judged]
         return 0, "\n".join(shown) + "\n", ""
 
     def _agent_send_keys(self, args: List[str]) -> Result:
@@ -776,6 +922,9 @@ class Sim:
                 if after == "absent":
                     set_screen(self.w, pid, None)
                     self._exit_agent(pid)
+                elif name in self.b.get("suggest_on_interrupt", {}):  # 32.8: a faint suggestion comes back
+                    agent["agent_status"] = after
+                    suggest(self.w, pid, self.b["suggest_on_interrupt"][name])
                 elif restore is True or (isinstance(restore, list) and name in restore):
                     agent["agent_status"] = after  # design 23.11: the interrupted prompt back in the line
                     prompts = self.w["panes"][pid]["prompts"]
@@ -903,9 +1052,19 @@ class Sim:
         """``pane read PANE --lines N``: plain text on stdout, never JSON (live 0.9.5)."""
         pos, opts, _ = _opts(args, ("--lines", "--source", "--format"))
         pid = pos[0] if pos else ""
+        if ("--format" in opts or "--ansi" in opts) and self.b.get("no_ansi_format"):
+            return 2, "", "error: unexpected argument '--format' found\n"
         if pid not in self.w["panes"]:
             return _err("pane_not_found", "pane %s not found" % pid)
-        lines = screen_of(self.w, pid).splitlines()
+        error = self.b.get("pane_read_errors", {}).get(pid)
+        if error:
+            return _err(error, "pane read %s for %s" % (error, pid))
+        raw = screen_of(self.w, pid)
+        lines = (raw if "ansi" in (opts.get("--format") or []) or "--ansi" in opts else plain(raw)).splitlines()
+        menu = (self.w.get("menus") or {}).get(pid)
+        if menu and menu["reads"] > 0:  # show_menu: one guard read used up
+            menu["reads"] -= 1
+            self.info["menu"] = True
         count = int((opts.get("--lines") or ["0"])[0] or 0)
         self.info["lines"] = count
         shown = lines[-count:] if count > 0 else lines
@@ -942,6 +1101,8 @@ class Sim:
             procs = procs + [{"name": "node", "argv0": "node", "cwd": p["cwd"], "pid": 901}]
         info = {"foreground_process_group_id": procs[0]["pid"] if procs else 0,
                 "foreground_processes": procs, "pane_id": pid, "shell_pid": 500}
+        self.info.update(pane=pid, shell=len(procs) == 1 and procs[0].get("name") in ("zsh", "bash", "fish", "sh", "nu")
+                         and not p["agent"])  # design 32.1: a bare shell, for the second-start check
         return _ok({"process_info": info, "type": "pane_process_info"}, "cli:pane:process_info")
 
     def _pane_split(self, args: List[str]) -> Result:
@@ -1079,16 +1240,21 @@ class Sim:
                 split = {"from": target, "direction": (opts.get("--direction") or ["right"])[0], "ratio": "0.5"}
         else:
             ws = (opts.get("--workspace") or [next(iter(self.w["workspaces"]), "w1")])[0]
+        if opts.get("--workspace") and ws not in self.w["workspaces"]:
+            return _err("workspace_not_found", "workspace %s not found" % ws)
         pid = "%s:p%d" % (ws, self._next())
         procs = None
-        if entrypoint == "watch":
-            argv = ["python3", "/plugins/yarrasys.fleet/bin/herdr-fleet", "watch"]
+        if entrypoint in ("watch", "handover"):
+            argv = ["python3", "/plugins/yarrasys.fleet/bin/herdr-fleet", entrypoint]
             procs = [{"name": "python3", "argv0": "python3", "argv": argv, "cmdline": " ".join(argv), "cwd": cwd,
                       "pid": 700}]
         add_pane(self.w, pid, ws, cwd, procs=procs, created=True)
         record = self.w["panes"][pid]
         if target is not None:
             record["tab_id"] = self.w["panes"][target]["tab_id"]
+        elif (opts.get("--placement") or [""])[0] == "tab":  # design 32.5: a new tab of the workspace
+            record["tab_id"] = "%s:t%d" % (ws, self._next())
+            self.info["placement"] = "tab"
         record.update(plugin=entrypoint, split=split, label=PLUGIN_TITLES.get(entrypoint, entrypoint),
                       env=dict(item.split("=", 1) for item in opts.get("--env", [])))
         focus = "--no-focus" not in opts

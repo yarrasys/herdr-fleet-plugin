@@ -4,7 +4,8 @@
   ``BOARD_REFRESH_S`` and after every watcher event, from exactly the sources of
   design 24.2: one ``agent list`` (seats' states, kinds and panes; contacts'
   states); ``pane get`` for a working seat, whose ``terminal_title_stripped`` is
-  what it is doing (a title equal to the seat's name or label is nothing); the
+  what it is doing (a title equal to the seat's name or label is nothing), unless its
+  ``waiting.json`` says it waits in ``inbox --wait`` (``waiting for mail 3m``, 32.4); the
   ``state_seen`` records (design 20.5, recorded here for what the list showed, as
   every command that reads states does) for each state's age; the mailboxes
   (count, oldest age, the next message's id, sender and first line; the owner's
@@ -338,7 +339,11 @@ def build(ctx, watcher_state: Optional[WatcherState] = None) -> Board:
             row.age = seen.age_of(record, state, now)
         elif agents is not None:
             row.age = max(0.0, (now - cache.since(seat.name, state, now)).total_seconds())
-        if agent is not None and state == "working":
+        wait = inbox.waiting(repo, seat.name, now) if agent is not None and state == "working" else None
+        if wait:  # design 32.4: it waits in `inbox --wait`; no title to read
+            age = inbox.age_since(wait.get("since"), now)
+            row.doing = "waiting for mail" + (" " + age if age else "")
+        elif agent is not None and state == "working":
             row.doing = _title(ctx, agent, seat)
         elif agent is not None and state == "blocked":
             row.dialog = _dialog(ctx, seat.name)

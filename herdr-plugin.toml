@@ -1,6 +1,6 @@
 id = "yarrasys.fleet"
 name = "Fleet"
-version = "0.16.0"
+version = "0.17.0"
 min_herdr_version = "0.9.4"
 description = "Start, restart and swap a team of named coding agents from a per-repository fleet file (.herdr/fleet.toml)."
 platforms = ["linux", "macos"]
@@ -81,3 +81,10 @@ command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/bin/herdr-fleet\" menu
 id = "watch"
 title = "Fleet watch"
 command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/bin/herdr-fleet\" watch"]
+
+# Opened by `restart NAME --handover` or `swap NAME --handover` with --placement tab (design 32.5): waits
+# for the seat's turn to end, restarts or swaps it, then closes itself.
+[[panes]]
+id = "handover"
+title = "Fleet handover"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/bin/herdr-fleet\" handover"]

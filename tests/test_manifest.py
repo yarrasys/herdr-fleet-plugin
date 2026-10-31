@@ -78,7 +78,11 @@ class ManifestContents(unittest.TestCase):
         for pane in panes.values():
             args = shlex.split(pane["command"][2])[3:]
             build_parser().parse_args(args)
-        self.assertEqual(set(panes), {a["command"][3] for a in self.manifest["actions"] if a["command"][2] == "ui"})
+        # design 32.5: the handover pane is opened by `restart|swap NAME --handover`, in a tab, never by an action
+        self.assertEqual(panes["handover"], {"id": "handover", "title": "Fleet handover",
+                                             "command": ["sh", "-c", PANE_PREFIX + "handover"]})
+        self.assertEqual(set(panes) - {"handover"},
+                         {a["command"][3] for a in self.manifest["actions"] if a["command"][2] == "ui"})
 
 
 class ManifestCommandsRun(unittest.TestCase):

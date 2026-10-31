@@ -25,7 +25,7 @@ class UpOnEmptyWorkspace(FleetCase):
         root = ws + ":p1"
         starts = self.argvs("agent", "start")
         self.assertEqual(starts[0], ["agent", "start", "sample-orchestrator", "--kind", "claude", "--pane", root,
-                                     "--", "--model", "claude-opus-5-5"])
+                                     "--timeout", "15000", "--", "--model", "claude-opus-5-5"])
         self.assertEqual([s[2] for s in starts], ["sample-orchestrator", "sample-dev", "sample-reviewer"])
         self.assertEqual(starts[2][3:5], ["--kind", "codex"])
         self.assertEqual(starts[2][-3:], ["--", "-m", "gpt-6-astra"])
@@ -199,8 +199,8 @@ class UpInExistingWorkspace(FleetCase):
                           "agents": {"sample-dev": {"pane_id": "w2:p7", "created_pane": True}}})
         code, out, _ = self.run_cli("up")
         self.assertEqual(code, 0, out)
-        self.assertIn(["agent", "start", "sample-dev", "--kind", "claude", "--pane", "w2:p7", "--",
-                       "--model", "claude-opus-5-5"], self.argvs("agent", "start"))
+        self.assertIn(["agent", "start", "sample-dev", "--kind", "claude", "--pane", "w2:p7", "--timeout", "15000",
+                       "--", "--model", "claude-opus-5-5"], self.argvs("agent", "start"))
         self.assertEqual(len(self.argvs("pane", "split")), 2)
 
     def test_adopts_an_unnamed_resumed_agent(self):
@@ -294,7 +294,8 @@ class UpStartupProblems(FleetCase):
         self.assertTrue(entry["pane_id"])
         sounds = [n["sound"] for n in self.world["notifications"] if "sample-dev" in n["title"]]
         self.assertEqual(sounds, ["request"])
-        self.assertIn("herdr-fleet kickoff sample-dev", out)
+        # design 32.6 as the designer's live smoke amended it: the queued kickoff, not `kickoff NAME`
+        self.assertRegex(out, r"answer the prompt there; its kickoff is queued \(#[0-9a-f]{6}\) and goes when it is idle")
         # a later up leaves the blocked seat alone and says it was never briefed
         code, out, _ = self.run_cli("up")
         self.assertEqual(code, 3)
@@ -329,7 +330,7 @@ class UpStartupProblems(FleetCase):
 
     def test_agent_not_ready_then_working_counts_as_started(self):
         # past startup but already busy: started, and the kickoff follows the normal
-        # safe_prompt rules (a working agent is not briefed, nothing is sent)
+        # safe_prompt rules (a working agent is not briefed, nothing is sent); since 32.6 it waits queued
         working = {"id": "cli:agent:get", "result": {"type": "agent_info", "agent": {
             "agent": "claude", "agent_status": "working", "name": "sample-dev", "pane_id": "w2:p101"}}}
         self.world["behaviors"]["start_not_ready"] = ["sample-dev"]
@@ -341,7 +342,8 @@ class UpStartupProblems(FleetCase):
         entry = self.read_state()["agents"]["sample-dev"]
         self.assertEqual(entry["pane_id"], "w2:p101")  # the pane the canned answers name
         self.assertIn("sample-dev: started - in w2:p101", out)
-        self.assertIn("agent sample-dev is working; nothing sent", out)
+        self.assertRegex(out, r"sample-dev: kickoff queued #[0-9a-f]{6}: delivered when sample-dev is next idle "
+                         r"or done")
         self.assertFalse(entry["blocked_at_startup"])
         self.assertEqual(self.prompts_to("sample-dev"), [])
         self.assertEqual(self.world["notifications"], [])

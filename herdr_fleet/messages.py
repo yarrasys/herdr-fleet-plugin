@@ -64,7 +64,7 @@ from herdr_fleet.inbox import CUR, NEW, Message, size_label
 from herdr_fleet.kickoff import INBOX_HEADING
 from herdr_fleet.notify import notify
 from herdr_fleet.seats import SEND_ALLOWED, SETTLED, at_shell_prompt, safe_prompt, state_words
-from herdr_fleet.state import ensure_gitignore, now_iso
+from herdr_fleet.state import ensure_gitignore, mark_kicked_off, now_iso
 
 LOG_NAME = "messages.jsonl"
 FIRST_LINE_MAX = 120
@@ -232,10 +232,14 @@ def read(repo: str, warnings: Optional[List[str]] = None) -> List[Dict]:
     return entries
 
 
-def log_kickoff(repo: str, to: str, text: str) -> Optional[str]:
-    """Record a kickoff; returns a warning instead of failing the kickoff."""
+def log_kickoff(repo: str, to: str, text: str, reason: Optional[str] = None) -> Optional[str]:
+    """Record a kickoff (with its ``reason``: up, restart, swap, kickoff); returns a warning
+    instead of failing the kickoff."""
+    entry = make_entry(PLUGIN_SENDER, to, "kickoff", text)
+    if reason:
+        entry["reason"] = reason
     try:
-        append(repo, make_entry(PLUGIN_SENDER, to, "kickoff", text))
+        append(repo, entry)
     except OSError as exc:
         return "cannot append to %s: %s" % (log_path(repo), exc)
     return None
@@ -464,7 +468,7 @@ def inbox_block(ctx: Ctx, name: str) -> Tuple[str, List[Message], List[Message]]
     heading and the pointer instead: nothing is carried and everything stays queued.
     Returns (block, carried, left queued). The caller holds ``inbox.locked``."""
     expire_due(ctx, name)
-    waiting = queued_in(ctx, name)
+    waiting = [m for m in queued_in(ctx, name) if not m.is_kickoff]  # 32.6: a queued kickoff is replaced
     if not waiting:
         return "", [], []
     block = INBOX_HEADING + "\n" + inbox.render_batch(waiting)
@@ -477,8 +481,21 @@ def inbox_block(ctx: Ctx, name: str) -> Tuple[str, List[Message], List[Message]]
 def compose_prompt(queued: Sequence[Message], own: Optional[Message] = None) -> Tuple[str, int, bool]:
     """(prompt, size, pointer). A message alone is ``[from X #id] body``; with anything
     queued, the batch of 18.4 in delivery order (urgent first, then oldest first, so
-    ``own`` is last unless it is urgent). Above BATCH_CAP the prompt is the pointer."""
+    ``own`` is last unless it is urgent). Above BATCH_CAP the prompt is the pointer.
+    Design 32.6: a queued kickoff goes first and verbatim, the rest after it as usual;
+    above BATCH_CAP the kickoff still goes, and the pointer stands for the rest."""
     items = inbox.in_delivery_order(list(queued) + ([own] if own is not None else []))
+    if items and items[0].is_kickoff:
+        head, rest = items[0], items[1:]
+        if not rest:
+            return head.body, inbox.size_of(head.body), False
+        others = [m for m in queued if not m.is_kickoff]
+        tail = inbox.direct_text(own) if own is not None and not others else inbox.render_batch(rest)
+        text = head.body.rstrip("\n") + "\n\n" + tail
+        size = inbox.size_of(text)
+        if size > inbox.BATCH_CAP:
+            return head.body.rstrip("\n") + "\n\n" + inbox.pointer_text(rest, inbox.size_of(tail)), size, True
+        return text, size, False
     text = inbox.direct_text(own) if own is not None and not queued else inbox.render_batch(items)
     size = inbox.size_of(text)
     if size > inbox.BATCH_CAP:
@@ -496,6 +513,8 @@ def settle(ctx: Ctx, messages: Sequence[Message], via: str, delivery: str,
             inbox.move(ctx.fleet.repo, message, CUR)
         except OSError as exc:
             ctx.warn("delivered, but cannot move %s to cur/: %s" % (message.path, exc))
+        if message.is_kickoff and delivery == "sent":  # first in the batch, so its entry precedes the rest's
+            kickoff_delivered(ctx, message)
         if own is None or message.id != own.id:
             entry = delivered_entry(message, via, delivery)
             record(ctx, entry)
@@ -509,9 +528,13 @@ def prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: 
     """Deliver a mailbox in one prompt (design 18.4). The caller holds ``inbox.locked``.
     ``target`` is what ``agent prompt`` gets (a name or a pane id); ``allow`` the states
     ``safe_prompt`` accepts; ``own`` the message ``send`` just queued; ``exclude`` ids
-    that stay queued (a ``--queue`` message while older refusal messages go)."""
+    that stay queued (a ``--queue`` message while older refusal messages go). A queued
+    kickoff (32.6) goes first, and only where ``allow`` is idle or done: ``send --now`` and
+    ``deliver NAME --now`` leave it queued."""
     expire_due(ctx, name)
-    queued = [m for m in queued_in(ctx, name) if (own is None or m.id != own.id) and m.id not in exclude]
+    typed_ahead = "working" in allow
+    queued = [m for m in queued_in(ctx, name) if (own is None or m.id != own.id) and m.id not in exclude
+              and not (typed_ahead and m.is_kickoff)]
     items = inbox.in_delivery_order(queued + ([own] if own is not None else []))
     if not items:
         return Drop("empty")
@@ -521,7 +544,10 @@ def prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: 
     if outcome.status == "typing":  # design 21.2: the owner is typing there; nothing sent
         return Drop("typing", outcome.detail, state, [], items, size, outcome.agent)
     if pointer and (outcome.ok or outcome.status == "unconfirmed"):
-        return Drop("pointer", outcome.detail, state, [], items, size)
+        head = items[:1] if items[0].is_kickoff else []  # 32.6: the kickoff went; the pointer is for the rest
+        if head:
+            settle(ctx, head, via, "sent" if outcome.ok else "unconfirmed", None, mirror)
+        return Drop("pointer", outcome.detail, state, head, items[len(head):], size)
     if outcome.ok or outcome.status == "unconfirmed":
         delivery = "sent" if outcome.ok else "unconfirmed"
         settle(ctx, items, via, delivery, own, mirror)
@@ -529,6 +555,56 @@ def prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: 
     if outcome.status == "error":
         return Drop("failed", outcome.detail, state, [], items, size)
     return Drop("refused", outcome.detail, outcome.status, [], items, size)  # herdr sent nothing
+
+
+def kickoff_delivered(ctx: Ctx, message: Message) -> None:
+    """Design 32.6: a queued kickoff reached its seat, so do what a sent kickoff does: its
+    seat's ``last_kickoff_at`` and ``blocked_at_startup = false`` (only those fields, read
+    fresh under the state lock, so a long-running watcher never writes back a stale state
+    file) and a ``kickoff`` log entry with its original reason, which settles the debts of
+    20.8. The caller logs the batch's ``delivered`` entries after it."""
+    when = now_iso()
+    try:
+        mark_kicked_off(ctx.fleet.repo, message.to, when)
+    except OSError as exc:
+        ctx.warn("cannot record the kickoff of %s in the state file: %s" % (message.to, exc))
+    loaded = getattr(ctx, "_state", None)
+    entry = loaded.entry(message.to) if loaded is not None else None
+    if entry is not None:  # keep a state this command may still save consistent with the file
+        entry.update(last_kickoff_at=when, blocked_at_startup=False)
+    problem = log_kickoff(ctx.fleet.repo, message.to, message.body, message.kickoff_reason)
+    if problem:
+        ctx.warn(problem)
+
+
+def drop_kickoffs(ctx: Ctx, name: str) -> List[Message]:
+    """Move the seat's queued kickoffs to ``cur/``, each logged ``dropped`` via ``kickoff``: a
+    newer kickoff replaces them (32.6). The caller holds ``inbox.locked``."""
+    dropped = []
+    for message in queued_in(ctx, name):
+        if message.is_kickoff:
+            inbox.move(ctx.fleet.repo, message, CUR)
+            record(ctx, disposal_entry("dropped", message, "kickoff"))
+            dropped.append(message)
+    return dropped
+
+
+def queue_kickoff(ctx: Ctx, name: str, text: str, reason: str) -> Message:
+    """Design 32.6: write a kickoff that could not be sent into the seat's mailbox, from
+    ``herdr-fleet`` with ``queued_by: kickoff`` (delivered ahead of everything queued),
+    replacing any older one. One per seat; no ttl. The caller holds ``inbox.locked``."""
+    drop_kickoffs(ctx, name)
+    now = inbox.now_utc()
+    message = Message(id=inbox.new_id(now, inbox.taken_shorts(ctx.fleet.repo)), sender=PLUGIN_SENDER, to=name,
+                      time=inbox.iso_local(now), body=text, queued_by="kickoff", kickoff_reason=reason)
+    return inbox.write(ctx.fleet.repo, message)
+
+
+def queued_kickoff(repo: str, name: str) -> Optional[Message]:
+    """The seat's queued kickoff, or None (read-only; for ``status``)."""
+    if not inbox.has_queued(repo, name):
+        return None
+    return next((m for m in inbox.read_box(repo, name, NEW) if m.is_kickoff), None)
 
 
 def has_refusal(messages: Sequence[Message], exclude: Sequence[str] = ()) -> bool:

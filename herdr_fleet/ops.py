@@ -1,6 +1,7 @@
 """Operations that change the fleet: up (design 4.1, with the watcher strip of
 section 19 and the top band of section 26), restart (4.3), swap (4.4), kickoff (4.5) and down (4.6), plus
-``go`` (22.2), ``peek`` (23.6), ``interrupt`` (23.7), ``ui`` and ``install-cli``.
+``go`` (22.2), ``peek`` (23.6, with 32.3's visible fallback), ``interrupt`` (23.7), ``ui`` and ``install-cli``.
+``restart|swap NAME --handover`` (32.5) lives in ``handover``.
 Each of up, restart, swap and kickoff ends by naming the seats' panes
 (``labels.apply``, design 22.1); ``down`` clears the name of a seat pane it
 leaves open at a shell prompt.
@@ -129,11 +130,13 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
     else:
         place = place_grid if fleet.mode == "grid" else place_chain
         placed = place(ctx, needs, target, live, report, on_area=on_area)
-    started = [s for s in order if start_claimed(ctx, s, claims[s.name], placed, report)]
-    if started and no_kickoff:
+    results = {s.name: start_claimed(ctx, s, claims[s.name], placed, report) for s in order}
+    started = [s for s in order if results[s.name] == "started"]
+    blocked = [s for s in order if results[s.name] == "blocked"]
+    if (started or blocked) and no_kickoff:
         ctx.say("kickoffs skipped (--no-kickoff)")
-    elif started:
-        send_kickoffs(ctx, started, "up", note, target.label, report)
+    elif started or blocked:
+        send_kickoffs(ctx, started, "up", note, target.label, report, blocked=blocked, queue=True)
     if strip is not None:
         up = bool(started) or any(s.name in live for s in fleet.seats) \
             or any(c.state in ("live", "adopted") for c in claims.values())
@@ -312,19 +315,31 @@ def _quit_live(ctx: Ctx, seat: Seat, agent: Dict, report: Report, then: str = ""
                    % (seat.name, live_kind, agent.get("agent_status"), pane, seat.name,
                       shlex.quote(command), then))
         return pane
-    outcome = quit_agent(ctx.herdr, ctx.clock, seat.name, pane, command, ctx.quit_timeout_ms(),
-                         answer_exit=ctx.keys_allowed)  # design 23.7: never from a popup
+    # The seat's mailbox lock is held from the quit command until the agent is gone (or the quit
+    # failed), so no watcher, deliver, hook or pull delivery lands on an exiting agent and is
+    # logged delivered; its messages wait for the kickoff, which takes the lock again (design 32.5,
+    # review N1). No timer lock is taken while it is held.
+    with inbox.locked(ctx.fleet.repo, seat.name):
+        outcome = quit_agent(ctx.herdr, ctx.clock, seat.name, pane, command, ctx.quit_timeout_ms(),
+                             answer_exit=ctx.keys_allowed)  # design 23.7: never from a popup
     if not outcome.ok:
         report.add(seat.name, outcome.status, outcome.detail, "partial" if outcome.status == "refused" else "fail")
+        if outcome.needs_owner:  # design 32.2: a dialog or menu only a person can answer
+            ctx.notify("Fleet: %s needs you" % seat.name, outcome.detail, "request")
         return None
     report.add(seat.name, "quit", outcome.detail)
     return pane
 
 
+OWN_SEAT = ("it is the caller's own agent; restart it from another pane, or add --handover to be replaced when "
+            "this turn ends")  # design 32.5
+
+
 def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_ms: Optional[int] = None,
                reason: str = "restart", drop_inbox: bool = False, name_panes: bool = True) -> Report:
     """Design 4.3. ``name_panes=False`` leaves the pane names to the caller (``swap``
-    names them once, at its end)."""
+    names them once, at its end). A seat blocked at startup gets its kickoff queued, and
+    so does one whose kickoff is refused (32.6)."""
     report = Report(reason)
     seats = select_seats(ctx.fleet, names, required=True)
     refuse_unknown_kinds(ctx)
@@ -334,16 +349,17 @@ def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_
     live = live_by_name(ctx.herdr)
     target: Optional[Target] = None
     to_brief: List[Seat] = []
+    to_queue: List[Seat] = []
     for seat in seats:
         agent = live.get(seat.name)
         if agent is None:
             if target is None:
                 target = resolve_target(ctx, report, seat)
-            if ensure_seat(ctx, seat, target, live, report):
-                to_brief.append(seat)
+            result = ensure_seat(ctx, seat, target, live, report)
+            (to_brief if result == "started" else to_queue if result == "blocked" else []).append(seat)
             continue
         if agent.get("pane_id") == ctx.invocation.pane_id:
-            report.add(seat.name, "refused", "it is the caller's own agent; restart it from another pane", "partial")
+            report.add(seat.name, "refused", OWN_SEAT, "partial")
             continue
         agent = settle(ctx, seat, agent, wait_ms, report)
         if agent is None:
@@ -358,10 +374,10 @@ def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_
             continue
         entry = ctx.state.entry(seat.name) or {}
         created = bool(entry.get("created_pane")) and entry.get("pane_id") == pane
-        if start_seat(ctx, seat, pane, created, report):
-            to_brief.append(seat)
-    if to_brief:
-        send_kickoffs(ctx, to_brief, reason, note, label_for(ctx, target), report)
+        result = start_seat(ctx, seat, pane, created, report, after_quit=True)
+        (to_brief if result == "started" else to_queue if result == "blocked" else []).append(seat)
+    if to_brief or to_queue:
+        send_kickoffs(ctx, to_brief, reason, note, label_for(ctx, target), report, blocked=to_queue, queue=True)
     ctx.save()
     if name_panes:
         labels.apply(ctx, None, report)
@@ -542,28 +558,41 @@ def op_go(ctx: Ctx, name: str) -> Tuple[int, str]:
 # -- peek and interrupt --------------------------------------------------------------------
 
 PEEK_LINES = 30  # design 23.6
+PEEK_SOURCES = ("visible", "recent")  # design 32.3
+VISIBLE_ONLY = "(working: the visible screen only)"
 
 
-def op_peek(ctx: Ctx, name: str, lines: int = PEEK_LINES) -> Tuple[int, str]:
+def op_peek(ctx: Ctx, name: str, lines: int = PEEK_LINES, source: Optional[str] = None) -> Tuple[int, str, str]:
     """Design 23.6: the last ``lines`` screen lines of a seat, a contact or a live agent
     (resolved as ``send`` resolves a target), through ``agent read``, and nothing else:
-    nothing is logged, recorded or moved. Returns (exit code, text): an absent seat or a
-    contact that cannot be reached is exit 3; an unknown name or ``owner`` a usage error."""
+    nothing is logged, recorded or moved. Returns (exit code, text, note): an absent seat
+    or a contact that cannot be reached is exit 3; an unknown name or ``owner`` a usage
+    error. Design 32.3: ``source`` (visible, recent) is passed on as ``--source``; without
+    it, a read herdr refuses with ``agent_not_idle`` (a working seat whose history is in the
+    alternate screen) is read once more with ``--source visible``, and ``note`` says so."""
     if lines < 1:
         raise UsageError("--lines takes a number of lines, 1 or more")
+    if source is not None and source not in PEEK_SOURCES:
+        raise UsageError("--source takes %s" % " or ".join(PEEK_SOURCES))
     if name == OWNER:
         raise UsageError("owner is not a pane; nothing to read")
     target = resolve_targets(ctx, [name], ctx.herdr.agent_list())[0]
     if target.problem or not target.herdr:
         state, _, why = (target.problem or "absent").partition(": ")
-        return EXIT_PARTIAL, "%s is %s%s; nothing to read" % (name, state, " (%s)" % why if why else "")
+        return EXIT_PARTIAL, "%s is %s%s; nothing to read" % (name, state, " (%s)" % why if why else ""), ""
+    note = ""
     try:
-        text = ctx.herdr.agent_read(target.herdr, lines)
+        try:
+            text = ctx.herdr.agent_read(target.herdr, lines, source)
+        except HerdrError as exc:
+            if source is not None or exc.code != "agent_not_idle":
+                raise
+            text, note = ctx.herdr.agent_read(target.herdr, lines, "visible"), VISIBLE_ONLY
     except HerdrError as exc:
         if "not_found" in exc.code:
-            return EXIT_PARTIAL, "%s is absent; nothing to read" % name
+            return EXIT_PARTIAL, "%s is absent; nothing to read" % name, ""
         raise
-    return EXIT_OK, text.rstrip("\n")
+    return EXIT_OK, text.rstrip("\n"), note
 
 
 def op_interrupt(ctx: Ctx, name: str, wait_ms: Optional[int] = None, as_name: Optional[str] = None) -> Tuple[int, str]:
@@ -652,7 +681,7 @@ def _input_line(ctx: Ctx, name: str, kind: str) -> Optional[str]:
     """The seat's prompt line (``agent read NAME --lines 12``), or None when none is on
     screen or herdr cannot say."""
     try:
-        return presence.prompt_line(ctx.herdr.agent_read(name, presence.SCREEN_LINES), kind)
+        return presence.prompt_line(ctx.herdr.agent_read(name, presence.SCREEN_LINES, ansi=True), kind)  # 32.8
     except HerdrError:
         return None
 

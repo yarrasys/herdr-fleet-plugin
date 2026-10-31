@@ -22,11 +22,12 @@ from herdr_fleet.context import (EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, C
 from herdr_fleet.fleetfile import FleetError, find_fleet_file, load_fleet
 from herdr_fleet.herdr import Herdr, HerdrError, Runner, describe, find_binary
 from herdr_fleet.menu import run_menu, wait_for_enter
-from herdr_fleet.ops import (PEEK_LINES, op_down, op_go, op_install_cli, op_interrupt, op_kickoff, op_peek,
-                             op_restart, op_swap, op_ui, op_up)
+from herdr_fleet.ops import (PEEK_LINES, PEEK_SOURCES, op_down, op_go, op_install_cli, op_interrupt, op_kickoff,
+                             op_peek, op_restart, op_swap, op_ui, op_up)
 from herdr_fleet.scaffold import available_examples, run_init
 from herdr_fleet.seats import Clock
 from herdr_fleet.state import StateError
+from herdr_fleet.handover import op_handover, request as request_handover
 from herdr_fleet.hooks import op_hooks
 from herdr_fleet.mailroom import op_deliver, op_inbox, op_inbox_hook
 from herdr_fleet.messages import op_ack, op_log, op_send
@@ -86,15 +87,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--context", action="store_true",
                    help="add a CONTEXT column: Claude/Codex transcript usage and reported window when available (read-only source)")
 
-    p = sub.add_parser("restart", parents=[common, notes, wait, drop],
+    handover = argparse.ArgumentParser(add_help=False)
+    handover.add_argument("--handover", action="store_true",
+                          help="for your own seat only: open a helper pane in a new tab that does this once your "
+                               "current turn ends (--wait MS: how long it waits, default 1h); end your turn after it")
+
+    p = sub.add_parser("restart", parents=[common, notes, wait, drop, handover],
                        help="quit idle seats and start them again in the same pane, then brief them")
     p.add_argument("names", nargs="+", metavar="NAME")
     p.add_argument("--dry-run", action="store_true", help="print the plan and change nothing")
 
-    p = sub.add_parser("swap", parents=[common, notes, wait],
+    p = sub.add_parser("swap", parents=[common, notes, wait, handover],
                        help="restart exactly the seats whose kind or args drifted from the file")
     p.add_argument("names", nargs="*", metavar="NAME", help="only these seats (default: all)")
     p.add_argument("--dry-run", action="store_true", help="list what would change and why")
+
+    sub.add_parser("handover", parents=[common],
+                   help="(the handover pane runs this) wait for a seat's turn to end, then restart or swap it",
+                   description="Run only by the pane that `restart NAME --handover` or `swap NAME --handover` "
+                               "opens (HERDR_FLEET_HANDOVER): waits with `herdr agent wait` until the seat is "
+                               "idle or done, runs that restart or swap, then closes its pane.")
 
     p = sub.add_parser("kickoff", parents=[common, notes, drop], help="resend the kickoff to idle seats")
     p.add_argument("names", nargs="+", metavar="NAME")
@@ -159,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with names: type the whole queue ahead to a seat that is working")
     p.add_argument("--dry-run", action="store_true", help="say what would be delivered and send nothing")
 
-    p = sub.add_parser("inbox", parents=[fleet], help="your own queued messages: list, read, wait, count, history",
+    p = sub.add_parser("inbox", parents=[fleet], help="your own queued messages: --read, --wait, --count, --history",
                        description="Your mailbox (.herdr/inbox/<you>): by default list what is queued. Runs no "
                                    "herdr command except finding who you are, and none with --as. Human output names the "
                                    "selected identity/fleet; JSON/count diagnostics go to stderr. Failed caller "
@@ -263,13 +275,18 @@ def build_parser() -> argparse.ArgumentParser:
                                    "`send` resolves it), with `herdr agent focus`. Writes nothing.")
     p.add_argument("name", metavar="NAME", help="seat, contact or live agent name")
 
-    p = sub.add_parser("peek", parents=[fleet], help="print the last screen lines of a seat, contact or agent",
+    p = sub.add_parser("peek", parents=[fleet],
+                       help="print the last screen lines of a seat, contact or agent (--lines, --source)",
                        description="Print the last N screen lines of NAME (a seat, a contact or a live herdr agent, "
                                    "resolved as `send` resolves it) with `herdr agent read`, and nothing else. "
                                    "Read-only: nothing is logged or moved.")
     p.add_argument("name", metavar="NAME", help="seat, contact or live agent name")
     p.add_argument("--lines", metavar="N", type=int, default=PEEK_LINES,
                    help="how many lines (default %d)" % PEEK_LINES)
+    p.add_argument("--source", choices=PEEK_SOURCES,
+                   help="herdr's read source: visible (the screen as shown) or recent (its history, which herdr "
+                        "refuses for a working seat in the alternate screen); default: recent, falling back to "
+                        "visible for a working seat, noted on stderr")
 
     p = sub.add_parser("interrupt", parents=[fleet], help="stop a working seat's turn with its kind's keys",
                        description="For a seat of this fleet that is working: press its kind's interrupt keys "
@@ -434,14 +451,21 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         ctx.say(line)
         return code
     if command == "peek":  # design 23.6: prints what `agent read` printed; writes nothing
-        code, text = op_peek(ctx, args.name, args.lines)
+        code, text, note = op_peek(ctx, args.name, args.lines, args.source)
+        if note:  # design 32.3: a working seat's visible screen only
+            ctx.stderr.write(note + "\n")
         ctx.say(text)
         return code
     if command == "interrupt":  # design 23.7: the CLI is its only entry (no action, no popup)
         code, line = op_interrupt(ctx, args.name, args.wait, args.as_name)
         ctx.say(line)
         return code
+    if command == "handover":  # design 32.5: the helper pane
+        return op_handover(ctx, stdin)
     note = _note(args)
+    if command in ("restart", "swap") and args.handover:  # design 32.5: the seat's own command
+        return _finish(ctx, request_handover(ctx, command, args.names, note, args.wait,
+                                             getattr(args, "drop_inbox", False)))
     if command == "up":
         report = op_up(ctx, args.names, me=args.me, no_kickoff=args.no_kickoff, note=args.note, join=args.join,
                        no_watch=args.no_watch)
@@ -534,11 +558,12 @@ def _fail(ctx: Ctx, args: argparse.Namespace, stdin: TextIO, code: int, kind: st
         ctx.stderr.write("herdr-fleet: %s: %s\n" % (kind, line))
     if args.command == "ui":
         code = EXIT_USAGE
-    pane = args.command == "watch" and ctx.env.get("HERDR_PLUGIN_ENTRYPOINT_ID")  # the watch pane shows no error
+    # the watch and handover panes show no error (32.5)
+    pane = args.command in ("watch", "handover") and ctx.env.get("HERDR_PLUGIN_ENTRYPOINT_ID")
     if args.command != "timers" and (ctx.notify_enabled or args.command == "ui" or ctx.env.get("HERDR_PLUGIN_ACTION_ID") or pane):
         what = args.entrypoint if args.command == "ui" else args.command
         ctx.notify("Fleet %s failed" % what, "\n".join(lines), "request")
-    if getattr(args, "hold", False) or args.command == "menu":
+    if getattr(args, "hold", False) or args.command in ("menu", "handover"):  # the pane stays readable
         ctx.say("\n".join("error: %s" % line for line in lines))
         wait_for_enter(ctx, stdin)
     return code

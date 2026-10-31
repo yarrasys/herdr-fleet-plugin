@@ -7,7 +7,9 @@ in its recorded pane, reuse its recorded pane when that is at a shell prompt,
 or mark it as needing a pane, which ``placement`` then splits (chain or
 grid). ``start_claimed`` starts it through ``seats.start_in_pane``, and
 ``send_kickoffs`` briefs seats in file order once all have started, each
-kickoff carrying the seat's queued messages through ``{inbox}`` (design 18.5).
+kickoff carrying the seat's queued messages through ``{inbox}`` (design 18.5); for
+up, restart and swap a kickoff that cannot be sent waits first in the seat's mailbox
+(``queued_by: kickoff``, design 32.6), and a failed start is notified (32.1).
 Everything here honours ``--dry-run`` by reporting plans instead of acting.
 """
 
@@ -22,9 +24,10 @@ from herdr_fleet.herdr import HerdrError, describe, has_agent, render_cmd, start
 from herdr_fleet.contacts import contacts_block
 from herdr_fleet.kickoff import compose, roster_table
 from herdr_fleet import inbox
-from herdr_fleet.messages import inbox_block, log_kickoff, settle
+from herdr_fleet.messages import drop_kickoffs, inbox_block, log_kickoff, queue_kickoff, settle
 from herdr_fleet.placement import Placed, Target, existing_panes, place_chain
-from herdr_fleet.seats import at_shell_prompt, describe_foreground, safe_prompt, start_in_pane
+from herdr_fleet.seats import (KICKOFF_QUEUED, KICKOFF_REMEDY, SLOW_REMEDY, at_shell_prompt, describe_foreground,
+                               safe_prompt, start_in_pane)
 from herdr_fleet.state import now_iso, pane_moved, refresh_pane
 
 
@@ -81,11 +84,12 @@ def resolve_target(ctx: Ctx, report: Report, first: Optional[Seat] = None) -> Ta
 
 def _first_pane(ctx: Ctx, workspace_id: str) -> Optional[str]:
     """A pane to split from in a workspace the caller is not in: the first pane
-    of its active tab (never started into, only split), never the watcher strip."""
+    of its active tab (never started into, only split), never the watcher strip or
+    the handover helper (design 32.5)."""
     active = next((w.get("active_tab_id") for w in ctx.herdr.workspace_list()
                    if w.get("workspace_id") == workspace_id), None)
-    strip = ctx.state.watch_pane
-    panes = [p for p in ctx.herdr.pane_list(workspace_id) if p.get("pane_id") != strip]
+    plugin = {ctx.state.watch_pane, (ctx.state.handover or {}).get("pane_id")} - {None}
+    panes = [p for p in ctx.herdr.pane_list(workspace_id) if p.get("pane_id") not in plugin]
     for pane in panes:
         if pane.get("tab_id") == active:
             return str(pane["pane_id"])
@@ -130,21 +134,22 @@ def claim_seat(ctx: Ctx, seat: Seat, live: Dict[str, Dict], report: Report) -> C
     return Claim("needs")
 
 
-def start_claimed(ctx: Ctx, seat: Seat, claim: Claim, placed: Placed, report: Report) -> bool:
-    """Start a seat in its recorded or newly placed pane; True when it is ready for a kickoff."""
+def start_claimed(ctx: Ctx, seat: Seat, claim: Claim, placed: Placed, report: Report) -> str:
+    """Start a seat in its recorded or newly placed pane: ``start_seat``'s answer
+    (``started`` is ready for a kickoff, ``blocked`` gets it queued), "" when nothing started."""
     if claim.state == "recorded":
         pane, created = claim.pane, claim.created
     elif claim.state == "needs" and seat.name in placed:
         pane, created = placed[seat.name]
     else:
-        return False
+        return ""
     if pane == ctx.invocation.pane_id:
         report.add(seat.name, "refused", "will not start an agent in the caller's own pane %s" % pane, "fail")
-        return False
+        return ""
     return start_seat(ctx, seat, str(pane), created, report)
 
 
-def ensure_seat(ctx: Ctx, seat: Seat, target: Target, live: Dict[str, Dict], report: Report) -> bool:
+def ensure_seat(ctx: Ctx, seat: Seat, target: Target, live: Dict[str, Dict], report: Report) -> str:
     """Bring one seat up on its own (restart of an absent seat): claim, place
     with the chain rule (grid mode appends after the last placed seat), start."""
     claim = claim_seat(ctx, seat, live, report)
@@ -219,11 +224,18 @@ def _adopt_resumed(ctx: Ctx, seat: Seat, pane: str, kind: str, report: Report) -
     return "adopted"
 
 
-def start_seat(ctx: Ctx, seat: Seat, pane: str, created: bool, report: Report) -> bool:
-    """Start the seat in a pane; record it. True when it is ready for a kickoff."""
+AT_SHELL_REMEDY = "the pane is at a shell; run herdr-fleet up %s"  # design 32.1: a failed start after a quit
+
+
+def start_seat(ctx: Ctx, seat: Seat, pane: str, created: bool, report: Report, after_quit: bool = False) -> str:
+    """Start the seat in a pane; record it. Returns ``started`` (ready for a kickoff),
+    ``blocked`` (its kickoff is to be queued, 32.6: blocked at startup, or a slow start whose
+    agent process runs but was not seen ready by the deadline, which is also ``failed``) or
+    "" (failed). A failed start is notified like a blocked one (32.1); ``after_quit``
+    (restart, swap) names the remedy when the pane was left at its shell."""
     if ctx.dry_run:
         report.add(seat.name, "plan", render_cmd(start_argv(seat.name, seat.kind, pane, seat.args)))
-        return True
+        return "started"
     ctx.state.update(seat.name, pane_id=pane, created_pane=created)
     ctx.save()
     outcome = start_in_pane(ctx.herdr, ctx.clock, seat, pane)
@@ -232,23 +244,42 @@ def start_seat(ctx: Ctx, seat: Seat, pane: str, created: bool, report: Report) -
         ctx.state.update(seat.name, blocked_at_startup=False, **record)
         ctx.save()
         report.add(seat.name, "started", outcome.detail)
-        return True
+        return "started"
     if outcome.status == "blocked":
         ctx.state.update(seat.name, blocked_at_startup=True, **record)
         ctx.save()
         report.add(seat.name, "blocked", outcome.detail, "partial")
         ctx.notify("Fleet: %s is waiting for you" % seat.name, outcome.detail, "request")
-        return False
-    report.add(seat.name, "failed", outcome.detail, "fail")
-    return False
+        return "blocked"
+    detail = outcome.detail
+    remedy = AT_SHELL_REMEDY % seat.name
+    if after_quit and outcome.shell and remedy.split("; ", 1)[1] not in detail:
+        detail = "%s; %s" % (detail, remedy)
+    report.add(seat.name, "failed", detail, "fail")
+    ctx.notify("Fleet: %s did not start" % seat.name, detail, "request")
+    if outcome.slow:  # its agent usually comes up later: brief it then (32.1 as the review amended it)
+        ctx.state.update(seat.name, blocked_at_startup=True, **record)
+        ctx.save()
+        return "blocked"
+    return ""
+
+
+QUEUE_ON = ("working", "blocked", "unknown", "typing")  # design 32.6: refusals that queue a kickoff
 
 
 def send_kickoffs(ctx: Ctx, seats: Sequence[Seat], reason: str, note: Optional[str],
-                  label: str, report: Report) -> None:
+                  label: str, report: Report, blocked: Sequence[Seat] = (), queue: bool = False) -> None:
     """Brief seats in file order, after every seat has started (design 3). A kickoff
     carries the seat's queued messages; they move to ``cur/`` once herdr took the
-    prompt (or may have: unconfirmed), and stay queued when it was refused."""
+    prompt (or may have: unconfirmed), and stay queued when it was refused.
+
+    Design 32.6, with ``queue`` (up, restart, swap): a kickoff that cannot be sent (a
+    ``blocked`` seat, blocked at startup, or a refusal by ``safe_prompt``: not idle or
+    done, or held by the guard) is written into the seat's mailbox without its {inbox}
+    block, ahead of everything queued, replacing an older one. An unconfirmed one is not
+    (it may have arrived). A sent or unconfirmed kickoff replaces a queued one."""
     ordered = sorted(seats, key=lambda s: s.index)
+    waiting = sorted(blocked, key=lambda s: s.index)
     if ctx.dry_run:
         waiting = {s.name: len(inbox.queued(ctx.fleet.repo).get(s.name, [])) for s in ordered}
         carries = ["%s carries %d queued" % (n, c) for n, c in waiting.items() if c]
@@ -262,17 +293,47 @@ def send_kickoffs(ctx: Ctx, seats: Sequence[Seat], reason: str, note: Optional[s
             for s in ctx.fleet.seats]
     roster = roster_table(rows)
     contacts = contacts_block(ctx.fleet, agents)
-    for seat in ordered:
-        if inbox.has_queued(ctx.fleet.repo, seat.name):
+    stuck = {s.name for s in waiting}
+    for seat in sorted(ordered + waiting, key=lambda s: s.index):
+        if seat.name in stuck:  # blocked at startup: nothing can be sent now
+            _queue(ctx, seat, label, roster, contacts, reason, note, report, held=False)
+        elif inbox.has_queued(ctx.fleet.repo, seat.name):
             with inbox.locked(ctx.fleet.repo, seat.name):
-                _brief(ctx, seat, label, roster, contacts, reason, note, report, with_inbox=True)
+                _brief(ctx, seat, label, roster, contacts, reason, note, report, with_inbox=True, queue=queue)
         else:
-            _brief(ctx, seat, label, roster, contacts, reason, note, report, with_inbox=False)
+            _brief(ctx, seat, label, roster, contacts, reason, note, report, with_inbox=False, queue=queue)
+
+
+def _queue(ctx: Ctx, seat: Seat, label: str, roster: str, contacts: str, reason: str, note: Optional[str],
+           report: Report, held: bool) -> None:
+    """Design 32.6: the kickoff, without its {inbox} block, into the seat's mailbox. ``held``:
+    the caller holds the mailbox lock already."""
+    try:
+        text = compose(seat, ctx.fleet, label, roster, reason, note, contacts=contacts, inbox="")
+    except OSError as exc:
+        report.add(seat.name, "not briefed", "cannot read kickoff template: %s" % exc, "fail")
+        return
+    try:
+        if held:
+            message = queue_kickoff(ctx, seat.name, text, reason)
+        else:
+            with inbox.locked(ctx.fleet.repo, seat.name):
+                message = queue_kickoff(ctx, seat.name, text, reason)
+    except OSError as exc:
+        report.add(seat.name, "not briefed", "cannot queue the kickoff: %s" % exc, "fail")
+        return
+    report.add(seat.name, "kickoff queued #%s: delivered when %s is next idle or done" % (message.short, seat.name),
+               "", "partial")
+    for result in report.results:  # the start's line names the queued kickoff instead of `kickoff NAME`
+        if result.name == seat.name and result.status in ("blocked", "failed"):
+            for remedy in (KICKOFF_REMEDY, SLOW_REMEDY):
+                result.detail = result.detail.replace(remedy % seat.name, KICKOFF_QUEUED % message.short)
 
 
 def _brief(ctx: Ctx, seat: Seat, label: str, roster: str, contacts: str, reason: str, note: Optional[str],
-           report: Report, with_inbox: bool) -> None:
-    """One kickoff. With ``with_inbox`` the caller holds the seat's mailbox lock."""
+           report: Report, with_inbox: bool, queue: bool = False) -> None:
+    """One kickoff. With ``with_inbox`` the caller holds the seat's mailbox lock. With
+    ``queue``, one ``safe_prompt`` refuses is queued instead (32.6)."""
     block, carried, left = inbox_block(ctx, seat.name) if with_inbox else ("", [], [])
     try:
         text = compose(seat, ctx.fleet, label, roster, reason, note, contacts=contacts, inbox=block)
@@ -282,6 +343,11 @@ def _brief(ctx: Ctx, seat: Seat, label: str, roster: str, contacts: str, reason:
     outcome = safe_prompt(ctx.herdr, seat.name, text)
     if outcome.ok or outcome.status == "unconfirmed":
         settle(ctx, carried, "kickoff", "sent" if outcome.ok else "unconfirmed")
+        if with_inbox:  # this kickoff replaces one still queued (32.6)
+            drop_kickoffs(ctx, seat.name)
+    elif queue and outcome.status in QUEUE_ON:
+        _queue(ctx, seat, label, roster, contacts, reason, note, report, held=with_inbox)
+        return
     queued = ""
     if carried:
         queued = " with %d queued" % len(carried)
@@ -291,7 +357,7 @@ def _brief(ctx: Ctx, seat: Seat, label: str, roster: str, contacts: str, reason:
     if outcome.ok:
         ctx.state.update(seat.name, last_kickoff_at=now_iso(), blocked_at_startup=False)
         ctx.save()
-        problem = log_kickoff(ctx.fleet.repo, seat.name, text)
+        problem = log_kickoff(ctx.fleet.repo, seat.name, text, reason)
         if problem:
             ctx.warn(problem)
         report.add(seat.name, "briefed", "kickoff sent (%s)%s" % (reason, queued))

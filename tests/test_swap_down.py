@@ -19,8 +19,8 @@ class Swap(LiveFleet):
                       "file says --model claude-opus-6", out)
         self.assertIn("sample-orchestrator: unchanged", out)
         self.assertEqual(self.argvs("agent", "start"),
-                         [["agent", "start", "sample-dev", "--kind", "claude", "--pane", "w2:p2", "--",
-                           "--model", "claude-opus-6"]])
+                         [["agent", "start", "sample-dev", "--kind", "claude", "--pane", "w2:p2", "--timeout", "15000",
+                           "--", "--model", "claude-opus-6"]])
         self.assertEqual(self.prompts_to("sample-orchestrator"), [])
         self.assertEqual(self.prompts_to("sample-reviewer"), [])
         self.assertIn("on swap.", self.prompts_to("sample-dev")[1])

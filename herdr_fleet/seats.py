@@ -11,13 +11,18 @@
   presence guard (``presence.typing``, design 21.2) and sends nothing while the
   owner is typing in the target pane; ``agent_prompt_stalled`` and ``timeout``
   are reported, never resent.
-- ``start_in_pane``: shell check, ``agent start``, retry on ``agent_pane_busy``
-  every 250 ms for up to 10 s; after ``agent_not_ready``, read ``agent get``
-  for the rest of the 10 s (``idle``, ``done`` or ``working`` count as started,
-  design 16.12) and only then report blocked. Nothing is sent meanwhile.
+- ``start_in_pane``: shell check, ``agent start --timeout 15000``, retry on
+  ``agent_pane_busy`` every 250 ms for up to 10 s; after ``agent_not_ready``, read
+  ``agent get`` for the rest of the 10 s (``idle``, ``done`` or ``working`` count as
+  started, design 16.12) and only then report blocked. A start that answers
+  ``timeout`` is classified by ``agent get`` and ``process-info`` (design 32.1): a late
+  agent, an agent process still coming up (polled until 45 s after the first start),
+  a bare shell (the command never ran: issued once more, never a third time), or
+  anything else (failed). Nothing is sent, typed, cleared or reset meanwhile.
 - ``quit_agent``: the per-kind quit command through ``safe_prompt`` (so the
-  presence guard runs first), then poll until the agent is gone and the shell is
-  back, or give up without retrying. When the agent is still there
+  presence guard runs first; a hold for a dialog or menu is read again for up to 5 s,
+  then named and left to the owner, design 32.2), then poll until the agent is gone
+  and the shell is back, or give up without retrying. When the agent is still there
   ``EXIT_DIALOG_AFTER_S`` later, its screen is read once (``agent read``) and the
   kind's exit confirmation (``EXIT_DIALOGS``), with the exit choice highlighted,
   gets one Enter (design 23.7, invariant 21); any other screen gets no key.
@@ -44,6 +49,15 @@ SETTLED = ("idle", "done")
 STARTED = SETTLED + ("working",)  # after agent_not_ready, these mean the agent got past startup
 POLL_S = 0.25
 START_BUDGET_S = 10.0
+START_READY_MS = 15000  # design 32.1: `agent start --timeout`; slower starts are polled for here
+START_SLOW_S = 45.0     # design 32.1: how long after the first start a late agent is waited for
+LOST = "lost"           # a start that timed out with the pane at its bare shell: the command never ran
+# The remedy a blocked or slow start names; once its kickoff is queued (32.6) it says that instead.
+KICKOFF_REMEDY = ", then run `herdr-fleet kickoff %s`"   # blocked at startup (16.12)
+SLOW_REMEDY = ", then run herdr-fleet kickoff %s"         # a slow start past its deadline (32.1)
+KICKOFF_QUEUED = "; its kickoff is queued (#%s) and goes when it is idle"
+QUIT_SETTLE_S = 5.0     # design 32.2: how long a quit held by a dialog or menu reads the guard again
+QUIT_SETTLE_POLL_S = 0.5
 DEFAULT_QUIT_TIMEOUT_MS = 20000
 UNSENT_CODES = ("agent_prompt_stalled", "timeout")
 
@@ -74,6 +88,11 @@ PROMPT_PLACEHOLDERS: Dict[str, Tuple[str, ...]] = {
 PROMPT_PLACEHOLDER_PATTERNS: Dict[str, Tuple[str, ...]] = {
     "claude": (r'Try "[^"]*"',),
 }
+# Design 32.8: after a turn Claude Code suggests a next prompt in its empty input line, drawn faint
+# (`❯\xa0\e[2m<suggested prompt>\e[0m`); the owner's own typing is drawn at normal intensity. For these
+# kinds the guard drops faint characters from the prompt line. Not for others: a faint run there may
+# be the owner's pasted text.
+PROMPT_FAINT_PLACEHOLDER: Tuple[str, ...] = ("claude",)
 
 # Design 23.7: the exit confirmation a kind may show after its quit command, which the
 # plugin answers with one Enter (invariant 21). ``signature``: lines that must all be on
@@ -216,12 +235,20 @@ class Clock:
 
 @dataclass
 class Outcome:
-    """Result of a lifecycle step. ``status`` is step specific."""
+    """Result of a lifecycle step. ``status`` is step specific. ``shell``: a failed start
+    left the pane at its shell prompt (design 32.1); ``slow``: a failed start whose agent
+    process runs, which usually comes up later, so its kickoff is queued (32.1 as the review
+    amended it); ``needs_owner``: a refused quit only a person can clear (a dialog or menu,
+    design 32.2)."""
 
     ok: bool
     status: str
     detail: str
     agent: Dict = field(default_factory=dict)
+    shell: bool = False
+    needs_owner: bool = False
+    slow: bool = False
+    late: bool = False  # the second attempt found the first start's agent coming up: no second start
 
 
 # Design 21.1: the `--now` allowance. Only `send --now` and `deliver NAME --now` pass it,
@@ -264,9 +291,37 @@ def safe_prompt(herdr: Herdr, target: str, text: str, allow: Sequence[str] = SET
 
 def start_in_pane(herdr: Herdr, clock: Clock, seat: Seat, pane: str,
                   budget_s: float = START_BUDGET_S) -> Outcome:
-    """Start ``seat`` in ``pane`` once the pane is at a shell prompt.
-    status: started | blocked (agent_not_ready and still not ready at the
-    deadline) | failed. The deadline covers busy retries and the ready poll."""
+    """Start ``seat`` in ``pane`` once the pane is at a shell prompt, with ``agent start
+    --timeout START_READY_MS``. status: started | blocked (not ready at its deadline) |
+    failed. ``budget_s`` covers busy retries and the 16.12 poll after ``agent_not_ready``.
+
+    Design 32.1: a start that answers ``timeout`` is classified from ``agent get`` and
+    ``pane process-info`` alone (``_after_timeout``). One whose pane is back at its bare
+    shell with no agent and no process of the kind never ran (a command garbled by mouse
+    reports a quit agent left switched on): it is issued once more, through the same
+    process-info check, and never a third time. Nothing is typed, cleared or reset."""
+    first = clock.monotonic()
+    outcome = _attempt(herdr, clock, seat, pane, budget_s, first, again=False)
+    if outcome.status != LOST:
+        return outcome
+    outcome = _attempt(herdr, clock, seat, pane, budget_s, first, again=True)
+    if outcome.status == "started" and not outcome.late:
+        return Outcome(True, "started", "in %s (second attempt; the first start left a bare shell)" % pane,
+                       outcome.agent)
+    if outcome.status == LOST:
+        return Outcome(False, "failed", "the start command did not run in %s twice, or the agent exited at once; "
+                       "a quit agent may have left mouse tracking on there (README: troubleshooting); run "
+                       "herdr-fleet up %s" % (pane, seat.name), shell=True)
+    return outcome
+
+
+def _attempt(herdr: Herdr, clock: Clock, seat: Seat, pane: str, budget_s: float, first: float,
+             again: bool) -> Outcome:
+    """One start: the shell check, ``agent start``, the ``agent_pane_busy`` retry every
+    POLL_S within ``budget_s``. status: started | blocked | failed | LOST. ``again`` (the
+    second attempt of 32.1): a pane that is no longer at its bare shell is not waited for;
+    a process of the kind there means the first command ran after all (the slow poll),
+    anything else fails."""
     deadline = clock.monotonic() + budget_s
     while True:
         try:
@@ -275,14 +330,23 @@ def start_in_pane(herdr: Herdr, clock: Clock, seat: Seat, pane: str,
             return Outcome(False, "failed", "cannot inspect pane %s: %s" % (pane, describe(exc)))
         if at_shell_prompt(info):
             try:
-                agent = herdr.agent_start(seat.name, seat.kind, pane, seat.args)
+                agent = herdr.agent_start(seat.name, seat.kind, pane, seat.args, START_READY_MS)
                 return Outcome(True, "started", "in %s" % pane, agent)
             except HerdrError as exc:
                 if exc.code == "agent_not_ready":
-                    return _await_ready(herdr, clock, seat, pane, deadline, exc)
+                    return _await_ready(herdr, clock, seat, pane, deadline, exc.message)
+                if exc.code == "timeout":
+                    return _after_timeout(herdr, clock, seat, pane, first, exc)
                 if exc.code != "agent_pane_busy":
-                    return Outcome(False, "failed", describe(exc))
+                    return Outcome(False, "failed", describe(exc), shell=True)
                 last = describe(exc)
+        elif again and find_agent_process(info, seat.kind) is not None:
+            outcome = _await_slow(herdr, clock, seat, pane, first + START_SLOW_S)
+            outcome.late = True
+            return outcome
+        elif again:
+            return Outcome(False, "failed", "pane %s is not at a shell prompt for the second start (foreground: %s); "
+                           "not retried" % (pane, describe_foreground(info)))
         else:
             last = "pane %s is not at a shell prompt (foreground: %s)" % (pane, describe_foreground(info))
         if clock.monotonic() >= deadline:
@@ -290,13 +354,56 @@ def start_in_pane(herdr: Herdr, clock: Clock, seat: Seat, pane: str,
         clock.sleep(POLL_S)
 
 
-def _await_ready(herdr: Herdr, clock: Clock, seat: Seat, pane: str, deadline: float,
-                 exc: HerdrError) -> Outcome:
-    """After ``agent_not_ready``: the agent is registered but was blocked when herdr
-    gave up waiting. A one-time notice can clear by itself (design 16.12), so read
-    ``agent get`` every POLL_S until the start deadline. Read-only: nothing is
-    sent to the pane. ``idle``/``done``/``working`` count as started; still
-    ``blocked`` (or ``unknown``, or no answer) at the deadline is blocked."""
+def _after_timeout(herdr: Herdr, clock: Clock, seat: Seat, pane: str, first: float, exc: HerdrError) -> Outcome:
+    """Design 32.1: herdr gave up waiting for the agent. Read only, in this order: ``agent
+    get PANE`` answers (a late agent: started, or the 16.12 poll for blocked or unknown);
+    else ``process-info`` shows a process of the seat's kind (still coming up: poll ``agent
+    get``); else a bare shell (LOST: the command never ran); else something else (failed,
+    naming it). Every wait ends START_SLOW_S after the first start."""
+    deadline = first + START_SLOW_S
+    try:
+        agent = herdr.agent_get(pane)
+    except HerdrError:
+        agent = None
+    if agent is not None:
+        if agent.get("agent_status") in STARTED:
+            return Outcome(True, "started", "in %s" % pane, agent)
+        return _await_ready(herdr, clock, seat, pane, deadline, "not ready when the start timed out")
+    try:
+        info = herdr.process_info(pane)
+    except HerdrError as again:
+        return Outcome(False, "failed", "%s; cannot inspect pane %s: %s" % (describe(exc), pane, describe(again)))
+    if find_agent_process(info, seat.kind) is not None:
+        return _await_slow(herdr, clock, seat, pane, deadline)
+    if at_shell_prompt(info):
+        return Outcome(False, LOST, describe(exc), shell=True)
+    return Outcome(False, "failed", "%s; foreground in %s: %s; not retried"
+                   % (describe(exc), pane, describe_foreground(info)))
+
+
+def _await_slow(herdr: Herdr, clock: Clock, seat: Seat, pane: str, deadline: float) -> Outcome:
+    """Design 32.1 case 2: the agent's process runs but herdr has not seen the agent. Read
+    ``agent get`` every POLL_S until ``deadline``; once it answers, as after a late start."""
+    while True:
+        if clock.monotonic() >= deadline:
+            return Outcome(False, "failed", "its process runs in %s but herdr has not seen it ready after %.0f s; "
+                           "look at the pane%s" % (pane, START_SLOW_S, SLOW_REMEDY % seat.name), slow=True)
+        clock.sleep(POLL_S)
+        try:
+            agent = herdr.agent_get(pane)
+        except HerdrError:
+            continue
+        if agent.get("agent_status") in STARTED:
+            return Outcome(True, "started", "in %s" % pane, agent)
+        return _await_ready(herdr, clock, seat, pane, deadline, "not ready when the start timed out")
+
+
+def _await_ready(herdr: Herdr, clock: Clock, seat: Seat, pane: str, deadline: float, why: str) -> Outcome:
+    """After ``agent_not_ready`` (or a late agent that is blocked or unknown, 32.1): the
+    agent is registered but was not ready when herdr gave up waiting. A one-time notice can
+    clear by itself (design 16.12), so read ``agent get`` every POLL_S until ``deadline``.
+    Read-only: nothing is sent to the pane. ``idle``/``done``/``working`` count as started;
+    still ``blocked`` (or ``unknown``, or no answer) at the deadline is blocked."""
     while True:
         try:
             agent = herdr.agent_get(pane)
@@ -305,9 +412,8 @@ def _await_ready(herdr: Herdr, clock: Clock, seat: Seat, pane: str, deadline: fl
         if agent.get("agent_status") in STARTED:
             return Outcome(True, "started", "in %s" % pane, agent)
         if clock.monotonic() >= deadline:
-            return Outcome(False, "blocked",
-                           "blocked at startup in %s (%s); answer the prompt there, then run "
-                           "`herdr-fleet kickoff %s`" % (pane, exc.message, seat.name))
+            return Outcome(False, "blocked", "blocked at startup in %s (%s); answer the prompt there%s"
+                           % (pane, why, KICKOFF_REMEDY % seat.name))
         clock.sleep(POLL_S)
 
 
@@ -321,11 +427,19 @@ def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str
     the exit choice highlighted, and ``answer_exit`` (never from a popup), one ``enter``
     answers it and the poll goes on. Any other screen gets no key. On timeout the screen
     is read again for the report: a numbered choice on screen means a dialog the owner
-    answers by hand."""
+    answers by hand.
+
+    Design 32.2: a quit the guard holds for a dialog or menu (no prompt line, or a
+    highlighted numbered choice where it would be) reads the guard again every
+    QUIT_SETTLE_POLL_S for up to QUIT_SETTLE_S, since a seat that has just turned done may
+    still be repainting; then it is refused, naming the dialog by its first line
+    (``needs_owner``). Text in the input is refused at once."""
     sent = safe_prompt(herdr, target, quit_cmd)
+    if not sent.ok and sent.status == "typing" and presence.is_dialog(sent.detail):
+        sent = _settle_held(herdr, clock, target, quit_cmd, sent)
     if not sent.ok:
         status = "refused" if sent.status in ("blocked", "unknown", "working", "typing") else "failed"
-        return Outcome(False, status, sent.detail, sent.agent)
+        return Outcome(False, status, sent.detail, sent.agent, needs_owner=sent.needs_owner)
     kind = str(sent.agent.get("agent") or "")
     dialog = EXIT_DIALOGS.get(kind)
     started = clock.monotonic()
@@ -364,6 +478,35 @@ def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str
             return Outcome(False, "failed", _no_exit(herdr, target, quit_cmd, timeout_ms, gone, answered))
 
 
+def _settle_held(herdr: Herdr, clock: Clock, target: str, quit_cmd: str, held: Outcome) -> Outcome:
+    """Design 32.2: the guard held the quit for a dialog or menu. Read the guard again
+    (read-only) every QUIT_SETTLE_POLL_S for up to QUIT_SETTLE_S; once it passes, the quit
+    goes through ``safe_prompt`` as usual, and text in the input refuses it at once. Still
+    held at the end: one ``agent read`` names the dialog by its first line (no numbered
+    choice on screen keeps the guard's words), and the refusal needs the owner."""
+    until = clock.monotonic() + QUIT_SETTLE_S
+    while clock.monotonic() < until:
+        clock.sleep(QUIT_SETTLE_POLL_S)
+        try:
+            hold = presence.typing_at(herdr, held.agent)
+        except HerdrError as exc:  # cannot tell: send nothing
+            return Outcome(False, "error", "presence check: %s; nothing sent" % describe(exc), held.agent)
+        if hold is None:
+            sent = safe_prompt(herdr, target, quit_cmd)
+            if sent.ok or sent.status != "typing" or not presence.is_dialog(sent.detail):
+                return sent
+            held = sent
+        elif not presence.is_dialog(hold):
+            return Outcome(False, "typing", hold, held.agent)
+    try:
+        first = dialog_first_line(herdr.agent_read(target, EXIT_DIALOG_LINES))
+    except HerdrError:
+        first = None
+    pane = str(held.agent.get("pane_id") or target)
+    detail = held.detail if first is None else presence.DIALOG_NAMED % (pane, first)
+    return Outcome(False, "typing", detail, held.agent, needs_owner=True)
+
+
 def shows_exit_dialog(kind: str, screen: str) -> bool:
     """Design 23.7: the kind's exit confirmation is on screen (every signature line) with
     its exit choice highlighted (a line whose first non-blank character is the highlight
@@ -376,7 +519,8 @@ def shows_exit_dialog(kind: str, screen: str) -> bool:
 
 BOX = "\u2502\u2503"                               # box-drawing verticals around a dialog's lines
 RULE_CHARS = set("\u2500\u2501\u2550\u256d\u256e\u2570\u256f\u250c\u2510\u2514\u2518 ")
-CHOICE_RE = re.compile("^" + HIGHLIGHT + r"\s*\d+[.)]\s")  # `❯ 1. Exit and stop tasks`
+# `❯ 1. Exit and stop tasks` (Claude Code); Codex marks its highlighted choice with `›` (design 32.2)
+CHOICE_RE = re.compile("^[" + HIGHLIGHT + "›]" + r"\s*\d+[.)]\s")
 
 
 def _bare(line: str) -> str:

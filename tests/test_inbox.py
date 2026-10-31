@@ -509,7 +509,8 @@ class UpDeliversAtKickoff(FleetCase):
         code, out, _ = self.run_cli("up")
         self.assertEqual(code, 3)
         self.assertEqual(self.prompts_to("sample-dev"), [])
-        self.assertEqual(len(box(self.repo, "sample-dev", NEW)), 1)
+        waiting = inbox.read_box(self.repo, "sample-dev", NEW)  # design 32.6: its kickoff queued ahead of them
+        self.assertEqual([(m.sender, m.queued_by) for m in waiting], [("herdr-fleet", "kickoff"), ("owner", "refusal")])
 
     def test_dry_run_says_what_the_kickoff_carries(self):
         self.run_cli("send", "--as", "owner", "sample-dev", "welcome back")

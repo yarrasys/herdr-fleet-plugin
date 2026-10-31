@@ -128,7 +128,7 @@ class Guard(LiveFleet):
         self.assertIsNone(answer)
         self.assertEqual(calls, [["pane", "read"]])  # design 23.11: the focus chain only words a hold
         (read,) = self.argvs("pane", "read")
-        self.assertEqual(read, ["pane", "read", "w2:p2", "--lines", "12"])
+        self.assertEqual(read, ["pane", "read", "w2:p2", "--lines", "12", "--format", "ansi"])  # design 32.8
 
     def test_focused_and_typing_holds(self):
         fake_herdr.focus(self.world, "w2:p2")

@@ -1005,8 +1005,9 @@ class InterruptCleanup(S23):
         self.assertEqual(self.keys(), [["ctrl+c"], ["ctrl+u"]])
         calls = [c["argv"] for c in self.calls()]
         index = calls.index(["agent", "send-keys", "sample-dev", "ctrl+u"])
-        self.assertEqual(calls[index - 1], ["agent", "read", "sample-dev", "--lines", "12"])
-        self.assertEqual(calls[index + 1], ["agent", "read", "sample-dev", "--lines", "12"])
+        read = ["agent", "read", "sample-dev", "--lines", "12", "--format", "ansi"]  # design 32.8
+        self.assertEqual(calls[index - 1], read)
+        self.assertEqual(calls[index + 1], read)
         self.assertEqual(fake_herdr.prompt_of("claude", fake_herdr.screen_of(self.world, "w2:p2")), "")
         entry = log_entries(self.repo)[-1]
         self.assertEqual((entry["keys"], entry["result"]), (["ctrl+c", "ctrl+u"], "done"))

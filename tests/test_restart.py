@@ -14,7 +14,8 @@ class Restart(LiveFleet):
         self.assertEqual(code, 0, out + err)
         self.assertEqual(self.prompts_to("sample-dev")[0], "/exit")
         self.assertEqual(self.argvs("agent", "start"),
-                         [["agent", "start", "sample-dev", "--kind", "claude", "--pane", "w2:p2", "--"] + ARGS])
+                         [["agent", "start", "sample-dev", "--kind", "claude", "--pane", "w2:p2", "--timeout", "15000",
+                           "--"] + ARGS])  # design 32.1: herdr waits 15 s for readiness
         self.assertEqual(self.argvs("pane", "split"), [])
         kickoff = self.prompts_to("sample-dev")[1]
         self.assertIn("on restart.", kickoff)

@@ -1073,10 +1073,12 @@ class BoardView:
 
     def read_screen(self, name: str) -> None:
         """``p`` on a seat page: the seat's last twelve screen lines through ``agent read``
-        (``peek``), shown on the page until it closes; read again on each ``p``."""
+        (``peek``), shown on the page until it closes; read again on each ``p``. A working
+        seat's visible screen, as ``peek`` falls back to it (32.3), says so in the footer."""
         from herdr_fleet.ops import op_peek
+        note = ""
         try:
-            code, text = op_peek(self.w.ctx, name, SCREEN_READ_LINES)
+            code, text, note = op_peek(self.w.ctx, name, SCREEN_READ_LINES)
         except (UsageError, OpError) as exc:
             code, text = 2, str(exc)
         except HerdrError as exc:
@@ -1087,6 +1089,8 @@ class BoardView:
             return
         page.screen = [board.clean(line) for line in text.split("\n")][-SCREEN_READ_LINES:]
         self.load(page)
+        if note:
+            self.show(note)
 
     def ask_ack(self, ref: board.Ref) -> None:
         self.confirm = ref

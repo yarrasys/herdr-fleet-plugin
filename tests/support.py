@@ -64,12 +64,17 @@ WATCH_CALLS = (["agent", "wait"], ["agent", "get"], ["agent", "list"], ["agent",
                ["notification", "show"], ["--version"], ["pane", "get"], ["workspace", "list"], ["pane", "read"],
                ["agent", "read"], ["agent", "focus"], ["pane", "zoom"])  # the last three: the board (24, 25)
 # Design 19.3: only `up` (also from the popup menu) and `ui` open plugin panes; only `up` resizes.
+# Design 32.5: `restart NAME --handover` and `swap NAME --handover` open the handover pane, in a tab.
 PLUGIN_PANE_COMMANDS = ("up", "ui", "menu")
+HANDOVER_COMMANDS = ("restart", "swap")
+# Design 32.5: the handover helper acts only for its recorded seat (these commands' targets).
+SEAT_TARGETED = (["agent", "prompt"], ["agent", "start"], ["agent", "send-keys"], ["agent", "wait"],
+                 ["agent", "read"])
 RESIZE_COMMANDS = ("up", "menu")
 # Design 22.1 and invariant 20: pane names are kept by these commands (the popup runs the
 # lifecycle ones), cleared only by `down` (also from the popup); 22.2: only `go` and the
 # popup move the owner's focus.
-RENAME_COMMANDS = ("up", "restart", "swap", "kickoff", "tile", "status", "down", "menu")
+RENAME_COMMANDS = ("up", "restart", "swap", "kickoff", "tile", "status", "down", "menu", "handover")
 CLEAR_COMMANDS = ("down", "menu")
 FOCUS_COMMANDS = ("go", "menu", "watch")
 # Design 24.4, 25.1 and invariant 22: the board's `agent focus` follows a key the owner pressed
@@ -82,10 +87,11 @@ GO_KEYS = tuple("123456789") + ("g",)
 # never from watch, the popup, deliver or a dry run. `agent read` comes only from `peek`,
 # `interrupt` and the quit of restart, swap, down (and the popup's, which reads but never presses).
 KEYS = ("enter", "esc", "ctrl+c", "ctrl+u")  # ctrl+u: interrupt's cleanup only (design 23.11)
-ENTER_COMMANDS = ("restart", "swap", "down")
+ENTER_COMMANDS = ("restart", "swap", "down", "handover")  # handover: its restart or swap (32.5)
 NO_KEYS_COMMANDS = ("watch", "menu", "deliver")
 INTERRUPT_DEFAULTS = {"claude": ["ctrl+c"], "agy": ["ctrl+c", "ctrl+c"]}  # the harness's own copy
-READ_COMMANDS = ("peek", "restart", "swap", "down", "menu", "interrupt", "watch")  # watch: blocked seats only
+READ_COMMANDS = ("peek", "restart", "swap", "down", "menu", "interrupt", "watch",  # watch: blocked seats only
+                 "handover")
 PEEK_CALLS = (["agent", "list"], ["--version"], ["pane", "current"], ["agent", "read"])
 
 THREE_SEATS = """
@@ -221,8 +227,11 @@ class FleetCase(unittest.TestCase):
             json.dump(self.world, handle)
         out, err = io.StringIO(), io.StringIO()
         env = env if env is not None else self.env
+        marker: Dict = {"command": list(argv)}
+        if env.get("HERDR_FLEET_HANDOVER"):  # design 32.5: whose helper made the calls below, and its pane
+            marker.update(handover=env["HERDR_FLEET_HANDOVER"], pane=env.get("HERDR_PANE_ID"))
         with open(self.log_path, "a", encoding="utf-8") as handle:  # marks which command made the calls below
-            handle.write(json.dumps({"command": list(argv)}) + "\n")
+            handle.write(json.dumps(marker) + "\n")
         runner = fake_herdr.Fake(self.world_path, self.log_path, env.get("HERDR_PANE_ID"),
                                  os.path.join(self.repo, ".herdr", "inbox"), fleet_file(argv, env, self.repo))
         code = main(list(argv), env=env, runner=runner, clock=self.clock,
@@ -291,15 +300,23 @@ class FleetCase(unittest.TestCase):
         previous: Optional[List[str]] = None
         listed: Dict[str, Optional[str]] = {}  # the states the command's last `agent list` answered
         pressed: Optional[str] = None          # the last key the fake screen replayed, until a focus uses it
+        peeked: Optional[str] = None           # the seat a `p` read, whose visible screen may follow (32.3)
         timer_reads = 0
+        starts = StartsCheck(self)
+        helper: Optional[Dict] = None          # design 32.5: the handover helper's seat and pane
         for call in entries:
             if "command" in call:
                 keys.finish()
                 command = call["command"]
                 keys = KeysCheck(self, command)
                 previous = None
-                listed, pressed = {}, None
+                listed, pressed, peeked = {}, None, None
                 timer_reads = 0
+                starts = StartsCheck(self)
+                helper = None
+                caller = call.get("pane") or self.env.get("HERDR_PANE_ID")  # the helper runs in its own pane
+                if command[:1] == ["handover"] and call.get("handover"):
+                    helper = {"seat": json.loads(call["handover"]).get("seat"), "pane": call.get("pane")}
                 continue
             if "key" in call:
                 pressed = call["key"]
@@ -317,12 +334,23 @@ class FleetCase(unittest.TestCase):
                 keys.seen(str(info["name"]), info.get("status"))
             if argv[:2] == ["agent", "send-keys"]:
                 keys.check(argv, info, previous, call["exit"])
+            starts.see(argv, info, call["exit"])
+            if helper is not None:
+                self.assert_helper(helper, argv, info)
             if argv[:2] == ["agent", "read"]:
                 self.assertIn(command[:1] and command[0], READ_COMMANDS, "%s read a screen: %s" % (command[:1], argv))
+                visible = "--source" in argv and argv[argv.index("--source") + 1:][:1] == ["visible"]
+                after_peek = visible and peeked == argv[2] and (previous or [])[:3] == ["agent", "read", argv[2]]
+                if visible:  # design 32.3: the visible screen only from peek and the board's `p`
+                    self.assertTrue(command[:1] == ["peek"] or after_peek,
+                                    "%s read the visible screen: %s" % (command[:1], argv))
                 if command[:1] == ["watch"]:
                     seats = fake_herdr.fleet_names(fleet_file(command, self.env, self.repo))
                     if pressed == "p":  # design 25.2: the owner asked for the seat's screen
                         pressed = None
+                        peeked = argv[2]
+                    elif after_peek:  # 32.3: the same `p`, read again with --source visible
+                        peeked = None
                     else:
                         self.assertIn(argv[2], seats, "the board read the screen of %s, not a seat: %s"
                                       % (argv[2], argv))
@@ -345,7 +373,14 @@ class FleetCase(unittest.TestCase):
                     self.assertIn("--timeout", argv, "watch waited without a timeout: %s" % argv)
             self.assertNotEqual(command[:1], ["hooks"], "hooks ran a herdr command: %s" % argv)
             if argv[:3] == ["plugin", "pane", "open"]:
-                self.assertIn(command[0], PLUGIN_PANE_COMMANDS, "%s opened a plugin pane: %s" % (command[:1], argv))
+                if command[:1] and command[0] in HANDOVER_COMMANDS:  # design 32.5: the helper, in a new tab
+                    self.assertIn("--handover", command, "%s opened a plugin pane: %s" % (command[:1], argv))
+                    self.assertEqual(argv[argv.index("--entrypoint") + 1], "handover", argv)
+                    self.assertEqual(argv[argv.index("--placement") + 1], "tab", argv)
+                    self.assertIn("--no-focus", argv)
+                else:
+                    self.assertIn(command[0], PLUGIN_PANE_COMMANDS, "%s opened a plugin pane: %s"
+                                  % (command[:1], argv))
                 if info.get("plugin_pane"):
                     strips.add(info["plugin_pane"])
             if argv[:2] == ["pane", "resize"]:
@@ -393,6 +428,24 @@ class FleetCase(unittest.TestCase):
                 self.assertTrue(info.get("created"), "closed a workspace herdr-fleet did not create")
         keys.finish()
 
+    def assert_helper(self, helper: Dict, argv: List[str], info: Dict) -> None:
+        """Design 32.5: the handover helper acts for its recorded seat alone: every prompt,
+        start, key, wait and screen read names that seat, every agent rename gives that name,
+        a pane rename only names a live seat's pane after that seat (as ``labels.apply`` does
+        for every live seat; review N6), and the only pane it closes is its own."""
+        seat = helper["seat"]
+        if argv[:2] in SEAT_TARGETED:
+            self.assertEqual(argv[2], seat, "the handover helper of %s acted for another: %s" % (seat, argv))
+        if argv[:2] == ["agent", "rename"]:
+            self.assertEqual(argv[3:4], [seat], "the handover helper of %s renamed another: %s" % (seat, argv))
+        if argv[:2] == ["pane", "rename"]:
+            self.assertFalse(info.get("clear"), "the handover helper cleared a pane name: %s" % argv)
+            self.assertTrue(info.get("seat"), "the handover helper renamed a pane with no seat: %s" % argv)
+            self.assertEqual(info.get("label"), info.get("wanted"), "the handover helper misnamed a pane: %s" % argv)
+        if argv[:2] == ["pane", "close"]:
+            self.assertEqual(argv[2], helper["pane"], "the handover helper closed a pane not its own: %s" % argv)
+        self.assertNotEqual(argv[:3], ["plugin", "pane", "open"], "the handover helper opened a pane: %s" % argv)
+
     def interrupt_keys(self, command: List[str], kind: str) -> Optional[List[str]]:
         """The keys `interrupt` may press for ``kind``: the fleet file's ``[interrupt]``
         entry, else the plugin config's, else the harness's own copy of the defaults (the
@@ -419,6 +472,33 @@ class FleetCase(unittest.TestCase):
         self.assertTrue(info.get("seat"), "renamed a pane that hosts no seat of the fleet: %s" % argv)
         self.assertEqual(info.get("label"), info.get("wanted"),
                          "renamed %s's pane to a name that is not its wanted name: %s" % (info.get("seat"), argv))
+
+
+class StartsCheck:
+    """Design 32.1 for one command's calls: a second ``agent start`` to a pane only right after
+    a ``process-info`` read of it that showed a bare shell, with no successful ``agent get`` of
+    it in between, and never a third. Starts herdr refused as busy, or rejected as a usage
+    error (an older herdr without ``--timeout``), started nothing and do not count."""
+
+    def __init__(self, case: "FleetCase"):
+        self.case = case
+        self.count: Dict[str, int] = {}
+        self.shell: Dict[str, bool] = {}   # pane -> its last process-info read showed a bare shell
+
+    def see(self, argv: List[str], info: Dict, code: int) -> None:
+        if argv[:2] == ["pane", "process-info"] and code == 0 and info.get("pane"):
+            self.shell[info["pane"]] = bool(info.get("shell"))
+        elif argv[:2] == ["agent", "get"] and code == 0 and info.get("pane"):
+            self.shell[info["pane"]] = False
+        elif (argv[:2] == ["agent", "start"] and "--pane" in argv and "--help" not in argv and not info.get("busy")
+              and not info.get("usage")):
+            pane = argv[argv.index("--pane") + 1]
+            self.count[pane] = self.count.get(pane, 0) + 1
+            if self.count[pane] > 1:
+                self.case.assertLessEqual(self.count[pane], 2, "a third agent start in %s: %s" % (pane, argv))
+                self.case.assertTrue(self.shell.get(pane), "a second agent start in %s without a process-info read "
+                                     "showing its bare shell first: %s" % (pane, argv))
+            self.shell[pane] = False
 
 
 class KeysCheck:

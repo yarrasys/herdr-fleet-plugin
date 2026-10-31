@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import fcntl
+import json
 import os
 import re
 import secrets
@@ -46,7 +47,7 @@ NEW, CUR = "new", "cur"
 ID_RE = re.compile(r"^(\d{8}T\d{6}Z)-([0-9a-f]{6})$")
 SHORT_RE = re.compile(r"^#?([0-9a-f]{6})$")
 TTL_RE = re.compile(r"^([1-9][0-9]*)([mhd])$")
-QUEUED_BY = ("refusal", "queue", "fyi")  # design 20.8; how a message was sent decides how it waits
+QUEUED_BY = ("refusal", "queue", "fyi", "kickoff")  # design 20.8, 32.6; how it was sent decides how it waits
 TTL_UNITS = {"m": 60, "h": 3600, "d": 86400}
 BATCH_CAP = 16 * 1024  # bytes of rendered messages one prompt may carry (18.4)
 LOCK_NAME = ".lock"
@@ -80,6 +81,7 @@ class Message:
     route_bytes: Optional[int] = None
     origin_send_order: Optional[int] = None
     destination_send_order: Optional[int] = None
+    kickoff_reason: Optional[str] = None  # design 32.6: a queued kickoff's reason (up, restart, swap)
 
     @property
     def short(self) -> str:
@@ -103,9 +105,15 @@ class Message:
         second keep the order they were written in), then the id."""
         return (self.id.split("-", 1)[0], self.mtime_ns, self.id)
 
+    @property
+    def is_kickoff(self) -> bool:
+        """A kickoff that could not be sent, waiting for the seat's next idle or done (32.6)."""
+        return self.queued_by == "kickoff"
+
     def delivery_key(self) -> Tuple[int, str, int, str]:
-        """The order a mailbox is delivered in (design 20.3): urgent first, then oldest first."""
-        return (0 if self.urgent else 1,) + self.sort_key()
+        """The order a mailbox is delivered in (design 20.3): a queued kickoff ahead of
+        everything (32.6), then urgent, then oldest first."""
+        return (0 if self.is_kickoff else 1 if self.urgent else 2,) + self.sort_key()
 
 
 def short_of(message_id: str) -> str:
@@ -261,7 +269,7 @@ def render_file(message: Message) -> str:
     for key, value in (("reply_to", message.reply_to), ("ttl", message.ttl), ("file", message.file),
                        ("timer", message.timer), ("scheduled_for", message.scheduled_for),
                        ("origin_fleet", message.origin_fleet), ("destination_fleet", message.destination_fleet),
-                       ("requested_to", message.requested_to)):
+                       ("requested_to", message.requested_to), ("kickoff_reason", message.kickoff_reason)):
         if value:
             lines.append("%s: %s" % (key, _one_line(value)))
     return "\n".join(lines) + "\n\n" + message.body
@@ -302,7 +310,7 @@ def parse_file(text: str, path: str = "", box: str = NEW) -> Message:
                    origin_fleet=fields.get("origin_fleet") or None,
                    destination_fleet=fields.get("destination_fleet") or None,
                    requested_to=fields.get("requested_to") or None, history_only=fields.get("history_only") == "true",
-                   route_bytes=route_bytes, **orders)
+                   route_bytes=route_bytes, kickoff_reason=fields.get("kickoff_reason") or None, **orders)
 
 
 def write(repo: str, message: Message, box: str = NEW) -> Message:
@@ -510,3 +518,83 @@ def queued(repo: str, now: Optional[datetime.datetime] = None) -> Dict[str, List
         if waiting:
             found[name] = waiting
     return found
+
+
+# -- waiting for mail (design 32.4) ----------------------------------------------------------
+
+WAITING_NAME = "waiting.json"
+
+
+def waiting_path(repo: str, name: str) -> str:
+    """``.herdr/inbox/<name>/waiting.json``: written by ``inbox --wait`` while it waits."""
+    return os.path.join(os.path.dirname(box_dir(repo, name, NEW)), WAITING_NAME)
+
+
+def write_waiting(repo: str, name: str, pid: int, since: str, timeout_ms: Optional[int]) -> str:
+    """Say that ``pid`` waits for ``name``'s mail (no message content); atomic. Returns the path."""
+    path = waiting_path(repo, name)
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    ensure_gitignore(os.path.join(repo, ".herdr"))
+    fd, tmp = tempfile.mkstemp(prefix=".waiting.", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"pid": int(pid), "since": since, "timeout_ms": timeout_ms}, handle)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return path
+
+
+def clear_waiting(repo: str, name: str, pid: int) -> None:
+    """Remove the waiting file when it is ``pid``'s own (a later wait may have replaced it)."""
+    path = waiting_path(repo, name)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return
+    if isinstance(data, dict) and data.get("pid") == pid:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def pid_alive(pid: object) -> bool:
+    """True when a process with this pid exists (signal 0); a pid owned by another user is alive."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def waiting(repo: str, name: str, now: Optional[datetime.datetime] = None) -> Optional[Dict]:
+    """A fresh waiting file of ``name`` ({pid, since, timeout_ms}) or None: none, unreadable,
+    its pid not alive, or past ``since`` + ``timeout_ms`` (design 32.4). Read-only."""
+    if not NAME_RE.match(name):
+        return None
+    try:
+        with open(waiting_path(repo, name), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not pid_alive(data.get("pid")):
+        return None
+    since = parse_time(data.get("since"))
+    if since is None:
+        return None
+    timeout = data.get("timeout_ms")
+    if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout >= 0:
+        if since + datetime.timedelta(milliseconds=timeout) <= (now or now_utc()):
+            return None
+    return data

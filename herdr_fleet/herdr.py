@@ -110,6 +110,7 @@ class Herdr:
     def __init__(self, binary: str, runner: Optional[Runner] = None):
         self.binary = binary
         self.runner = runner or subprocess_runner
+        self.start_timeout = True  # False once herdr rejected `agent start --timeout` (design 32.1, review 6)
 
     # -- transport -------------------------------------------------------
 
@@ -211,8 +212,18 @@ class Herdr:
 
     def agent_start(self, name: str, kind: str, pane: str, args: Sequence[str],
                     timeout_ms: Optional[int] = None) -> Dict:
-        argv = start_argv(name, kind, pane, args, timeout_ms)
-        return dict(self.run(*argv).get("agent") or {})
+        """``agent start``, with ``--timeout`` when given. A herdr that rejects that command
+        line (exit 2, ``usage``: it parsed nothing and typed nothing) gets the same start once
+        more without ``--timeout``, and no ``--timeout`` for the rest of this command, so its
+        own readiness wait applies (design 32.1 as the review amended it)."""
+        if timeout_ms and self.start_timeout:
+            try:
+                return dict(self.run(*start_argv(name, kind, pane, args, timeout_ms)).get("agent") or {})
+            except HerdrError as exc:
+                if exc.code != "usage":
+                    raise
+                self.start_timeout = False
+        return dict(self.run(*start_argv(name, kind, pane, args)).get("agent") or {})
 
     def agent_prompt(self, target: str, text: str) -> Dict:
         return self.run("agent", "prompt", target, text)
@@ -224,11 +235,20 @@ class Herdr:
         argv += ["--timeout", str(int(timeout_ms))]
         return dict(self.run(*argv).get("agent") or {})
 
-    def agent_read(self, target: str, lines: int) -> str:
+    def agent_read(self, target: str, lines: int, source: Optional[str] = None, ansi: bool = False) -> str:
         """The last ``lines`` screen lines of an agent (``agent read TARGET --lines N``), plain
         text like ``pane read``. ``quit_agent`` reads the exit confirmation with it (design
-        23.7) and ``peek`` prints it (23.6)."""
-        return self.text("agent", "read", target, "--lines", str(int(lines)))
+        23.7) and ``peek`` prints it (23.6). ``source`` (``visible`` or ``recent``, design
+        32.3) adds ``--source``; None leaves herdr's default (``recent``), which herdr refuses
+        with ``agent_not_idle`` for a working seat whose history is in the alternate screen.
+        ``ansi`` keeps the escape sequences (``--format ansi``): ``interrupt`` reads the prompt
+        line so, to tell a faint suggestion from typed text (32.8)."""
+        argv = ["agent", "read", target, "--lines", str(int(lines))]
+        if source:
+            argv += ["--source", source]
+        if ansi:
+            argv += ["--format", "ansi"]
+        return self.text(*argv)
 
     def agent_send_keys(self, target: str, keys: Sequence[str]) -> Dict:
         """Press ``keys`` in an agent's pane (``agent send-keys TARGET KEY...``): the only way
@@ -290,11 +310,15 @@ class Herdr:
     def pane_list(self, workspace_id: str) -> List[Dict]:
         return list(self.run("pane", "list", "--workspace", workspace_id).get("panes") or [])
 
-    def pane_read(self, pane_id: str, lines: int) -> str:
+    def pane_read(self, pane_id: str, lines: int, ansi: bool = False) -> str:
         """The last ``lines`` lines of a pane's screen (``pane read PANE --lines N``), which
-        herdr prints as plain text even in JSON mode. Only the presence guard reads them
-        (design 21.2, invariant 19): for the prompt line alone, never kept."""
-        return self.text("pane", "read", pane_id, "--lines", str(int(lines)))
+        herdr prints as plain text even in JSON mode; ``ansi`` keeps the escape sequences
+        (``--format ansi``, design 32.8). Only the presence guard reads them (design 21.2,
+        invariant 19): for the prompt line alone, never kept."""
+        argv = ["pane", "read", pane_id, "--lines", str(int(lines))]
+        if ansi:
+            argv += ["--format", "ansi"]
+        return self.text(*argv)
 
     def process_info(self, pane_id: str) -> Dict:
         return dict(self.run("pane", "process-info", "--pane", pane_id).get("process_info") or {})
@@ -373,6 +397,16 @@ class Herdr:
             raise HerdrError("bad_output", "plugin pane open returned no pane id", argv)
         return dict(pane)
 
+    def plugin_tab_open(self, plugin_id: str, entrypoint: str, workspace_id: str, cwd: str,
+                        env: Optional[Dict[str, str]] = None) -> Dict:
+        """Open a plugin pane in a new tab of ``workspace_id`` without moving focus (the
+        handover helper, design 32.5); return the new pane's record."""
+        argv = plugin_tab_argv(plugin_id, entrypoint, workspace_id, cwd, env)
+        pane = (self.run(*argv).get("plugin_pane") or {}).get("pane") or {}
+        if not pane.get("pane_id"):
+            raise HerdrError("bad_output", "plugin pane open returned no pane id", argv)
+        return dict(pane)
+
     def pane_layout(self, pane_id: str) -> Dict:
         """The layout snapshot of the tab holding ``pane_id`` (``result.layout``: ``area``,
         ``panes`` with ``rect``, ``splits`` with ``direction``, ``ratio`` and ``rect``)."""
@@ -418,6 +452,17 @@ def plugin_split_argv(plugin_id: str, entrypoint: str, target_pane: str, directi
     strip (design 19.1). ``--no-focus``: herdr's CLI focuses the new pane by default."""
     argv = ["plugin", "pane", "open", "--plugin", plugin_id, "--entrypoint", entrypoint, "--placement", "split",
             "--target-pane", target_pane, "--direction", direction, "--cwd", cwd]
+    for key in sorted(env or {}):
+        argv += ["--env", "%s=%s" % (key, env[key])]
+    return argv + ["--no-focus"]
+
+
+def plugin_tab_argv(plugin_id: str, entrypoint: str, workspace_id: str, cwd: str,
+                    env: Optional[Dict[str, str]] = None) -> List[str]:
+    """The exact ``plugin pane open --placement tab`` argv of the handover helper (design
+    32.5): a new tab of the seat's workspace, never focused."""
+    argv = ["plugin", "pane", "open", "--plugin", plugin_id, "--entrypoint", entrypoint, "--placement", "tab",
+            "--workspace", workspace_id, "--cwd", cwd]
     for key in sorted(env or {}):
         argv += ["--env", "%s=%s" % (key, env[key])]
     return argv + ["--no-focus"]

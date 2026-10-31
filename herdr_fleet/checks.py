@@ -1,7 +1,8 @@
 """Read-only inspection: drift (design 4.4), status (4.2, 16.3, 16.4, 16.7, 17.2,
 17.4, 18.6's watcher and queued lines, 19.1's watcher strip, 20.2's debt ages,
-20.5's ``blocked (4m)``, 20.8's queue ages) and doctor (4.7, 16.6, 17.3, 18.7's
-hooks line, 22.1's pane names line).
+20.5's ``blocked (4m)``, 20.8's queue ages, 32.4's inbox wait, 32.5's handover pane,
+32.6's queued kickoff) and doctor (4.7, 16.6, 17.3, 18.7's hooks line, 22.1's pane names
+line).
 
 Nothing here changes herdr. ``collect_status`` may rewrite the state file
 when it prunes ids herdr no longer knows, which every command does, and records
@@ -12,6 +13,7 @@ only read (``gitinfo``), and ``status --context`` only reads transcripts
 
 from __future__ import annotations
 
+import datetime
 import os
 import shlex
 import sys
@@ -141,10 +143,17 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
             seats[-1]["context"] = reading
             seats[-1]["restart_hint"] = bool(reading and hint and reading["tokens"] >= hint)
     recorded = seen.observe(ctx, {s["name"]: s["state"] for s in seats})  # design 20.5
+    now = inbox.now_utc()
     for item in seats:
         record_ = recorded.get(item["name"]) or {}
         if record_.get("state") == item["state"]:
             item["state_since"] = record_.get("since")
+        waiting = inbox.waiting(fleet.repo, item["name"], now) if item["state"] == "working" else None
+        if waiting:  # design 32.4: herdr says working, but the seat waits in `inbox --wait`
+            item["inbox_wait"] = {"since": waiting.get("since")}
+        queued_kickoff = messages.queued_kickoff(fleet.repo, item["name"])
+        if queued_kickoff is not None:  # design 32.6
+            item["kickoff_queued"] = queued_kickoff.short
     data = {
         "fleet_file": fleet.path,
         "repo": fleet.repo,
@@ -157,6 +166,8 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
         "owed": messages.owed(_log_entries(ctx)),
     }
     data["queued"], data["queued_oldest"] = queued_summary(fleet)
+    if state.handover:  # design 32.5 (prune_state above dropped one whose pane is gone)
+        data["handover"] = dict(state.handover)
     data["watcher"] = watchpane.watcher_status(ctx)
     data["cli"] = dict(build_identity.current())
     data["watcher"]["comparison"] = (build_identity.compare(data["cli"], data["watcher"]["launch"])
@@ -218,14 +229,36 @@ def _log_entries(ctx: Ctx) -> List[Dict]:
 
 def startup_label(seat: Dict) -> str:
     """STATE suffix for a seat flagged ``blocked_at_startup`` (never briefed): still
-    blocked, or past the prompt and waiting for ``kickoff`` (design 16.12)."""
-    if not seat.get("blocked_at_startup"):
-        return ""
-    if seat["state"] == "blocked":
+    blocked, or past the prompt and waiting for ``kickoff`` (design 16.12); a kickoff that
+    waits in its mailbox (32.6) is named instead of ``kickoff pending``."""
+    blocked = seat.get("blocked_at_startup")
+    if blocked and seat["state"] == "blocked":
         return " (blocked at startup)"
-    if seat["state"] in ("idle", "done", "working"):
+    if seat.get("kickoff_queued") and seat["state"] != "absent":
+        return " (kickoff queued #%s)" % seat["kickoff_queued"]
+    if blocked and seat["state"] in ("idle", "done", "working"):
         return " (kickoff pending)"
     return ""
+
+
+def state_label(seat: Dict, now: Optional[datetime.datetime] = None) -> str:
+    """The STATE cell: the state with its age (``blocked (4m)``), or ``working (inbox wait
+    3m)`` while the seat waits in ``inbox --wait`` (32.4), then the startup suffix."""
+    wait = seat.get("inbox_wait")
+    if wait:
+        age = inbox.age_since(wait.get("since"), now)
+        label = "%s (inbox wait%s)" % (seat["state"], " " + age if age else "")
+    else:
+        label = seen.label(seat["state"], {"state": seat["state"], "since": seat.get("state_since")})
+    return label + startup_label(seat)
+
+
+def handover_line(record: Dict) -> str:
+    """``handover: swap sample-orchestrator waiting in w2:p20 since 11:40`` (design 32.5)."""
+    when = inbox.parse_time(record.get("started"))
+    since = when.astimezone().strftime("%H:%M") if when else "?"
+    return "handover: %s %s waiting in %s since %s" % (record.get("op"), record.get("seat"), record.get("pane_id"),
+                                                       since)
 
 
 def folded(seats: Sequence[Dict], key: str) -> Optional[str]:
@@ -251,8 +284,7 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
         if s.get("restart_hint"):
             notes.append("consider restart")
         cells = {"SEAT": s["name"], "KIND": s["kind"], "LIVE": s["live_kind"] or "-", "PANE": s["pane_id"] or "-",
-                 "STATE": seen.label(s["state"], {"state": s["state"], "since": s.get("state_since")})
-                 + startup_label(s), "CONTEXT": context_size.context_label(s.get("context")),
+                 "STATE": state_label(s), "CONTEXT": context_size.context_label(s.get("context")),
                  "CWD": shorten(s.get("cwd") or "", home) or "-", "BRANCH": s.get("branch") or "",
                  "DRIFT": "; ".join((["adopted"] if s.get("adopted") else []) + s["drift"]) or "-",
                  "NOTES": "; ".join(notes)}
@@ -277,6 +309,8 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
             lines.append("  %s  %s  %s%s" % (c["name"], where, c["state"],
                                               "  (%s)" % c["note"] if c["note"] else ""))
     lines.extend(messages.owed_lines(data.get("owed", []), hint=True))  # design 23.4: how to settle it
+    if data.get("handover"):
+        lines.append(handover_line(data["handover"]))
     queued = queued_line(data)
     watcher = data.get("watcher") or {}
     if queued or watchpane.shown(watcher):  # design 18.6 and 19.1: who delivers, then what waits

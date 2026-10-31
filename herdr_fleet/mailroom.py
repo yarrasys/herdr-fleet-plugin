@@ -9,7 +9,8 @@
 - ``inbox`` is the pull side: the caller's own mailbox, listed with positions,
   read (printed, long bodies cut at ``inbox_print_max`` unless ``--full``, and
   moved to ``cur/``), waited for (``--wait``: a filesystem poll every second
-  until something arrives, then ``--read``; design 23.2), counted, or replayed
+  until something arrives, then ``--read``; design 23.2; ``waiting.json`` says so
+  while it waits, 32.4), counted, or replayed
   (``--history``: ``cur/`` files and log-only sends merged);
   ``--redeliver`` moves a message from ``cur/`` back to ``new/``. It runs no
   herdr command except the caller lookup, and none with ``--as``.
@@ -35,10 +36,11 @@ from herdr_fleet import crossfleet, inbox, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, resolve_caller
 from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
-from herdr_fleet.messages import (HOLD, OWNER, Drop, agent_state, caller_record, compose_prompt, delivered_entry,
+from herdr_fleet.messages import (HOLD, OWNER, Drop, agent_state, caller_record, compose_prompt,
                                   dry_hold, expire_due, first_line, notify_owner, place, prompt_mailbox, queued_in,
                                   read, record, selection_label, settle, since_label)
 from herdr_fleet.seats import SEND_ALLOWED, SETTLED, state_words
+from herdr_fleet.state import now_iso
 
 # -- deliver ---------------------------------------------------------------------------------
 
@@ -199,7 +201,8 @@ def lookup_caller(ctx: Ctx, as_name: Optional[str]) -> str:
     return name
 
 
-REASON_TAGS = {"refusal": "[on refusal]", "queue": "[queued]", "fyi": "[fyi]"}  # design 20.8
+REASON_TAGS = {"refusal": "[on refusal]", "queue": "[queued]", "fyi": "[fyi]",  # design 20.8
+               "kickoff": "[kickoff]"}                                            # design 32.6
 
 
 def tags(message: Message) -> str:
@@ -244,17 +247,26 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
     if history is not None:
         return _history(ctx, caller, history, as_json, limit)
     deadline = None if timeout_ms is None else ctx.clock.monotonic() + timeout_ms / 1000.0
-    while True:
-        if wait and not _await_mail(ctx, caller, deadline):
-            if as_json:
-                ctx.say("[]")
-                ctx.warn("nothing arrived for %s in %s" % (caller, wait_label(timeout_ms or 0)))
-            else:
-                ctx.say("nothing arrived in %s" % wait_label(timeout_ms or 0))
-            return EXIT_PARTIAL
-        messages = _take(ctx, caller, read_all)
-        if messages or not wait:  # empty after the wait: the watcher took it first; wait on
-            break
+    if wait:  # design 32.4: say that this process waits, for status and the board; gone whatever ends it
+        try:
+            inbox.write_waiting(repo, caller, os.getpid(), now_iso(), timeout_ms)
+        except OSError as exc:
+            ctx.warn("cannot write %s: %s" % (inbox.waiting_path(repo, caller), exc))
+    try:
+        while True:
+            if wait and not _await_mail(ctx, caller, deadline):
+                if as_json:
+                    ctx.say("[]")
+                    ctx.warn("nothing arrived for %s in %s" % (caller, wait_label(timeout_ms or 0)))
+                else:
+                    ctx.say("nothing arrived in %s" % wait_label(timeout_ms or 0))
+                return EXIT_PARTIAL
+            messages = _take(ctx, caller, read_all)
+            if messages or not wait:  # empty after the wait: the watcher took it first; wait on
+                break
+    finally:
+        if wait:
+            inbox.clear_waiting(repo, caller, os.getpid())
     if count:
         ctx.say(json.dumps({"name": caller, "count": len(messages)}) if as_json else str(len(messages)))
     elif as_json:
@@ -280,10 +292,8 @@ def _take(ctx: Ctx, name: str, read_all: bool) -> List[Message]:
     with inbox.locked(repo, name):
         expire_due(ctx, name)
         messages = queued_in(ctx, name)
-        if read_all:
-            for message in messages:
-                inbox.move(repo, message, CUR)
-                record(ctx, delivered_entry(message, "inbox"))
+        if read_all:  # a queued kickoff read this way counts as sent (32.6), logged ahead of the rest
+            settle(ctx, messages, "inbox", "sent")
     return messages
 
 
@@ -492,9 +502,8 @@ def _hook_output(ctx: Ctx, which: str, stdin: TextIO) -> Optional[str]:
         waiting = queued_in(ctx, name)
         if all(m.fyi for m in waiting):
             return None  # nothing, or only FYIs: an FYI never costs a turn (18.12)
-        batch = inbox.render_batch(waiting)
-        size = inbox.size_of(batch)
-        if size > inbox.BATCH_CAP or len(batch) > HOOK_CAP_CHARS:
+        batch, size, pointer = compose_prompt(waiting)  # a queued kickoff first and verbatim (32.6)
+        if pointer or len(batch) > HOOK_CAP_CHARS:
             return _hook_json(which, inbox.pointer_text(waiting, size))  # the files stay queued
         settle(ctx, waiting, "hook", "sent")
     return _hook_json(which, batch)

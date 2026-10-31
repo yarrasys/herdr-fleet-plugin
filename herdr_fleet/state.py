@@ -3,7 +3,8 @@
 It records, per seat, the pane the seat lives in, whether herdr-fleet created
 that pane, the kind and args the seat was started with, and timestamps; for
 the fleet, the workspace and whether herdr-fleet created it; and the watcher
-strip ``up`` opened (``"watch"``, design 19), which is never a seat. Pane and
+strip ``up`` opened (``"watch"``, design 19) and the handover helper (``"handover"``, design
+32.5), neither ever a seat. Pane and
 workspace ids are valid for one herdr server, so ``prune_state`` drops ids
 herdr no longer knows. Writes are atomic (temp file in ``.herdr`` then
 rename) and keep ``.herdr/.gitignore`` ignoring the state file.
@@ -28,7 +29,8 @@ from typing import Dict, Iterator, List, Mapping, Optional
 from herdr_fleet.herdr import Herdr, HerdrError
 
 STATE_NAME = "fleet.state.json"
-IGNORED = (STATE_NAME, "messages.jsonl", "inbox/", "watch.lock", "watch.log", "timers.state.json", "timers.lock")
+IGNORED = (STATE_NAME, "messages.jsonl", "inbox/", "watch.lock", "watch.log", "timers.state.json", "timers.lock",
+           "handover/")
 VERSION = 1
 
 
@@ -109,6 +111,22 @@ class State:
 
     def drop_watch(self) -> None:
         if self.data.pop("watch", None) is not None:
+            self.dirty = True
+
+    @property
+    def handover(self) -> Optional[Dict]:
+        """The handover helper pane (design 32.5): ``{"pane_id", "created_pane", "seat", "op",
+        "started"}`` or None. Never a seat; one per fleet."""
+        entry = self.data.get("handover")
+        return entry if isinstance(entry, dict) and entry.get("pane_id") else None
+
+    def set_handover(self, pane_id: str, seat: str, op: str, started: str) -> None:
+        self.data["handover"] = {"pane_id": pane_id, "created_pane": True, "seat": seat, "op": op,
+                                 "started": started}
+        self.dirty = True
+
+    def drop_handover(self) -> None:
+        if self.data.pop("handover", None) is not None:
             self.dirty = True
 
     @property
@@ -231,6 +249,21 @@ def mark_notified(repo: str, name: str, since: str) -> None:
             _write(path, data)
 
 
+def mark_kicked_off(repo: str, name: str, when: str) -> None:
+    """Design 32.6: a queued kickoff was delivered. Set the seat's ``last_kickoff_at`` and
+    ``blocked_at_startup = false`` and nothing else, read fresh and rewritten under the lock
+    (the watcher delivers it, and must not write back the state it loaded at its start)."""
+    path = state_path(repo)
+    if not os.path.exists(path):
+        return
+    with locked(os.path.dirname(path)):
+        data = _read(path)
+        entry = ((data or {}).get("agents") or {}).get(name)
+        if isinstance(entry, dict):
+            entry.update(last_kickoff_at=when, blocked_at_startup=False)
+            _write(path, data)
+
+
 def _write(path: str, data: Dict) -> None:
     folder = os.path.dirname(path)
     fd, tmp = tempfile.mkstemp(prefix=".fleet.state.", suffix=".tmp", dir=folder)
@@ -303,6 +336,17 @@ def prune_state(state: State, herdr: Herdr) -> List[str]:
             messages.append("state: dropped the watcher pane %s (no longer exists)" % strip)
     elif "watch" in state.data:
         state.drop_watch()
+    helper = state.handover
+    if helper:  # design 32.5: a handover pane that is gone is dropped too
+        try:
+            herdr.pane_get(str(helper["pane_id"]))
+        except HerdrError as exc:
+            if "not_found" not in exc.code:
+                raise
+            state.drop_handover()
+            messages.append("state: dropped the handover pane %s (no longer exists)" % helper["pane_id"])
+    elif "handover" in state.data:
+        state.drop_handover()
     workspace = state.workspace_id
     if workspace:
         try:
