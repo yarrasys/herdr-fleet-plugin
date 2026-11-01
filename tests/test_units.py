@@ -313,6 +313,12 @@ class ProcessInfo(unittest.TestCase):
         self.assertEqual(quit_command(seat(kind="agy", quit="/bye"), "agy", {}), "/bye")
         self.assertEqual(quit_command(seat(kind="agy"), "agy", {"agy": "/q"}), "/q")
 
+    def test_kimi_quits_with_slash_exit_by_default(self):
+        # design 34: Kimi Code CLI 2.4.1 exits on `/exit` through agent prompt
+        self.assertEqual(quit_command(seat(kind="kimi"), "kimi", {}), "/exit")
+        self.assertEqual(quit_command(seat(kind="kimi", quit="/bye"), "kimi", {}), "/bye")
+        self.assertEqual(quit_command(seat(kind="kimi"), "kimi", {"kimi": "/q"}), "/q")
+
 
 if __name__ == "__main__":
     unittest.main()

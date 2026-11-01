@@ -180,6 +180,7 @@ Default quit commands, overridable per seat (`quit = "..."`) or per kind in `$HE
 | copilot | `/exit` |
 | pi | `/exit` |
 | agy | `/exit` |
+| kimi | `/exit` |
 
 Any other kind without a configured command: refuse to quit, with the config hint.
 
@@ -1899,3 +1900,9 @@ Live, on scratch fleets with an absent seat (so nothing could be prompted) and `
 - the owner's own drop and bulk `ack` (automated tests only);
 - a routed FYI expiring at its destination;
 - the board's dim FYI styling on a real terminal.
+
+## 34. Kimi quits with `/exit` (0.18.1)
+
+`kimi` joins the default quit table (section 6) with `/exit`. Before this, a seat with `kind = "kimi"` and no `quit` key was refused by `restart`, `swap` and `down`, and `doctor` warned about it, so every Kimi seat needed `quit = "/exit"` in its fleet entry. A seat's own `quit` key and the plugin config's `[quit]` table still take precedence, as for every kind.
+
+Verified live on 2 November 2026 (herdr 0.9.5, Kimi Code CLI 2.4.1). With no `quit` key on a Kimi seat, `doctor` printed `ok quit …: /exit (kimi)`, and `restart` reported `quit with /exit`, started the seat in the same pane and briefed it.

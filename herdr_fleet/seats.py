@@ -69,6 +69,7 @@ DEFAULT_QUIT: Dict[str, str] = {
     "copilot": "/exit",
     "pi": "/exit",
     "agy": "/exit",
+    "kimi": "/exit",
 }
 
 # Design 21.2: the first non-blank character of each kind's prompt line, as `pane read`
