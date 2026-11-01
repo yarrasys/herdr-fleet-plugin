@@ -56,6 +56,7 @@ Tests are the executable coverage inventory. For the principal areas, start with
 | Daily timers, calendar/fallback and durable queue recovery | `test_section30.py` |
 | Starter examples and combined seat/contact capacity | `test_section27.py` |
 | Switching a seat's agent: lost and slow starts, held quits, `peek` of a working seat, `inbox --wait` shown as waiting, `--handover`, queued kickoffs, help, Claude Code's faint suggestion | `test_section32.py` |
+| Queues that read true: `fyi_ttl` expiry and the watcher's sweep, FYIs counted apart, mailboxes no seat reads, `inbox --drop`, `ack --older-than --reason`, stale debts, `--fleet` in printed inbox commands | `test_section33.py` |
 | Claude/Codex transcript usage, windows and cache | `test_context.py`, `test_section29.py` |
 | Git/permissions and command entrypoints | `test_worktrees.py`, `test_permissions.py`, `test_status_doctor.py`, `test_manifest.py`, `test_cli_subprocess.py` |
 

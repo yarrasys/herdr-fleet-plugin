@@ -392,7 +392,8 @@ class AckReason(S23):
     def test_reason_goes_with_ids_only(self):
         ident = self.debt()
         for argv in (["sample-orchestrator", "--reason", "x"], ["--all", "--reason", "x"],
-                     ["--older-than", "1m", "--reason", "x"], ["#" + ident[-6:], "--reason", " "]):
+                     ["sample-orchestrator", "--older-than", "1m", "--reason", "x"],  # 33.4: no names in that form
+                     ["#" + ident[-6:], "--reason", " "]):
             with self.subTest(argv=argv):
                 self.assertEqual(self.run_cli("ack", "--as", "sample-dev", *argv)[0], 2)
 

@@ -20,6 +20,10 @@ same directory, then rename) and never modified; delivery is a rename from
 ``new/`` to ``cur/``. ``locked`` serialises deliveries to one mailbox, so two
 commands flushing it at once never prompt the same message twice.
 
+A message is due once its own ``ttl`` has passed (18.4) or, for an FYI without one, once
+its ``time`` plus the fleet's ``fyi_ttl`` has (33.1): ``is_due`` decides both, and every
+caller passes the window of the fleet that holds the mailbox.
+
 Pure file work: no herdr command and no message log here. ``messages`` and
 ``mailroom`` log what these functions move. Bodies are read only to render a
 batch, a listing or a history (invariant 15).
@@ -184,12 +188,32 @@ def age_since(text: object, now: Optional[datetime.datetime] = None) -> Optional
     return age_label(((now or now_utc()) - when).total_seconds())
 
 
-def is_due(message: Message, now: datetime.datetime) -> bool:
-    """True when the message has a ttl and it has passed."""
-    if not message.ttl:
-        return False
-    limit = parse_time(message.ttl)
-    return limit is not None and limit <= now
+def due_by(message: Message, now: datetime.datetime, fyi_ttl: Optional[int]) -> Optional[str]:
+    """Why a queued message is due, or None: ``ttl`` when its own ttl has passed (18.4), or
+    ``fyi_ttl`` for an FYI without a ttl of its own once the fleet's ``fyi_ttl`` seconds
+    have passed since the later of its ``time`` and its file's modification time (33.1;
+    None is ``"off"``; ``--redeliver`` sets the modification time, so a redelivered FYI
+    gets a fresh window). A ttl of its own always wins; a queued kickoff (32.6) and timer
+    mail (30) never take the fleet's window."""
+    if message.ttl:
+        limit = parse_time(message.ttl)
+        return "ttl" if limit is not None and limit <= now else None
+    if not message.fyi or fyi_ttl is None or message.is_kickoff or message.timer:
+        return None
+    sent = parse_time(message.time)
+    if sent is None:
+        return None
+    if message.mtime_ns:
+        sent = max(sent, datetime.datetime.fromtimestamp(message.mtime_ns / 1e9, datetime.timezone.utc))
+    if sent + datetime.timedelta(seconds=fyi_ttl) > now:
+        return None
+    return "fyi_ttl"
+
+
+def is_due(message: Message, now: datetime.datetime, fyi_ttl: Optional[int]) -> bool:
+    """True when the message is past its ttl, or an FYI past the fleet's ``fyi_ttl`` (33.1).
+    Every caller passes the window of the fleet that holds the mailbox."""
+    return due_by(message, now, fyi_ttl) is not None
 
 
 # -- paths and ids ------------------------------------------------------------------------
@@ -387,6 +411,15 @@ def all_messages(repo: str, warnings: Optional[List[str]] = None) -> List[Messag
     return sorted(found, key=Message.sort_key)
 
 
+def touch(message: Message, when: datetime.datetime) -> Message:
+    """Set the file's modification time to ``when`` (design 33.1: ``--redeliver`` gives an
+    FYI a fresh ``fyi_ttl`` window). Metadata only: the file is never rewritten."""
+    stamp = int(when.timestamp() * 1e9)
+    os.utime(message.path, ns=(stamp, stamp))
+    message.mtime_ns = os.stat(message.path).st_mtime_ns
+    return message
+
+
 def move(repo: str, message: Message, box: str) -> Message:
     """Move a message file to ``box`` of its mailbox (a rename; the file is never rewritten)."""
     folder = box_dir(repo, message.to, box)
@@ -395,6 +428,31 @@ def move(repo: str, message: Message, box: str) -> Message:
     os.rename(message.path, target)
     message.path, message.box = target, box
     return message
+
+
+@contextlib.contextmanager
+def try_locked(repo: str, name: str) -> Iterator[bool]:
+    """The mailbox's lock if nobody holds it now: yields True while held, False (and holds
+    nothing) when it is busy. Never waits and creates no directory: the watcher's sweep
+    (33.1) uses it only for a mailbox that already has queued files."""
+    folder = os.path.dirname(box_dir(repo, name, NEW))
+    try:
+        fd = os.open(os.path.join(folder, LOCK_NAME), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        yield False
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 @contextlib.contextmanager
@@ -509,15 +567,35 @@ def size_label(size: int) -> str:
 # -- summaries ----------------------------------------------------------------------------------
 
 
-def queued(repo: str, now: Optional[datetime.datetime] = None) -> Dict[str, List[Message]]:
-    """Queued messages per mailbox, without those past their ttl (read-only: nothing moves)."""
+def queued(repo: str, fyi_ttl: Optional[int], now: Optional[datetime.datetime] = None) -> Dict[str, List[Message]]:
+    """Queued messages per mailbox, without those that are due (past their ttl, or an FYI
+    past ``fyi_ttl``, 33.1). Read-only: nothing moves."""
     now = now or now_utc()
     found: Dict[str, List[Message]] = {}
     for name in mailboxes(repo):
-        waiting = [m for m in read_box(repo, name, NEW) if not is_due(m, now)]
+        waiting = [m for m in read_box(repo, name, NEW) if not is_due(m, now, fyi_ttl)]
         if waiting:
             found[name] = waiting
     return found
+
+
+def split_fyi(messages: Sequence[Message]) -> Tuple[List[Message], List[Message]]:
+    """(actionable, FYIs), each in the order given (design 33.2): FYIs are counted apart;
+    everything else, a queued kickoff included, is actionable."""
+    return [m for m in messages if not m.fyi], [m for m in messages if m.fyi]
+
+
+def count_label(name: str, actionable: int, fyi: int, age: Optional[str], unread: bool = False) -> str:
+    """One mailbox in a ``queued:`` line (design 20.8 as 33.2 amends it): ``sample-dev 2
+    (oldest 9m, +1 fyi)``, ``sample-reviewer 1 fyi``. ``age`` is that of the oldest
+    actionable message, or of the oldest FYI when there is none, and is shown for two or
+    more; an ``unread`` mailbox (33.3) ends ``(no seat or contact)``."""
+    if actionable:
+        inner = (["oldest %s" % age] if age and actionable > 1 else []) + (["+%d fyi" % fyi] if fyi else [])
+        text = "%s %d%s" % (name, actionable, " (%s)" % ", ".join(inner) if inner else "")
+    else:
+        text = "%s %d fyi%s" % (name, fyi, " (oldest %s)" % age if age and fyi > 1 else "")
+    return text + (" (no seat or contact)" if unread else "")
 
 
 # -- waiting for mail (design 32.4) ----------------------------------------------------------

@@ -86,9 +86,10 @@ class Row:
     index: int = 0                  # file order
     age: Optional[float] = None     # seconds in that state, as far as herdr-fleet knows
     doing: str = ""                 # the title while working; the dialog's first line while blocked
-    queued: int = 0
-    oldest: Optional[float] = None  # age of the oldest queued message
-    next_id: str = ""               # the next message in delivery order
+    queued: int = 0                 # queued messages that are not FYIs (a queued kickoff counts; 33.2)
+    oldest: Optional[float] = None  # age of the oldest of them
+    fyi: int = 0                    # queued FYIs, counted apart (design 33.2)
+    next_id: str = ""               # the next of them in delivery order
     next_from: str = ""
     next_line: str = ""
     note: str = ""                  # from the watcher: `holding: owner typing`, `retrying in 45 s`, ...
@@ -131,8 +132,6 @@ class Board:
     rows: List[Row] = field(default_factory=list)
     contacts: List[Row] = field(default_factory=list)
     watching: Optional[float] = None
-    owner_count: int = 0
-    owner_oldest: Optional[float] = None
     owner_id: str = ""
     owner_from: str = ""
     owner_line: str = ""
@@ -147,6 +146,7 @@ class Board:
     selected: Optional[str] = None   # set by the driver: the selected seat's name, or HEADER
     notice: str = ""                 # set by the driver: a confirmation, the help line, the `q` line
     hints: str = ""                  # set by the driver: the root view's key hints (design 25.1)
+    queue_counts: List[str] = field(default_factory=list)  # the fleet page's `queued:` parts, status form (33.2)
 
 
 class Cache:
@@ -243,11 +243,14 @@ def _age(when: object, now: datetime.datetime) -> Optional[float]:
 
 
 def _queue(row: Row, messages: Sequence[inbox.Message], ws: WatcherState, now: datetime.datetime) -> None:
-    row.queued = len(messages)
-    if messages:
-        oldest = min(messages, key=inbox.Message.sort_key)
+    """The queue cell's facts (design 24.2, 33.2): FYIs are counted apart, and the age and
+    the next message are those of the rest."""
+    actionable, fyis = inbox.split_fyi(messages)
+    row.queued, row.fyi = len(actionable), len(fyis)
+    if actionable:
+        oldest = min(actionable, key=inbox.Message.sort_key)
         row.oldest = _age(oldest.time, now)
-        head = messages[0]  # delivery order: urgent first, then oldest first
+        head = actionable[0]  # delivery order: a queued kickoff, then urgent, then oldest first
         row.next_id, row.next_from, row.next_line = head.short, head.sender, first_line(head.body)
     if row.name in ws.holds:
         row.note = "holding: %s" % hold_reason(ws.holds[row.name])
@@ -295,6 +298,21 @@ def _dialog(ctx, name: str) -> List[str]:
     return lines
 
 
+def queue_counts(fleet, waiting: Dict[str, List[inbox.Message]], now: datetime.datetime) -> List[str]:
+    """Every non-empty mailbox as ``status`` counts it (design 33.2): seats, contacts, other
+    names (``(no seat or contact)``, 33.3), then ``owner``."""
+    order = [s.name for s in fleet.seats] + [c.name for c in fleet.contacts]
+    names = [n for n in order if n in waiting] + sorted(n for n in waiting if n not in order and n != OWNER)
+    names += [OWNER] if OWNER in waiting else []
+    parts = []
+    for name in names:
+        actionable, fyis = inbox.split_fyi(waiting[name])
+        oldest = min(actionable or fyis, key=inbox.Message.sort_key)
+        parts.append(inbox.count_label(name, len(actionable), len(fyis), inbox.age_since(oldest.time, now),
+                                       name not in order and name != OWNER))
+    return parts
+
+
 def build(ctx, watcher_state: Optional[WatcherState] = None) -> Board:
     """The model of design 24.2. Total: a herdr or file error becomes the board's ``error``
     and the cells it would have filled stay empty."""
@@ -318,7 +336,7 @@ def build(ctx, watcher_state: Optional[WatcherState] = None) -> Board:
             states[seat.name] = str(agent.get("agent_status") or "unknown") if agent else "absent"
     records = seen.observe(ctx, states) if agents is not None else {}
     try:
-        waiting = inbox.queued(repo, now)
+        waiting = inbox.queued(repo, fleet.fyi_ttl, now)
     except OSError as exc:
         waiting = {}
         problems.append("cannot read the mailboxes: %s" % exc)
@@ -373,10 +391,9 @@ def build(ctx, watcher_state: Optional[WatcherState] = None) -> Board:
                   watching=ws.watching, waiting=len(ws.waiting), holding=len(ws.holds),
                   retrying=len([n for n, left in ws.retries.items() if left > 0]), event=ws.event,
                   threshold=threshold)
+    board.queue_counts = queue_counts(fleet, waiting, now)
     owner = waiting.get(OWNER, [])
     if owner:
-        board.owner_count = len(owner)
-        board.owner_oldest = _age(min(owner, key=inbox.Message.sort_key).time, now)
         board.owner_id, board.owner_from, board.owner_line = owner[0].short, owner[0].sender, first_line(owner[0].body)
     try:
         board.owner_newest = newest_to(repo, OWNER, cache.entries)
@@ -500,7 +517,21 @@ def queue_text(row: Row, width: int) -> str:
 
 
 def count_text(row: Row) -> str:
-    return "%d queued" % row.queued if row.queued else DASH
+    if row.queued:
+        return "%d queued" % row.queued
+    return "%d fyi" % row.fyi if row.fyi else DASH
+
+
+def queue_spans(row: Row, width: int) -> Line:
+    """The queue cell (design 24.3 as 33.2 amends it): ``queue_text`` for the messages that
+    are not FYIs, then `` +1 fyi`` in the dim style; ``1 fyi``, dim, for a row that holds
+    only FYIs. Unstyled spans; at most ``width`` cells."""
+    if not row.queued:
+        return [(cut(count_text(row), width), "dim" if row.fyi else "")]
+    tail = " +%d fyi" % row.fyi if row.fyi else ""
+    if tail and width - width_of(tail) >= width_of("%d queued" % row.queued):
+        return [(queue_text(row, width - width_of(tail)), ""), (tail, "dim")]
+    return [(queue_text(row, width), "")]
 
 
 def debt_text(row: Row, width: int) -> str:
@@ -560,9 +591,9 @@ def cell_spans(cell: str, row: Row, width: int, colours: bool, selected: bool, l
         spans.append((doing_text(row, room), "red bold" if row.state == "blocked" else
                       "green" if row.state == "working" else ""))
     elif cell == "queue":
-        spans.append((queue_text(row, room), ""))
+        spans.extend(queue_spans(row, room))
     elif cell == "count":
-        spans.append((cut(count_text(row), room), ""))
+        spans.append((cut(count_text(row), room), "" if row.queued or not row.fyi else "dim"))
     elif cell == "debt":
         spans.append((debt_text(row, room), ""))
     elif cell == "context":
@@ -1236,7 +1267,8 @@ class SeatPage(_Ringed):
             section("dialog", [PageRow("", line, "red bold") for line in row.dialog])
         now = inbox.now_utc()
         try:
-            waiting = [m for m in inbox.read_box(repo, self.name, inbox.NEW) if not inbox.is_due(m, now)]
+            waiting = [m for m in inbox.read_box(repo, self.name, inbox.NEW)
+                       if not inbox.is_due(m, now, ctx.fleet.fyi_ttl)]
         except OSError:  # an unreadable mailbox shows nothing
             waiting = []
         section("queue", [PageRow("", "#%s %s from %s %s%s" % (m.short, _hhmm(m.time), m.sender, tags(m),
@@ -1406,11 +1438,8 @@ class FleetPage(View):
             if left > 0:
                 lines.append("retrying    %s in %d s" % (name, int(round(left))))
         lines.extend(owed_lines(cache.owed_items, hint=True))
-        queued = [(r.name, r.queued) for r in model.rows + model.contacts if r.queued]
-        if model.owner_count:
-            queued.append((OWNER, model.owner_count))
-        if queued:
-            lines.append("queued: " + ", ".join("%s %d" % item for item in queued))
+        if model.queue_counts:  # design 33.2: the status form
+            lines.append("queued: " + ", ".join(model.queue_counts))
         for warning in list(fleet.warnings) + list(ws.warnings) + ([model.problems] if model.problems else []):
             lines.append("warning: %s" % warning)
         lines.append("drift, worktrees, hooks and doctor's checks: herdr-fleet status, herdr-fleet doctor")

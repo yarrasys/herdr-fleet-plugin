@@ -171,7 +171,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="with names: type the whole queue ahead to a seat that is working")
     p.add_argument("--dry-run", action="store_true", help="say what would be delivered and send nothing")
 
-    p = sub.add_parser("inbox", parents=[fleet], help="your own queued messages: --read, --wait, --count, --history",
+    p = sub.add_parser("inbox", parents=[fleet],
+                       help="your own queued messages: --read, --wait, --count, --history, --drop",
                        description="Your mailbox (.herdr/inbox/<you>): by default list what is queued. Runs no "
                                    "herdr command except finding who you are, and none with --as. Human output names the "
                                    "selected identity/fleet; JSON/count diagnostics go to stderr. Failed caller "
@@ -184,6 +185,8 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--history", metavar="NAME",
                         help="every delivered message between you and NAME, oldest first")
     action.add_argument("--redeliver", metavar="ID", help="queue a delivered message (#3f2a9c) again")
+    action.add_argument("--drop", action="store_true",
+                        help="move queued messages to cur/ undelivered (logged dropped; --redeliver brings one back)")
     action.add_argument("--hook", choices=("stop", "prompt"),
                         help="run as a Claude Code hook (installed by `hooks install`): reads the hook JSON on "
                              "stdin, prints hookSpecificOutput or nothing, always exits 0")
@@ -195,6 +198,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--full", action="store_true",
                    help="with --read or --history: print long messages in full (default: up to inbox_print_max "
                         "bytes, then the first lines and the file's path)")
+    p.add_argument("--fyi", dest="fyi_only", action="store_true", help="with --drop: only FYIs")
+    p.add_argument("--older-than", dest="older_than", metavar="DURATION",
+                   help="with --drop: only messages queued more than DURATION ago (30m, 2h, 1d)")
+    p.add_argument("--dry-run", action="store_true", help="with --drop: list what would go and move nothing")
     p.add_argument("--json", action="store_true", help="print JSON")
 
     p = sub.add_parser("watch", parents=[fleet], help="deliver queued messages as seats become idle (foreground)",
@@ -234,14 +241,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ack", parents=[fleet], help="settle replies you owe by hand; sends nothing",
                        description="Log an acknowledgement for each NAME whose message you owe a reply, so it "
                                    "stops awaiting; `ack #id --reason TEXT` closes the debt of that message "
-                                   "whoever owes it. Writes .herdr/messages.jsonl only; nothing is sent.")
+                                   "whoever owes it, and `ack --older-than D --reason TEXT` every debt older than D. "
+                                   "Writes .herdr/messages.jsonl only; nothing is sent.")
     p.add_argument("names", nargs="*", metavar="NAME", help="who you owe a reply (seat, contact, owner, ...)")
     p.add_argument("--all", dest="all_owed", action="store_true", help="every message you currently owe")
     p.add_argument("--older-than", dest="older_than", metavar="DURATION",
                    help="every message you owe that was delivered more than DURATION ago (30m, 2h, 1d); "
                         "names and ids restrict it")
     p.add_argument("--reason", metavar="TEXT",
-                   help="with message ids only: close each one's debt whoever owes it (logged with you as `by`)")
+                   help="with message ids, or with --older-than and no names: close each debt whoever owes it "
+                        "(logged with you as `by`)")
     p.add_argument("--as", dest="as_name", metavar="NAME",
                    help="who you are (default: your pane's agent, or the contact it matches; owner outside Herdr or from a verified shell; lookup failures need --as NAME)")
     p.add_argument("--dry-run", action="store_true", help="list what would be acknowledged and write nothing")
@@ -420,12 +429,13 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         return op_ack(ctx, args.names, args.all_owed, args.as_name, args.older_than, args.reason)
     if command == "inbox":  # your mailbox; herdr only to learn who you are (without --as)
         if args.hook:  # a Claude Code hook: silent on every error (design 18.7)
-            if args.as_name or args.json or args.full or args.wait or args.timeout is not None:
-                raise UsageError("--hook takes neither --as, --json, --full nor --wait: the seat is the hook's own "
-                                 "pane")
+            if (args.as_name or args.json or args.full or args.wait or args.timeout is not None or args.fyi_only
+                    or args.older_than is not None or args.dry_run):
+                raise UsageError("--hook takes neither --as, --json, --full, --wait nor --drop's options: the seat "
+                                 "is the hook's own pane")
             return op_inbox_hook(ctx, args.hook, stdin)
         return op_inbox(ctx, args.as_name, args.read, args.count, args.history, args.redeliver, args.json,
-                        args.full, args.wait, args.timeout)
+                        args.full, args.wait, args.timeout, args.drop, args.fyi_only, args.older_than)
     if command == "hooks":  # edits .claude/settings.local.json only; no herdr command
         return op_hooks(ctx, args.remove)
     if command == "watch":  # the caller's pane plays no part: no caller lookup

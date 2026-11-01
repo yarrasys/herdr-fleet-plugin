@@ -72,8 +72,9 @@ from herdr_fleet.context import EXIT_OK, Ctx, OpError, UsageError
 from herdr_fleet.fleetfile import FleetError
 from herdr_fleet.herdr import HerdrError, describe
 from herdr_fleet.inbox import NEW, Message
-from herdr_fleet.mailroom import candidates, deliver_one, expire_all, herdr_target
-from herdr_fleet.messages import OWNER, Drop, agent_state, notify_owner, op_ack, prompt_mailbox, since_label
+from herdr_fleet.mailroom import candidates, deliver_one, expire_all, herdr_target, sweep_expired
+from herdr_fleet.messages import (OWNER, Drop, agent_state, fleet_flag, notify_owner, op_ack, prompt_mailbox,
+                                  since_label)
 from herdr_fleet.seats import SETTLED, state_words
 from herdr_fleet.state import ensure_gitignore, mark_notified, now_iso
 
@@ -87,6 +88,7 @@ DELIVERY_GRACE_S = 60.0     # on exit, how long a delivery in flight may take to
 EXIT_GRACE_S = 1.0          # on exit, how long waiters blocked in `agent wait` are given
 BLOCKED_SCAN_S = 30.0       # with notify_blocked_after: how often `agent list` is read for blocked seats
 HOLD_RECHECK_S = 3.0        # design 21.2: while the owner types in a seat's pane, look again this often
+EXPIRE_SWEEP_S = 300.0      # design 33.1: how often the watcher expires what is due in every mailbox
 LOG_NAME = "watch.log"      # design 24.1: in board mode the lines go here (and to the footer)
 BOARD_REFRESH_S = 5.0       # design 24.2: the board's model is rebuilt this often, and after every event
 KEY_POLL_S = 0.25           # how long one read of the keyboard waits, so events show at once
@@ -269,7 +271,7 @@ def _watch_once(ctx: Ctx) -> int:
     failed or may not have arrived, as ``deliver``; else 0."""
     agents = ctx.herdr.agent_list()
     expire_all(ctx)
-    waiting = inbox.queued(ctx.fleet.repo)
+    waiting = inbox.queued(ctx.fleet.repo, ctx.fleet.fyi_ttl)
     order = candidates(ctx, waiting) + ([OWNER] if waiting.get(OWNER) else [])
     if not order:
         ctx.say("nothing to deliver")
@@ -286,7 +288,7 @@ def _watch_once(ctx: Ctx) -> int:
             if drop.status == "typing":
                 typing.append(name)
     if ctx.fleet.timers:
-        pending = [m for queue in inbox.queued(ctx.fleet.repo).values() for m in queue]
+        pending = [m for queue in inbox.queued(ctx.fleet.repo, ctx.fleet.fyi_ttl).values() for m in queue]
         for line in timers.waiting_lines(pending, timer_states, typing):
             ctx.say(line)
     return max(codes)
@@ -302,8 +304,8 @@ def notify_delivery(ctx: Ctx, name: str, drop: Drop) -> None:
     if drop.status == "sent":
         ctx.notify("delivered %d to %s" % (count, name), body, "none")
     elif drop.status == "unconfirmed":
-        ctx.notify("delivery to %s unconfirmed" % name, "%s; %d not resent (herdr-fleet inbox --redeliver ID)"
-                   % (drop.detail, count), "request")
+        ctx.notify("delivery to %s unconfirmed" % name, "%s; %d not resent (herdr-fleet inbox%s --redeliver ID)"
+                   % (drop.detail, count, fleet_flag(ctx)), "request")
     elif drop.status == "pointer":
         ctx.notify("pointed %s to %d queued messages" % (name, len(drop.waiting)), body, "none")
     elif drop.status == "failed":
@@ -392,6 +394,7 @@ class Watcher:
         self.trouble = ""                    # the last error of the loop itself, said once
         self.blocked_after = ctx.fleet.notify_blocked_after  # seconds, or None (design 20.5)
         self.next_scan = 0.0
+        self.next_sweep = 0.0                    # design 33.1: the first pass sweeps
         self.blocked_since: Dict[str, str] = {}  # seat -> since, when no state file records it
         self.notified: Set[str] = set()          # "seat since" of blocked episodes already notified
         # design 24: the board
@@ -549,7 +552,8 @@ class Watcher:
         with timers.cycle(self.ctx) as lines:
             for line in lines:
                 self.say(line)
-        waiting = inbox.queued(self.repo)
+        self.sweep()  # after the timer cycle has released its locks, before the mailboxes are read
+        waiting = inbox.queued(self.repo, self.ctx.fleet.fyi_ttl)
         if waiting.get(OWNER):
             self.owner(waiting[OWNER])
         if self.blocked_after and self.ctx.clock.monotonic() >= self.next_scan and not self.stopping:
@@ -582,6 +586,21 @@ class Watcher:
                 self.announced[name] = count
                 self.say("waiting on %s (%d queued)" % (name, count))
             self.start(name, target)
+
+    def sweep(self) -> None:
+        """Design 33.1: at most once every EXPIRE_SWEEP_S, expire what is due in every
+        mailbox whose lock is free (``mailroom.sweep_expired``: no herdr command, no timer
+        lock, no waiting for a lock). Never called with a mailbox lock held."""
+        if self.ctx.clock.monotonic() < self.next_sweep:
+            return
+        self.next_sweep = self.ctx.clock.monotonic() + EXPIRE_SWEEP_S
+        gone = sweep_expired(self.ctx)
+        if gone:
+            used = {reason for reasons in gone.values() for reason in reasons}
+            self.say("expired %d queued: %s (%s)"
+                     % (sum(len(reasons) for reasons in gone.values()),
+                        ", ".join("%s %d" % (name, len(reasons)) for name, reasons in gone.items()),
+                        ", ".join(r for r in ("ttl", "fyi_ttl") if r in used)))
 
     def reload_timers(self) -> None:
         """Timer-aware watchers reload in log mode too; pristine fleets keep their old path."""
@@ -706,7 +725,7 @@ class Watcher:
 
     def queued(self, name: str) -> List[Message]:
         now = inbox.now_utc()
-        return [m for m in inbox.read_box(self.repo, name, NEW) if not inbox.is_due(m, now)]
+        return [m for m in inbox.read_box(self.repo, name, NEW) if not inbox.is_due(m, now, self.ctx.fleet.fyi_ttl)]
 
     def deliver(self, name: str, target: str) -> Optional[Drop]:
         """The batch to an idle or done seat, as ``deliver`` does; None once stopping."""
@@ -1115,7 +1134,7 @@ class BoardView:
         self.stale = True
         try:
             agents = ctx.herdr.agent_list()
-            waiting = inbox.queued(w.repo)
+            waiting = inbox.queued(w.repo, w.ctx.fleet.fyi_ttl)
         except (HerdrError, OSError) as exc:
             w.say("cannot deliver: %s" % (describe(exc) if isinstance(exc, HerdrError) else exc), error=True)
             return
@@ -1144,7 +1163,7 @@ class BoardView:
         self.stale = True
         try:
             agents = ctx.herdr.agent_list()
-            waiting = list(inbox.queued(w.repo).get(name, []))
+            waiting = list(inbox.queued(w.repo, w.ctx.fleet.fyi_ttl).get(name, []))
         except (HerdrError, OSError) as exc:
             w.say("cannot deliver: %s" % (describe(exc) if isinstance(exc, HerdrError) else exc), error=True)
             return

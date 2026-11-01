@@ -201,7 +201,7 @@ These are enforced in code and covered by tests:
 8. `worktrees`, the `fleet file vs git` check and `--context` are read-only: no `git fetch`, no `git worktree prune`, no write under either provider's transcript root (`~/.claude` or `~/.codex` by default, extended by section 29), and no herdr command beyond `agent list`/`agent get`.
 9. `--context` extracts usage numbers and timestamps only; no transcript content is ever surfaced.
 10. `ack` and `--fyi` only write the message log; `ack` sends nothing.
-11. Queued messages are delivered only to `idle` or `done` seats, only through `safe_prompt`, and only by a plugin command that a person, an agent's own tool call, or a watcher invoked. Nothing the plugin spawns runs in the background: `watch` is a foreground process in a pane the owner can see and close, never a detached one. The owner starts it, or `up` does, in a visible plugin pane recorded in the state file and closed by `down --close-panes` (amended by 19.2). (Since 0.10.0 the only exceptions are `send --now` and `deliver NAME --now`, which type a message ahead to a `working` seat with the queue in front, always through `safe_prompt`; the 18.3, 18.11 and 20.8 typed-ahead deliveries were withdrawn by section 21.1.) Since 0.17.0 a seat's own `restart NAME --handover` or `swap NAME --handover` opens one visible helper tab that waits for that seat's turn to end and then runs that restart or swap, and nothing else (32.5); a kickoff that could not be sent waits in the mailbox and is delivered like a `queue` message (32.6).
+11. Queued messages are delivered only to `idle` or `done` seats, only through `safe_prompt`, and only by a plugin command that a person, an agent's own tool call, or a watcher invoked. Nothing the plugin spawns runs in the background: `watch` is a foreground process in a pane the owner can see and close, never a detached one. The owner starts it, or `up` does, in a visible plugin pane recorded in the state file and closed by `down --close-panes` (amended by 19.2). (Since 0.10.0 the only exceptions are `send --now` and `deliver NAME --now`, which type a message ahead to a `working` seat with the queue in front, always through `safe_prompt`; the 18.3, 18.11 and 20.8 typed-ahead deliveries were withdrawn by section 21.1.) Since 0.17.0 a seat's own `restart NAME --handover` or `swap NAME --handover` opens one visible helper tab that waits for that seat's turn to end and then runs that restart or swap, and nothing else (32.5); a kickoff that could not be sent waits in the mailbox and is delivered like a `queue` message (32.6). Since 0.18.0 a queued message leaves `new/` undelivered only through its own ttl (18.4), the fleet's `fyi_ttl` for an FYI without one (33.1, also in the watcher's sweep), `--drop-inbox` (18.5), `inbox --drop` (33.3), a newer kickoff replacing a queued one (32.6), a timer retiring its own message (30), or the refusal of the `send --now` that wrote it; each is logged, and none of them prompts or presses anything.
 12. The watcher never prompts a `blocked` or `unknown` seat, never answers a dialog, never redelivers an unconfirmed message, and never starts, restarts or quits anything.
 13. An agent is never asked to poll. Waits live in the herdr server (`agent wait`) or in a silent hook.
 14. A hook-delivered batch is the seat reading its own inbox inside its own process; the plugin never writes to an agent through a hook, and a hook prints nothing on any error.
@@ -1665,7 +1665,7 @@ Built into the working tree on 31 October 2026 (version 0.17.0), with 32.8 added
 14. **32.8.** `presence.read_screen` falls back to a plain `pane read` when herdr rejects `--format ansi` with a usage error (exit 2), so the guard still answers on a herdr without the option, without faint detection. `prompt_line` finds the line without escapes; for a faint-placeholder kind, if the glyph itself was drawn faint, what is left after dropping faint text is the line. `interrupt`'s Ctrl-U check reads `agent read NAME --lines 12 --format ansi`. `fake_herdr` decodes SGR 2/22/0 with its own code, so the harness judges a suggestion independently of the plugin.
 15. **Harness (32.9).** `tests/support.py` takes the caller pane from the command's own marker when the helper ran (its pane, not the seat's). It counts `agent start` calls per pane per command, ignoring busy answers. It allows the board's second, `--source visible` read only right after the failed read of the same `p`. Restart and swap may open only the `handover` tab of a `--handover` command. Existing tests whose expectations this section changes were updated: the `agent start` argv now includes `--timeout 15000`; the guard's and interrupt's reads include `--format ansi`; the `.gitignore` lists include `handover/`; the version is 0.17.0; the manifest pane set includes `handover`; and a blocked or refused kickoff is now queued (`test_inbox`, `test_up`).
 
-Second round, after review #85d22d (FIX; findings 1, 2, 3, 5, 6 and 7 and non-blocking N1, N4, N5, N6 and N7 accepted by the designer in #3f1007, plus the designer's own wording from the live smoke):
+Second round, after the first review (FIX; findings 1, 2, 3, 5, 6 and 7 and non-blocking N1, N4, N5, N6 and N7 accepted by the designer, plus the designer's own wording from the live smoke):
 
 16. **`--timeout` on an older herdr (finding 6).** `Herdr.agent_start` sends `--timeout 15000`. When herdr answers exit 2 (`usage`: it rejected the command line and started nothing), it sends the same start once more without `--timeout` and leaves the option off for the rest of that command. A later `timeout` is classified as before. `min_herdr_version` stays 0.9.4. The harness counts neither a busy answer nor a usage rejection as a start.
 17. **Wording (N4).** The first retry reports `(second attempt; the first start left a bare shell)`. The lost-twice line is `the start command did not run in PANE twice, or the agent exited at once; a quit agent may have left mouse tracking on there (README: troubleshooting); run herdr-fleet up NAME`. A second attempt whose fresh read finds the first start's agent coming up reports a plain `started - in PANE`: no second start was issued.
@@ -1691,5 +1691,211 @@ Second round, after review #85d22d (FIX; findings 1, 2, 3, 5, 6 and 7 and non-bl
 - **32.8.** Read-only, on idle Claude seats across the owner's fleets: 0.16.0's guard held two of them (`text in its input …`) whose prompt line was a faint suggestion (`❯\xa0\e[2m…`), one of them this fleet's own builder; the candidate let both through. The four other idle Claude seats passed in both versions.
 - **Second round.** On the reviewed code, a fresh scratch seat repeated 32.1 (19.2 s, with the new wording), a plain `restart` through the quit lock (6.2 s), and the 32.5 handover swap end to end. The handover pane found its own record, so the helper's preflight inside a tab plugin pane resolves that pane (review 5a).
 - **A pre-existing window, not new.** One `down` sent about 3 s after a kickoff found the seat still reported idle, and Claude Code dropped the `/exit` it received mid-turn; the plugin reported `did not exit within 20000 ms after /exit; … seat left alone`, as section 6 requires. 0.16.0 has the same window. docs/testing.md warns about it.
-- **Quit lock and the Stop hook.** The quit holds the seat's mailbox lock for up to the 5 s window plus `quit_timeout_ms`. The opt-in Claude Code Stop hook (18.7) waits on the same lock, so if a seat's hook is still running when its quit starts, the `/exit` waits in Claude Code's input until the hook gives up at its 10 s timeout, having moved nothing; the quit then succeeds within the default 20 s. A fleet with `quit_timeout_ms` under about 11 s and hooks installed could see that quit fail. Not changed in this release (review #921279).
+- **Quit lock and the Stop hook.** The quit holds the seat's mailbox lock for up to the 5 s window plus `quit_timeout_ms`. The opt-in Claude Code Stop hook (18.7) waits on the same lock, so if a seat's hook is still running when its quit starts, the `/exit` waits in Claude Code's input until the hook gives up at its 10 s timeout, having moved nothing; the quit then succeeds within the default 20 s. A fleet with `quit_timeout_ms` under about 11 s and hooks installed could see that quit fail. Not changed in this release (second review).
 - **Not verified live.** A real Codex menu (the `›` highlight is synthetic in the fake), herdr 0.9.4's handling of `--format` and `--timeout` (both have usage fallbacks, simulated in the fake only), a real mouse-mode pollution and the shell remedy, the faint suggestion on a focused pane (the guard may read a cursor cell as typed and hold, which fails closed), Python 3.8, and the stop paths named above.
+
+## 33. Queues that read true: FYI expiry, split counts, unread mailboxes, old debts (0.18.0)
+
+An audit of running fleets found that most queued messages were FYIs several days old, a few were requests to seats that were working at the time, and two requests sat in a mailbox named for no seat or contact, left over from before 31's routing. 18.3 lets an FYI travel only with the next real delivery to its mailbox, and FYIs carry no ttl by default, so a quiet seat keeps them indefinitely. `status` and the board print one count per mailbox, so a quiet fleet looked blocked. The same audit found fulfilled requests still listed as owed, one of them misattributed to `owner`, and an unread hint that drops `--fleet`. Nothing in this section prompts a seat or presses a key; it changes what is counted, what is printed, and when an FYI is moved to `cur/` undelivered.
+
+### 33.1 FYIs expire after `fyi_ttl`
+
+A new top-level fleet file key, `fyi_ttl`, takes the `--ttl` grammar (`30m`, `2h`, `1d`) or `"off"`; the default is `"24h"`. An FYI (`fyi: true`) without a `ttl` of its own is due once the fleet's `fyi_ttl` has passed since the later of its `time` and its file's modification time. A message's own `ttl` always wins, in either direction (`send --fyi --ttl 3d` keeps it for three days). A message that is not an FYI never gets the default, and neither does a queued kickoff (32.6) or timer mail.
+
+The rule is evaluated where 18.4's ttl is evaluated today (`inbox.is_due` and its callers), against the fleet that holds the mailbox, so it applies at once to FYIs queued before 0.18.0: they carry `time`, so no migration is needed. Read-only paths (`status`, the board, `doctor`, the unread note) stop counting a due FYI; nothing moves there.
+
+Moving it to `cur/`, logged `expired` with `via: "fyi_ttl"` (`delivery: "none"`, the shape of 18.4's ttl expiry, including whatever 31 mirrors for a routed message's terminal record), happens on the paths that already run `expire_due` under the mailbox lock (delivery, kickoff, `inbox`, `deliver`, the hooks). It also happens in a new watcher sweep: at most once every `EXPIRE_SWEEP_S` (300 s), between passes, for every mailbox under `.herdr/inbox/` that has files in `new/` (seats, contacts, `owner` and any other name). The sweep takes each mailbox's lock without waiting and skips a busy mailbox until the next sweep. It takes no timer lock, runs no herdr command and creates no directory.
+
+An expired FYI creates no debt and settles none, as today. Its first line stays in `log`, and its body in `cur/<id>.md` and on the board's message page (`inbox --history` lists delivered messages only, 20.1). `inbox --redeliver ID` queues it again with a fresh window: `--redeliver` sets the file's modification time to now. That is metadata only; message files are still never rewritten. A message past its own `ttl` keeps that ttl when redelivered, and the confirmation says it will expire again.
+
+### 33.2 Counts tell FYIs from requests
+
+Everywhere a queue is counted, FYIs are counted apart from the rest. A mailbox's actionable count is its queued messages that are not FYIs; a queued kickoff counts as actionable.
+
+- **`status`:** `queued: sample-dev 2 (oldest 9m, +1 fyi), sample-reviewer 1 fyi`. The age is that of the oldest actionable message, or of the oldest FYI in an FYI-only mailbox. JSON keeps `queued` (every queued message, for compatibility) and `queued_oldest`, and adds `queued_fyi` ({mailbox: count}).
+- **The board:** the queue cell counts actionable messages and names the next actionable one (`2 queued, oldest 3m  #id "…"`), followed by ` +1 fyi` in the dim style. An FYI-only row shows `1 fyi`, dim, and none of the styling that marks waiting work. The footer's `queued:` line uses the status form.
+- **The unread note:** the 23.1 note counts both, as `2 unread (+1 fyi) from …`.
+
+### 33.3 A mailbox nobody reads is named, and can be dropped
+
+A mailbox is **unread** when it has queued messages that are not due, and its name is no seat, no contact and not `owner` of the fleet.
+
+- **`status`:** its queued entry ends `(no seat or contact)`.
+- **`doctor`:** it warns, read-only: `inbox: NAME holds N queued (oldest AGE); it is no seat or contact here, so the watcher does not deliver it. Read it with herdr-fleet inbox --fleet PATH --as NAME --read, deliver it with herdr-fleet deliver NAME if NAME is a live agent, or (NAME or the owner) drop it with herdr-fleet inbox --fleet PATH --as NAME --drop`. Such a mailbox can be a live queue: 31 keeps a message for a live agent that has no fleet of its own in the sender's fleet, under the agent's name.
+
+`inbox --drop` is new and exclusive with `--read`, `--count`, `--history`, `--redeliver`, `--hook` and `--wait`. Under the mailbox lock, it moves every queued message of the selected mailbox to `cur/`, each logged `dropped` with `via: "inbox --drop"`. It sends nothing and prints one line per message: `dropped #id from SENDER (AGE): first line`, with ` (queued kickoff)` added for a 32.6 kickoff. `inbox --redeliver ID` brings one back.
+
+- `--older-than DURATION` keeps messages queued less than DURATION ago.
+- `--fyi` limits the drop to FYIs.
+- `--dry-run` lists what would go and moves nothing.
+
+The mailbox is selected as for `--read`: the caller, or `--as NAME`. `--drop` with `--as NAME` also runs the caller lookup, ignoring `--as`, for every mailbox, unread ones included. It drops a mailbox only when the caller resolves to that name, or to `owner` (outside Herdr or a verified shell pane, as `send` resolves it). Otherwise it is a usage error (exit 2, nothing moved): `only NAME or the owner drops NAME's mailbox`. `drop_queued` (`--drop-inbox`) and `inbox --drop` share one helper.
+
+### 33.4 Old debts are summarised, and one command closes them
+
+`ack --older-than DURATION --reason TEXT`, with neither a NAME nor an id, closes every debt in this fleet's log whose request was delivered more than DURATION ago, whoever owes it. Each is logged as 23.4's `ack #id --reason` is, with `by` set to the caller. `--dry-run` lists them first. A NAME in that form is a usage error (exit 2, nothing written). So is a caller that does not resolve to `owner` (outside Herdr or a verified shell pane): `closing others' debts in bulk is the owner's; ack #id --reason TEXT closes one`. `ack --older-than DURATION` without `--reason` keeps its present meaning (the debts you owe).
+
+`status` lists debts whose request is older than `STALE_DEBT_S` (3 days) not one per line but in one closing line: `awaiting: N older than 3d (oldest AGE), not listed; see herdr-fleet log --owed; the owner closes them with herdr-fleet ack --older-than 3d --reason TEXT (--dry-run first)`. JSON lists every debt, as now, with `stale: true` on those. The board keeps its present debt display.
+
+### 33.5 A printed `herdr-fleet inbox` command keeps the fleet
+
+Every `herdr-fleet inbox …` command line the CLI prints for its caller to run gains `--fleet PATH` only when it is needed: when discovery from the caller's cwd, ignoring `--fleet`, `--file` and `HERDR_FLEET_FILE`, would select another fleet file or none. This covers the 23.1 unread note, the owner's history hint, and 33.3's doctor lines. One helper builds the flag. Prompts typed to seats are unchanged: a seat runs them from its own cwd.
+
+### 33.6 Code and tests
+
+- `inbox.is_due` takes the fleet's FYI window, and every caller passes it.
+- `fleetfile` parses `fyi_ttl`.
+- The sweep goes in `watch.py`, before or after each pass, never inside a mailbox lock it already holds.
+- The counts go in `checks.queued_summary`/`queued_line`, `board` (`Row`, `queue_text`, the footer) and `messages.inbox_note`.
+- Unread mailboxes go in `checks` (status and doctor).
+- `inbox --drop` goes in `mailroom.py`, `ack --older-than --reason` in `messages.py`, and the fleet flag helper beside `inbox_note`.
+- Section 7 is amended where it lists what moves a queued message undelivered: ttl, `--drop-inbox`, and now `fyi_ttl` and `inbox --drop`.
+- README: the fleet file reference (`fyi_ttl`), `inbox --drop`, the `ack` form, and troubleshooting ("my fleet shows queued messages"). AGENTS.md architecture is updated in the same change. Version 0.18.0 in both declarations.
+
+Tests go in `tests/test_section33.py`. Each of these fails on 0.17.0:
+
+1. An FYI older than 24 h without a ttl is not counted by `status` or the board, and the watcher's sweep expires it and logs it with `via: "fyi_ttl"`.
+2. A younger FYI is kept.
+3. `fyi_ttl = "off"` keeps every FYI.
+4. An FYI's own `--ttl` wins both ways.
+5. A non-FYI request and a queued kickoff never expire by `fyi_ttl`.
+6. The sweep skips a locked mailbox, runs no herdr command and makes no directory in a fleet without an inbox.
+7. The split counts appear in status, JSON, the board cell, the footer and the unread note.
+8. An unread mailbox is flagged in status and doctor, and doctor writes nothing.
+9. `inbox --drop`: all, `--fyi`, `--older-than`, `--dry-run`, a queued kickoff named, and `--redeliver` afterwards.
+10. `ack --older-than --reason`: closes others' old debts, keeps young ones, gives a usage error with a NAME, and `--dry-run` writes nothing.
+11. Status collapses stale debts into the one line, and JSON flags them.
+12. The unread note and doctor lines carry `--fleet` from another fleet's cwd, and not when discovery agrees.
+
+`tests/support.py` checks every scenario, as before; no new herdr call is allowed from the sweep.
+
+### 33.7 Amendments from the build
+
+Built into the working tree on 1 November 2026 (version 0.18.0).
+
+1. **Section 7 had no such list.** No invariant listed what moves a queued message undelivered, so invariant 11 gains the sentence: its own ttl, `fyi_ttl`, `--drop-inbox`, `inbox --drop`, a newer kickoff replacing a queued one (32.6), a timer retiring its own message (30), and the refusal of the `send --now` that wrote it.
+2. **`fyi_ttl` values (33.1).** Any `--ttl` duration, or `"off"`. Anything else (`"0m"`, `"1w"`, `24`) is a fleet file error (exit 2), as for the other keys. The parsed value is `Fleet.fyi_ttl` in seconds, or None when off.
+3. **`is_due` (33.1).** `inbox.is_due(message, now, fyi_ttl)` takes the window as a required argument, and so does `inbox.queued(repo, fyi_ttl, now)`. `inbox.due_by` names the reason, `ttl` or `fyi_ttl`, and `expire_due` logs it as `via`. The window counts from the `time` header. A message with timer metadata or `queued_by: kickoff` never takes it; neither is an FYI today, so this only guards the future.
+4. **The sweep (33.1).** `mailroom.sweep_expired` does the sweeping and `Watcher.sweep` paces it. It runs in each pass after `timers.cycle` has released its locks and before the mailboxes are read; the first pass sweeps. A busy mailbox is skipped through `inbox.try_locked`, a non-blocking flock. The sweep creates no inbox and no mailbox directory. Like every expiry, it creates the mailbox's `.lock` file and, for a mailbox that never had one, its `cur/`. The watcher says `expired N queued: NAME n, … (ttl or fyi_ttl)`. `watch --once` and `deliver` keep `expire_all`, which waits for each lock as before and now applies `fyi_ttl` too.
+5. **Redeliver, as written (33.1).** A redelivered message gets no new window. So an FYI past `fyi_ttl`, or any message past its own ttl, goes back to `cur/` at the next expiry, which includes the `inbox --read` that would have read it. The confirmation says so: `#id is queued again for NAME, but it is past its fyi_ttl, so the next delivery or read expires it again; its text is in PATH`. See the builder's report: this makes `--redeliver` useless for an expired FYI.
+6. **`inbox --history` (33.1).** It lists delivered messages only (20.1), so an expired FYI is not in it. The expired message's first line stays in `log`, and its body stays in `cur/<id>.md` and on the board's message page. Not changed.
+7. **Status counts (33.2).** Each part of the `queued:` line comes from `inbox.count_label`.
+   - The forms are `NAME A (oldest AGE, +F fyi)`, and `NAME F fyi (oldest AGE)` when only FYIs wait. Following 20.8, the age is shown only for two or more messages of the kind counted. An unread mailbox adds ` (no seat or contact)` after that.
+   - JSON `queued_fyi` lists every mailbox in `queued`, with 0 where it holds no FYI.
+   - JSON also gains `queued_oldest_actionable` ({mailbox: time}, only for mailboxes with a message that is not an FYI), which the line's age needs, and `queued_unread` ([names]).
+   - `queued` and `queued_oldest` keep their meaning: every message that is not due.
+8. **The board (33.2).**
+   - `Row.queued` counts the messages that are not FYIs, and `Row.fyi` the FYIs. `oldest` and `next_*` describe the former, and urgency ranks only by them.
+   - The queue cell is `queue_spans`: `queue_text`, then ` +N fyi` in the dim style, dropped when it does not fit beside `N queued`. An FYI-only row shows `N fyi`, dim, in both the wide and the narrow cell.
+   - The board's footer has no `queued:` line; the only one is on the fleet page (25.3). That line now uses the status form (`Board.queue_counts`), including other mailboxes with their `(no seat or contact)`. `Board.owner_fyi` is added.
+9. **The unread note (33.2).** It reads `N unread (+F fyi) from …` when anything but FYIs waits, and `F unread fyi from …` when only FYIs do. The `#id, HH:MM` is the oldest message that is not an FYI, else the oldest FYI. The senders still come from every message, and `it`/`them` follows the total.
+10. **Doctor (33.3).** The check is named `inbox`, one `warn` per unread mailbox, in status order. N counts every message that is not due, and AGE is always shown. It reads the mailboxes only.
+11. **`inbox --drop` (33.3).**
+    - **Exclusions.** It is exclusive (an argparse group) with `--read`, `--count`, `--history`, `--redeliver` and `--hook`, and a usage error with `--wait`, `--json` or `--full`. `--fyi`, `--older-than` and `--dry-run` are usage errors without `--drop`, and with `--hook`.
+    - **Expiry.** Like every `inbox` mode, it first expires what is due (logged `expired`), then drops. `--dry-run` lists only messages that are not due.
+    - **`--older-than D`.** It drops messages queued strictly more than D ago, as `ack --older-than` counts.
+    - **Output.** Lines come in delivery order, AGE is from `time`, and the first line is shown without its `[from …]` prefix, as everywhere. With nothing to drop it prints `nothing to drop for NAME`.
+    - **Shared helper.** `messages.drop_messages(ctx, name, via, keep)` is shared. `drop_queued` (`--drop-inbox`) keeps its count, its `via: drop-inbox` and its old behaviour of not expiring first.
+12. **`ack --older-than D --reason TEXT` (33.4).**
+    - **Usage.** An id in that form is a usage error, like a NAME; `--all --reason` stays one.
+    - **Which debts.** They come from every open request (`unsettled`), not only the latest per pair, as `ack --older-than` does.
+    - **Messages without an id.** Such a message (before 0.6.0) is closed with a name `ack` from its debtor, carrying `by` and `reason`. It is skipped when a newer message of the same pair is still owed.
+    - **Output.** Each line reads `acked #id from SENDER since …, AGE ago (first line), owed by DEBTOR; reason: TEXT`; with none, `nothing owed older than D`.
+    - **Spec change.** `test_section23.AckReason` asserted that `--older-than 1m --reason x` is a usage error; it now passes a NAME.
+13. **Stale debts (33.4).** `checks.STALE_DEBT_S` is 3 days. `status` lists the fresh debts with their hints, then the one line. Every JSON `owed` item carries `stale`, false on fresh ones. `log --owed` and the board are unchanged.
+14. **The fleet flag (33.5).**
+    - **Rule.** `messages.fleet_flag(ctx)` decides it. A fleet chosen by `--fleet`, `--file` or `HERDR_FLEET_FILE` always gets the flag, as written, even where discovery would agree. Otherwise it compares discovery from the process cwd, ignoring `HERDR_FLEET_FILE`, by real path. The path is shell-quoted.
+    - **Coverage.** The flag is added to the unread note, the owner's history hint and doctor's lines. It is also added to the watcher's `delivery to NAME unconfirmed` notification (`herdr-fleet inbox --redeliver ID`), which 33.5 does not name but which is a command for the owner to run.
+15. **Existing tests changed by the spec.**
+    - `test_section24.Build`: the dev row counts 2, plus 1 FYI, and its cell reads `2 queued, holding: owner typing +1 fyi`.
+    - `test_section32.Help`: `inbox`'s help names `--drop`.
+    - `test_section23.AckReason`: see item 12.
+    - `test_section31`: the version.
+
+Second round, after the designer's decisions of 1 November 2026 (A to F). Items 16, 18, 19 and 20 replace items 5, 14, 11 (who may drop) and 12 (who may close in bulk) where they differ.
+
+16. **A redelivered FYI gets a fresh window (A).**
+    - **Window start.** `inbox.due_by` counts the `fyi_ttl` window from the later of `time` and the file's modification time. A message object that was never loaded from a file counts from `time`.
+    - **The touch.** Under the mailbox lock, right after the move to `new/`, `--redeliver` calls `inbox.touch`. That sets the modification time to `inbox.now_utc()` with `os.utime`: metadata only, the file is not rewritten.
+    - **Own ttl.** A message's own `ttl` is never changed. A redelivered message past it gets `#id is queued again for NAME, but it is past its ttl, so the next delivery or read expires it again`; any other gets the line it always had.
+17. **What reads the modification time (A).**
+    - **Only `Message.sort_key`.** It breaks ties between messages whose ids share the same second. `read_box` uses that key to order `new/` (after the kickoff and urgent ranks) and `cur/`, and `all_messages` uses it too.
+    - **Nothing else.** Routing (`crossfleet`), timers, the message log, owed replies and the board's caches do not read it.
+    - **The one effect.** A redelivered message now sorts after the messages whose ids share its second; before, it kept its write order. Order across seconds and the kickoff and urgent ranks are unchanged. `test_a_redelivered_message_sorts_after_its_same_second_siblings` pins this.
+    - **Copied files.** Files copied with fresh modification times, for example `.herdr/` restored with `cp`, get a fresh window too. That keeps FYIs longer, the safe direction.
+    - **Test helper.** `test_section33`'s `put` sets the modification time to the message's `time`, as a real send leaves it. `test_inbox.put` is unchanged; its files carry the time they were written, so an FYI it backdates is not due by `fyi_ttl`.
+18. **The fleet flag only when needed (D).** `messages.fleet_flag` compares discovery from the caller's cwd, ignoring `--fleet`, `--file` and `HERDR_FLEET_FILE`, with the fleet in use, by real path. A fleet chosen explicitly adds nothing by itself. The watcher's unconfirmed-delivery notification keeps the flag.
+19. **Who drops with `--as` (E).**
+    - **Rule.** `mailroom.may_drop` runs for `inbox --drop --as NAME` before anything is listed or moved, `--dry-run` included.
+    - **Unread mailbox.** A mailbox that is no seat, contact or `owner` of the fleet needs no lookup at all ("for anyone"), so dropping one runs no herdr command.
+    - **Seat, contact or `owner`.** `lookup_caller(ctx, None)` runs, ignoring `--as`: `pane current`, `agent get`, and for a pane without an agent `pane get` and `process-info`. The drop goes ahead only when the caller is NAME or `owner`.
+    - **Refusal wording.** For the owner's own mailbox the refusal reads `only the owner drops owner's mailbox`, since the general form would read "only owner or the owner".
+    - **Harness.** `tests/support.py` lets an `inbox` command that has both `--drop` and `--as` run the caller lookup; every other `inbox --as` still runs no herdr command.
+20. **The bulk `ack` is the owner's (F).**
+    - **Lookup.** `ack --older-than D --reason TEXT` runs the preflight inside Herdr, then the caller lookup, ignoring `--as`. It goes ahead only for `owner`, outside Herdr or at a verified shell pane, and `by` is `owner`.
+    - **`--as`.** `--as` is accepted and ignored in that form, so `--as owner` from a seat is refused like any other seat.
+    - **Check order.** The NAME and id usage errors come first, then the owner check, and nothing is written on either.
+    - **Status line.** It now ends `the owner closes them with herdr-fleet ack --older-than 3d --reason TEXT (--dry-run first)`.
+21. **Tests, round 2.**
+    - `test_section33.py` has 38 tests:
+      - a redelivered FYI survives the next sweep and a read, then expires again after its fresh window;
+      - a message past its own ttl keeps it;
+      - the same-second order;
+      - a seat refused for another seat's and the owner's mailbox, `--dry-run` included;
+      - the seat itself, the owner outside Herdr and the owner at a verified shell allowed;
+      - anyone dropping an unread mailbox, with no lookup;
+      - `--drop` without `--as`;
+      - a seat refused for the bulk `ack`, with and without `--as owner`, and the owner at a verified shell closing the debts;
+      - no flag where discovery agrees, with `--fleet` or with `HERDR_FLEET_FILE`.
+    - The round-1 tests that dropped or closed in bulk with `--as` from a seat's environment now run as the owner outside Herdr.
+    - Mutation checks in scratch copies: removing the touch, the window's modification-time term, `may_drop` or the bulk owner check each fails the tests that cover it.
+
+Third round, after the second review (FIX). Items 22 and 23 replace item 19's rule for an unread mailbox and item 10's doctor wording; item 29 replaces item 21's test of an unread mailbox dropped with no lookup.
+
+22. **Who drops, for every mailbox.**
+    - **Rule.** `mailroom.may_drop` runs the caller lookup for every `inbox --drop --as NAME`, ignoring `--as`, a mailbox that is no seat, contact or `owner` included. It drops only when the caller resolves to NAME or to `owner`. Otherwise it is exit 2, `only NAME or the owner drops NAME's mailbox`, and nothing is moved or logged, `--dry-run` included.
+    - **Why.** Such a mailbox can be 31's queue for a live agent with no fleet of its own: `crossfleet.destination` finds no fleet, so the message is queued in the sender's fleet under the agent's name.
+    - **Cost.** Dropping an unread mailbox now runs the lookup's herdr commands, as dropping any other mailbox with `--as` does. `tests/support.py` already allows them for `inbox --drop --as`.
+23. **Doctor's wording.**
+    - **The line.** It is 33.3's, with NAME, N and AGE filled in: `… so the watcher does not deliver it. Read it with herdr-fleet inbox --as NAME --read, deliver it with herdr-fleet deliver NAME if NAME is a live agent, or (NAME or the owner) drop it with herdr-fleet inbox --as NAME --drop`.
+    - **"if NAME is a live agent" is printed as written.** Doctor does not check whether NAME is live. It reads the mailboxes only (item 10) and runs no `agent list` for this check.
+    - **Deviation: `deliver` keeps the fleet too.** 33.3 shows `herdr-fleet deliver NAME` without `--fleet PATH`. The build gives it the same `fleet_flag` as the two `inbox` commands. Without the flag, doctor run with `--fleet` from another cwd would print a `deliver` command that acts on another fleet or finds none.
+    - **Unchanged and docs.** The status suffix stays `(no seat or contact)`. The README's status, doctor, `inbox --drop` and troubleshooting text say the same. A seat that tries to close others' debts in bulk, or to drop any mailbox but its own, is refused.
+24. **A routed FYI (reviewer's note).** A test covers it: an FYI routed to another fleet expires through that fleet's sweep, and both logs gain the `expired` entry with `via: "fyi_ttl"` and `delivery: "none"`. No code changed. `expire_due` records through `messages.record`, which already mirrors terminal records (31).
+25. **The fleet flag (reviewer's note).** A test covers it: the same fleet file reached through a symlinked cwd, or named by a symlinked `--fleet` path, gets no flag; `--fleet PATH` from a sibling directory with no `.herdr` gets it. No code changed.
+26. **Timer mail and the sweep (reviewer's note).**
+    - **Rule.** `messages.expire_due` takes `timer_mail` (default true). The sweep passes false, so a message with timer metadata stays in `new/` until `timers.cycle` expires it, with its journal record and its `timer_event` (30).
+    - **The race it closes.** In the watcher, the cycle runs just before the sweep. A timer message whose deadline falls between the cycle's clock reading and the sweep's could otherwise be expired by the sweep. The cycle would then find it in `cur/` and record the occurrence `settled`, not `expired`.
+    - **Other paths unchanged.** Delivery, kickoff, `inbox`, `deliver`, the hooks and `watch --once`'s `expire_all` still expire timer mail past its own ttl. Design 30 requires this: "Retain mailbox TTL enforcement for every delivery path".
+27. **Board fields (reviewer's note).**
+    - **Removed.** `Board.owner_fyi`, `owner_count` and `owner_oldest` are gone. Since round 1 only tests read them; the fleet page reads `Board.queue_counts`.
+    - **Tests.** `test_section24` no longer passes or asserts `owner_count`; its build test checks `owner 1` in `queue_counts` instead.
+    - **Kept.** `owner_id`, `owner_from` and `owner_line` are also read only by that test. They are kept, since the request named the three above.
+28. **The sweep's line (the designer's live check).** `mailroom.sweep_expired` returns {mailbox: the reason of each message it expired}. The watcher names the reasons that applied, in the order `ttl, fyi_ttl`: `expired 1 queued: sample-dev 1 (fyi_ttl)`, `… (ttl)` or `… (ttl, fyi_ttl)`. The README gives the new form, and says the sweep leaves a timer's message to the timer pass.
+29. **Tests, round 3.**
+    - **`test_section33.py` has 43 tests.** "anyone dropping an unread mailbox, with no lookup" became: a seat refused for an unread mailbox, `--dry-run` included, and the owner dropping it.
+    - **New tests:**
+      - a live agent `helper` with no fleet, sent a message by `sample-dev` while working: a seat refused (nothing moved or logged), then `helper` itself and the owner allowed;
+      - the watcher naming `(ttl)`, `(fyi_ttl)` and `(ttl, fyi_ttl)`;
+      - the routed FYI;
+      - the sweep leaving timer mail to the cycle;
+      - the symlinked cwd and the sibling directory.
+    - **Mutation checks in scratch copies.** Each of these fails the tests that cover it: restoring the unread exemption in `may_drop`, letting the sweep expire timer mail, the fixed `(ttl or fyi_ttl)` text, and comparing fleet paths without `realpath`. The routed FYI test covers behaviour that already worked and was not shown failing first.
+
+### 33.8 Verification and limits (designer, 1 November 2026)
+
+Live, on scratch fleets with an absent seat (so nothing could be prompted) and `fyi_ttl = "1m"`, running the reviewed working tree:
+
+- **Sweep.**
+  - After the window passed, `status` counted only the request; it moves nothing.
+  - The watcher's first pass printed `expired 1 queued: sample-dev 1 (fyi_ttl)` and moved the FYI to `cur/`, logged `expired` with `via: "fyi_ttl"`.
+  - The request stayed in `new/`, and the watcher reported `absent, 1 left queued`.
+- **Unread mailbox.**
+  - `status` printed `stray 1 (no seat or contact)`, and `doctor` printed the 33.3 warning.
+  - From the fleet's own directory, the warning's commands carried no `--fleet`. From another directory, all three carried `--fleet PATH`.
+- **Drop gate.** From a pane whose agent is neither the mailbox's name nor `owner`, `inbox --as stray --drop` was refused, with `--dry-run` and without it: exit 2, `only stray or the owner drops stray's mailbox`. The mailbox was unchanged and nothing was logged.
+
+**Not verified live:**
+- the owner's own drop and bulk `ack` (automated tests only);
+- a routed FYI expiring at its destination;
+- the board's dim FYI styling on a real terminal.

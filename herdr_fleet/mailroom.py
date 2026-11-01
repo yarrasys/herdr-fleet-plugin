@@ -20,12 +20,16 @@
   ``additionalContext`` and moves it to ``cur/``, ``prompt`` only counts. Every
   error path prints nothing and exits 0 (invariant 14).
 
-Both expire messages past their ttl before anything else (logged ``expired``)
-and log one ``delivered`` entry per message they hand over.
+Both expire what is due before anything else (past its ttl, or an FYI past the
+fleet's ``fyi_ttl``; logged ``expired``) and log one ``delivered`` entry per message
+they hand over. ``inbox --drop`` (design 33.3) moves queued messages to ``cur/``
+undelivered, logged ``dropped``; ``sweep_expired`` is the watcher's expiry sweep (33.1),
+which waits for no lock and runs no herdr command.
 """
 
 from __future__ import annotations
 
+import datetime
 import io
 import json
 import os
@@ -36,9 +40,9 @@ from herdr_fleet import crossfleet, inbox, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, resolve_caller
 from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
-from herdr_fleet.messages import (HOLD, OWNER, Drop, agent_state, caller_record, compose_prompt,
-                                  dry_hold, expire_due, first_line, notify_owner, place, prompt_mailbox, queued_in,
-                                  read, record, selection_label, settle, since_label)
+from herdr_fleet.messages import (HOLD, OWNER, Drop, agent_state, caller_record, compose_prompt, drop_messages,
+                                  dry_hold, expire_due, first_line, fleet_flag, notify_owner, place, prompt_mailbox,
+                                  queued_in, read, record, selection_label, settle, since_label)
 from herdr_fleet.seats import SEND_ALLOWED, SETTLED, state_words
 from herdr_fleet.state import now_iso
 
@@ -57,7 +61,7 @@ def op_deliver(ctx: Ctx, names: Sequence[str], fyi_too: bool = False, now: bool 
     agents = ctx.herdr.agent_list()
     if not ctx.dry_run:  # what is past its ttl goes first, logged, wherever it waits
         expire_all(ctx)
-    waiting = inbox.queued(repo)
+    waiting = inbox.queued(repo, fleet.fyi_ttl)
     if names:
         known = ({s.name for s in fleet.seats} | {c.name for c in fleet.contacts} | {OWNER}
                  | set(inbox.mailboxes(repo)) | {str(a["name"]) for a in agents if a.get("name")})
@@ -91,6 +95,26 @@ def expire_all(ctx: Ctx) -> None:
         if inbox.has_queued(repo, mailbox):
             with inbox.locked(repo, mailbox):
                 expire_due(ctx, mailbox)
+
+
+def sweep_expired(ctx: Ctx) -> Dict[str, List[str]]:
+    """Design 33.1: the watcher's sweep. Every mailbox with files in ``new/`` (seats,
+    contacts, ``owner`` and any other name) whose lock is free right now has what is due
+    moved to ``cur/``, logged ``expired`` as ``expire_due`` does; a busy mailbox waits for
+    the next sweep. Timer mail it leaves to ``timers.cycle``, which alone expires it here.
+    Takes no timer lock, waits for no lock, runs no herdr command and creates no mailbox.
+    Returns {mailbox: the reason of each message expired, ``ttl`` or ``fyi_ttl``}."""
+    repo = ctx.fleet.repo
+    gone: Dict[str, List[str]] = {}
+    for mailbox in inbox.mailboxes(repo):
+        if not inbox.has_queued(repo, mailbox):
+            continue
+        with inbox.try_locked(repo, mailbox) as held:
+            if held:
+                reasons = [reason for _, reason in expire_due(ctx, mailbox, timer_mail=False)]
+                if reasons:
+                    gone[mailbox] = reasons
+    return gone
 
 
 def candidates(ctx: Ctx, waiting: Dict[str, List[Message]], fyi_too: bool = False) -> List[str]:
@@ -218,11 +242,22 @@ WAIT_POLL_S = 1.0  # design 23.2: `inbox --wait` looks at the mailbox directory 
 
 def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, count: bool = False,
              history: Optional[str] = None, redeliver: Optional[str] = None, as_json: bool = False,
-             full: bool = False, wait: bool = False, timeout_ms: Optional[int] = None) -> int:
+             full: bool = False, wait: bool = False, timeout_ms: Optional[int] = None, drop: bool = False,
+             fyi_only: bool = False, older_than: Optional[str] = None) -> int:
     """Design 18.5 item 4 and 20.1, 20.3, 20.4, 23.2: the caller's own mailbox. ``wait``
-    blocks until the mailbox holds a message not past its ttl (FYIs count), then reads it
-    as ``--read`` does; with ``timeout_ms`` it gives up after that long (exit 3)."""
+    blocks until the mailbox holds a message that is not due (FYIs count), then reads it
+    as ``--read`` does; with ``timeout_ms`` it gives up after that long (exit 3). ``drop``
+    (33.3) moves queued messages to ``cur/`` undelivered, narrowed by ``fyi_only`` and
+    ``older_than``; with ``--dry-run`` it only lists them."""
     repo = ctx.fleet.repo
+    if (fyi_only or older_than is not None or ctx.dry_run) and not drop:
+        raise UsageError("--fyi, --older-than and --dry-run go with --drop")
+    if drop and (wait or as_json or full):
+        raise UsageError("--drop takes neither --wait, --json nor --full")
+    try:
+        drop_age = inbox.parse_ttl(older_than, "--older-than") if older_than is not None else None
+    except ValueError as exc:
+        raise UsageError(str(exc))
     if timeout_ms is not None and not wait:
         raise UsageError("--timeout goes with --wait")
     if wait and (count or history is not None or redeliver):
@@ -244,6 +279,10 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
         ctx.say(identity)
     if redeliver:
         return _redeliver(ctx, redeliver, as_json)
+    if drop:
+        if as_name:
+            may_drop(ctx, caller)
+        return _drop(ctx, caller, fyi_only, drop_age)
     if history is not None:
         return _history(ctx, caller, history, as_json, limit)
     deadline = None if timeout_ms is None else ctx.clock.monotonic() + timeout_ms / 1000.0
@@ -297,6 +336,51 @@ def _take(ctx: Ctx, name: str, read_all: bool) -> List[Message]:
     return messages
 
 
+def may_drop(ctx: Ctx, name: str) -> None:
+    """Design 33.3: who ``inbox --drop --as NAME`` serves: the caller the lookup finds,
+    ignoring ``--as``, when that is NAME or ``owner`` (outside Herdr or a verified shell
+    pane); else a usage error and nothing moves. This holds for every mailbox, an unread
+    one too: it can be 31's queue for a live agent that has no fleet of its own."""
+    who = lookup_caller(ctx, None)
+    if who not in (name, OWNER):
+        raise UsageError("only the owner drops owner's mailbox" if name == OWNER
+                         else "only %s or the owner drops %s's mailbox" % (name, name))
+
+
+def _drop(ctx: Ctx, name: str, fyi_only: bool, limit: Optional[datetime.timedelta]) -> int:
+    """Design 33.3: ``inbox --drop``. Under the mailbox lock, after expiring what is due,
+    move every queued message (``--fyi``: every FYI; ``--older-than``: only those queued
+    longer ago) to ``cur/``, each logged ``dropped`` via ``inbox --drop``; one line each,
+    in delivery order. ``--dry-run`` lists what would go and moves nothing. Nothing is
+    sent; ``inbox --redeliver ID`` brings one back."""
+    repo = ctx.fleet.repo
+    now = inbox.now_utc()
+
+    def keep(message: Message) -> bool:
+        if fyi_only and not message.fyi:
+            return True
+        sent = inbox.parse_time(message.time)
+        return limit is not None and (sent is None or now - sent <= limit)
+
+    if ctx.dry_run:
+        gone = [m for m in queued_in(ctx, name) if not inbox.is_due(m, now, ctx.fleet.fyi_ttl) and not keep(m)]
+    elif inbox.has_queued(repo, name):
+        with inbox.locked(repo, name):
+            expire_due(ctx, name, now)
+            gone = drop_messages(ctx, name, "inbox --drop", keep)
+    else:
+        gone = []
+    if not gone:
+        ctx.say("nothing to drop for %s" % name)
+        return EXIT_OK
+    for message in gone:
+        ctx.say("%s #%s from %s (%s): %s%s" % ("would drop" if ctx.dry_run else "dropped", message.short,
+                                              message.sender, inbox.age_since(message.time, now) or "?",
+                                              first_line(message.body),
+                                              " (queued kickoff)" if message.is_kickoff else ""))
+    return EXIT_OK
+
+
 def _await_mail(ctx: Ctx, name: str, deadline: Optional[float]) -> bool:
     """Design 23.2: look at the mailbox every WAIT_POLL_S (files only; no herdr command)
     until it holds a message not past its ttl; False when the ``deadline`` (of the fake
@@ -307,7 +391,7 @@ def _await_mail(ctx: Ctx, name: str, deadline: Optional[float]) -> bool:
     while True:
         if inbox.has_queued(repo, name):
             now = inbox.now_utc()
-            if any(not inbox.is_due(m, now) for m in inbox.read_box(repo, name, NEW)):
+            if any(not inbox.is_due(m, now, ctx.fleet.fyi_ttl) for m in inbox.read_box(repo, name, NEW)):
                 return True
         if deadline is not None and ctx.clock.monotonic() >= deadline:
             return False
@@ -344,10 +428,16 @@ def _redeliver(ctx: Ctx, ref: str, as_json: bool) -> int:
     if message.box != CUR:
         raise UsageError("#%s is still queued for %s (in new/), so there is nothing to redeliver"
                          % (message.short, message.to))
+    now = inbox.now_utc()
     with inbox.locked(ctx.fleet.repo, message.to):
         inbox.move(ctx.fleet.repo, message, NEW)
+        inbox.touch(message, now)  # design 33.1: a fresh fyi_ttl window; a ttl of its own stays
+    due = inbox.due_by(message, now, ctx.fleet.fyi_ttl)
     if as_json:
         ctx.say(json.dumps({"id": message.id, "to": message.to, "box": NEW}))
+    elif due:  # past its own ttl: the next expiry moves it back
+        ctx.say("#%s is queued again for %s, but it is past its %s, so the next delivery or read expires it again"
+                % (message.short, message.to, due))
     else:
         ctx.say("#%s is queued again for %s; the next delivery carries it" % (message.short, message.to))
     return EXIT_OK
@@ -492,7 +582,7 @@ def _hook_output(ctx: Ctx, which: str, stdin: TextIO) -> Optional[str]:
         return None
     if which == "prompt":
         now = inbox.now_utc()
-        count = len([m for m in queued_in(ctx, name) if not inbox.is_due(m, now)])
+        count = len([m for m in queued_in(ctx, name) if not inbox.is_due(m, now, ctx.fleet.fyi_ttl)])
         if not count:
             return None
         return _hook_json(which, "%d message%s waiting; run: %s" % (count, "" if count == 1 else "s",

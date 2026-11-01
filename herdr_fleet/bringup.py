@@ -281,7 +281,7 @@ def send_kickoffs(ctx: Ctx, seats: Sequence[Seat], reason: str, note: Optional[s
     ordered = sorted(seats, key=lambda s: s.index)
     waiting = sorted(blocked, key=lambda s: s.index)
     if ctx.dry_run:
-        waiting = {s.name: len(inbox.queued(ctx.fleet.repo).get(s.name, [])) for s in ordered}
+        waiting = {s.name: len(inbox.queued(ctx.fleet.repo, ctx.fleet.fyi_ttl).get(s.name, [])) for s in ordered}
         carries = ["%s carries %d queued" % (n, c) for n, c in waiting.items() if c]
         report.add("kickoff", "plan", "herdr agent prompt (reason %s) to %s%s"
                    % (reason, ", ".join(s.name for s in ordered), "; " + ", ".join(carries) if carries else ""))

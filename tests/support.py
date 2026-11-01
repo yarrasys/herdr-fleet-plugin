@@ -363,7 +363,8 @@ class FleetCase(unittest.TestCase):
             previous = argv
             if command[:1] == ["inbox"]:
                 self.assertIn(argv[:2], INBOX_CALLS, "inbox ran more than the caller lookup: %s" % argv)
-                self.assertNotIn("--as", command, "inbox --as ran a herdr command: %s" % argv)
+                if "--drop" not in command:  # design 33.3: `inbox --drop --as NAME` looks the caller up
+                    self.assertNotIn("--as", command, "inbox --as ran a herdr command: %s" % argv)
                 if "--hook" in command:
                     self.assertIn(argv[:2], HOOK_CALLS, "inbox --hook ran more than agent get: %s" % argv)
             if command[:1] == ["watch"]:

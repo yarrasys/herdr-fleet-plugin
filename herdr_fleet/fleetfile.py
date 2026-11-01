@@ -29,13 +29,14 @@ FLEET_NAME = "fleet.toml"
 DIRECTIONS = ("right", "down")
 
 TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "contacts", "quit_timeout_ms",
-            "restart_hint_tokens", "watch", "inbox_print_max", "interrupt", "timers"}
+            "restart_hint_tokens", "watch", "inbox_print_max", "interrupt", "timers", "fyi_ttl"}
 CONTACT_KEYS = {"name", "match", "note"}
 MATCH_KEYS = {"cwd", "kind", "name"}
 LAYOUT_KEYS = {"mode", "columns", "direction", "ratio", "top", "top_ratio"}
 MODES = ("chain", "grid")
 WATCH_KEYS = {"ratio", "position", "notify_blocked_after"}
 INBOX_PRINT_MAX = 8192               # design 20.4: bytes of one message `inbox --read` prints in full
+FYI_TTL = "24h"                      # design 33.1: an FYI without a ttl of its own is due after this
 DURATION_RE = re.compile(r"^([1-9][0-9]*)([mhd])$")  # the --ttl grammar (30m, 2h, 1d)
 DURATION_UNITS = {"m": 60, "h": 3600, "d": 86400}
 WATCH_POSITIONS = ("bottom",)        # design 19.1: the only position in 0.8.0
@@ -115,6 +116,7 @@ class Fleet:
     top: Optional[str] = None                  # [layout] top: the seat across the top (design 26.1)
     top_ratio: float = TOP_RATIO               # [layout] top_ratio, clamped to TOP_RATIO_RANGE
     timers: List[Timer] = field(default_factory=list)  # opt-in daily requests (design 30)
+    fyi_ttl: Optional[int] = 86400             # design 33.1: seconds an FYI without a ttl waits; None: "off"
 
     def contact(self, name: str) -> Optional[Contact]:
         for contact in self.contacts:
@@ -207,6 +209,7 @@ def load_fleet(path: str) -> Fleet:
     if not isinstance(print_max, int) or isinstance(print_max, bool) or print_max <= 0:
         errors.append("inbox_print_max: must be a positive integer (bytes)")
         print_max = INBOX_PRINT_MAX
+    fyi_ttl = _fyi_ttl(data.get("fyi_ttl", FYI_TTL), errors)
 
     layout = data.get("layout", {})
     if not isinstance(layout, dict):
@@ -265,7 +268,7 @@ def load_fleet(path: str) -> Fleet:
                  quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns,
                  contacts=contacts, restart_hint_tokens=hint_tokens, watch=watch, watch_ratio=watch_ratio,
                  watch_position=watch_position, notify_blocked_after=blocked_after, inbox_print_max=print_max,
-                 interrupt=interrupt, top=top, top_ratio=top_ratio, timers=timers)
+                 interrupt=interrupt, top=top, top_ratio=top_ratio, timers=timers, fyi_ttl=fyi_ttl)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
@@ -397,6 +400,17 @@ def parse_duration(text: object) -> Optional[int]:
     """``30m``, ``2h`` or ``1d`` (the ``--ttl`` grammar) in seconds; None when malformed."""
     match = DURATION_RE.match(text.strip()) if isinstance(text, str) else None
     return int(match.group(1)) * DURATION_UNITS[match.group(2)] if match else None
+
+
+def _fyi_ttl(value: object, errors: List[str]) -> Optional[int]:
+    """``fyi_ttl`` (design 33.1): the ``--ttl`` grammar or ``"off"``, in seconds (None: off)."""
+    if value == "off":
+        return None
+    seconds = parse_duration(value)
+    if seconds is None:
+        errors.append('fyi_ttl: %r must be a duration such as "30m", "24h" or "3d", or "off"' % (value,))
+        return parse_duration(FYI_TTL)
+    return seconds
 
 
 def _parse_watch(value: object, errors: List[str],

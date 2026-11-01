@@ -71,7 +71,7 @@ def sample(**extra):
         B.Row("sample-orchestrator", "sample-orchestrator", "blocked", 3, age=240, doing="Allow Bash(pnpm test)?",
               queued=1, oldest=60, next_id="aaaaaa", note="holding: owner typing", tokens=730000, over=True),
     ]
-    values = dict(fleet="sample", rows=rows, watching=11 * 3600 + 60, owner_count=1, owner_id="103003",
+    values = dict(fleet="sample", rows=rows, watching=11 * 3600 + 60, owner_id="103003",
                   owner_line="Example ready", waiting=2, holding=1, owner_newest=OWNER_NEWEST,
                   event=B.Event("08:02", "delivered 2 to sample-dev"), threshold=450000)
     values.update(extra)
@@ -295,7 +295,7 @@ class Render(unittest.TestCase):
         board_ = sample(notice="ack #103002 (sample-reviewer owes sample-orchestrator 2h)? y/n")
         self.assertEqual(text(B.render(board_, 162, 6, True))[5],
                          "ack #103002 (sample-reviewer owes sample-orchestrator 2h)? y/n")
-        quiet = sample(owner_count=0, owner_newest=None, waiting=0, holding=0)
+        quiet = sample(owner_newest=None, waiting=0, holding=0)
         self.assertEqual(text(B.render(quiet, 162, 6, True))[0], "sample \u00b7 watching 11h \u00b7 owner: nothing")
         self.assertEqual(text(B.render(sample(event=None), 162, 6, True))[5], "")
 
@@ -436,21 +436,23 @@ class Build(BoardCase):
         put(self.repo, "sample-orchestrator", "for the orchestrator", sender="sample-dev")
         result = self.build(state)
         orch, dev, reviewer = result.rows
-        self.assertEqual((dev.queued, dev.next_from, dev.next_line), (3, "sample-orchestrator", "older task"))
+        self.assertEqual((dev.queued, dev.fyi, dev.next_from, dev.next_line),
+                         (2, 1, "sample-orchestrator", "older task"))  # design 33.2: the FYI is counted apart
         self.assertAlmostEqual(dev.oldest, 420, delta=5)
         self.assertEqual(dev.note, "holding: owner typing")
         self.assertEqual(orch.note, "retrying in 42 s")
         self.assertEqual((reviewer.queued, reviewer.note), (0, "pointed to inbox --read"))  # past its ttl: not counted
         self.assertEqual(len(box(self.repo, "sample-reviewer", NEW)), 1)  # and not moved: the board only reads
-        self.assertEqual((result.owner_count, result.owner_id, result.owner_from, result.owner_line),
-                         (1, owner.short, "sample-dev", "Example ready"))
+        self.assertEqual((result.owner_id, result.owner_from, result.owner_line),
+                         (owner.short, "sample-dev", "Example ready"))
+        self.assertIn("owner 1", result.queue_counts)  # design 33.2: the owner's count is in the status form
         self.assertEqual((result.owner_newest.id, result.owner_newest.sender), (owner.id, "sample-dev"))
         self.assertEqual((result.waiting, result.holding, result.retrying, result.watching), (1, 1, 1, 3600 * 11))
         self.assertEqual(result.event.text, "delivered 2 to sample-dev")
         shown = text(B.render(result, 162, 6, True))
         self.assertRegex(shown[0], r'owner: #%s %s from sample-dev "Example ready"' % (owner.short, HHMM))
         self.assertTrue(shown[0].endswith("waiting on 1 \u00b7 holding 1 \u00b7 retrying 1"))
-        self.assertIn("3 queued, holding: owner typing", shown[2])
+        self.assertIn("2 queued, holding: owner typing +1 fyi", shown[2])  # design 33.2
         self.assertTrue(shown[5].startswith("08:02 delivered 2 to sample-dev"))
 
     def test_debts_the_oldest_owed_by_each_seat(self):

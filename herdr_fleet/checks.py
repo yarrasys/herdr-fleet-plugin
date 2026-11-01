@@ -1,8 +1,9 @@
 """Read-only inspection: drift (design 4.4), status (4.2, 16.3, 16.4, 16.7, 17.2,
 17.4, 18.6's watcher and queued lines, 19.1's watcher strip, 20.2's debt ages,
 20.5's ``blocked (4m)``, 20.8's queue ages, 32.4's inbox wait, 32.5's handover pane,
-32.6's queued kickoff) and doctor (4.7, 16.6, 17.3, 18.7's hooks line, 22.1's pane names
-line).
+32.6's queued kickoff, 33.2's FYI counts, 33.3's unread mailboxes, 33.4's stale debts) and
+doctor (4.7, 16.6, 17.3, 18.7's hooks line, 22.1's pane names line, 33.3's unread
+mailboxes).
 
 Nothing here changes herdr. ``collect_status`` may rewrite the state file
 when it prunes ids herdr no longer knows, which every command does, and records
@@ -163,9 +164,9 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
         "seats": seats,
         "contacts": [{"name": r.contact.name, "pane_id": r.pane, "state": r.state, "note": r.contact.note,
                       "problem": r.problem()} for r in contact_mod.resolve_all(fleet, agents)],
-        "owed": messages.owed(_log_entries(ctx)),
+        "owed": stale_marked(messages.owed(_log_entries(ctx)), now),
     }
-    data["queued"], data["queued_oldest"] = queued_summary(fleet)
+    data.update(queued_summary(fleet, now))
     if state.handover:  # design 32.5 (prune_state above dropped one whose pane is gone)
         data["handover"] = dict(state.handover)
     data["watcher"] = watchpane.watcher_status(ctx)
@@ -177,31 +178,70 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
     return data
 
 
-def queued_summary(fleet: Fleet) -> Tuple[Dict[str, int], Dict[str, str]]:
-    """({mailbox: queued count}, {mailbox: time of the oldest}) for every non-empty mailbox,
-    seats in file order, then contacts, other names, and ``owner`` last. Read-only:
-    messages past their ttl are not counted, and nothing moves."""
-    found = inbox.queued(fleet.repo)
+def queued_summary(fleet: Fleet, now: Optional[datetime.datetime] = None) -> Dict:
+    """The ``queued*`` keys of ``status --json`` for every mailbox holding a message that is
+    not due, seats in file order, then contacts, other names, and ``owner`` last:
+    ``queued`` (every such message) and ``queued_oldest`` (the oldest one's time), as
+    before; design 33.2's ``queued_fyi`` (the FYIs among them) and
+    ``queued_oldest_actionable`` (the oldest message that is no FYI, for mailboxes that hold
+    one); 33.3's ``queued_unread`` (mailboxes that are no seat, contact or owner).
+    Read-only: due messages are not counted, and nothing moves."""
+    found = inbox.queued(fleet.repo, fleet.fyi_ttl, now)
     order = [s.name for s in fleet.seats] + [c.name for c in fleet.contacts]
     names = [n for n in order if n in found] + sorted(n for n in found if n not in order and n != messages.OWNER)
     if messages.OWNER in found:
         names.append(messages.OWNER)
-    return ({n: len(found[n]) for n in names},
-            {n: min(found[n], key=inbox.Message.sort_key).time for n in names})
+    oldest = {n: min(found[n], key=inbox.Message.sort_key).time for n in names}
+    actionable = {n: [m for m in found[n] if not m.fyi] for n in names}
+    return {"queued": {n: len(found[n]) for n in names}, "queued_oldest": oldest,
+            "queued_fyi": {n: len(found[n]) - len(actionable[n]) for n in names},
+            "queued_oldest_actionable": {n: min(actionable[n], key=inbox.Message.sort_key).time
+                                         for n in names if actionable[n]},
+            "queued_unread": [n for n in names if n not in order and n != messages.OWNER]}
 
 
 def queued_line(data: Dict) -> Optional[str]:
-    """``queued: sample-dev 2 (oldest 25m), owner 1`` (ages, design 20.8); None when every
-    mailbox is empty."""
+    """``queued: sample-dev 2 (oldest 25m, +1 fyi), sample-reviewer 1 fyi, owner 1`` (ages,
+    design 20.8; FYIs apart, 33.2; an unread mailbox ends ``(no seat or contact)``, 33.3);
+    None when every mailbox is empty."""
     counts, oldest = data.get("queued") or {}, data.get("queued_oldest") or {}
     if not counts:
         return None
+    fyis, since = data.get("queued_fyi") or {}, data.get("queued_oldest_actionable") or {}
+    unread = set(data.get("queued_unread") or ())
     now = inbox.now_utc()
     parts = []
     for name, count in counts.items():
-        age = inbox.age_since(oldest.get(name), now) if count > 1 else None
-        parts.append("%s %d%s" % (name, count, " (oldest %s)" % age if age else ""))
+        fyi = fyis.get(name, 0)
+        age = inbox.age_since(since.get(name) or oldest.get(name), now)
+        parts.append(inbox.count_label(name, count - fyi, fyi, age, name in unread))
     return "queued: " + ", ".join(parts)
+
+
+STALE_DEBT_S = 3 * 86400  # design 33.4: status folds debts older than this into one line
+STALE_DEBT = "3d"
+
+
+def stale_marked(items: List[Dict], now: datetime.datetime) -> List[Dict]:
+    """The owed list with ``stale`` on each debt (design 33.4): its request was delivered
+    more than STALE_DEBT_S ago."""
+    for item in items:
+        when = inbox.parse_time(item.get("since"))
+        item["stale"] = when is not None and (now - when).total_seconds() > STALE_DEBT_S
+    return items
+
+
+def stale_line(items: Sequence[Dict], now: Optional[datetime.datetime] = None) -> Optional[str]:
+    """``awaiting: N older than 3d (oldest AGE), not listed; …`` for the stale debts, or None."""
+    stale = [o for o in items if o.get("stale")]
+    if not stale:
+        return None
+    ages = [inbox.parse_time(o.get("since")) for o in stale]
+    oldest = min((a for a in ages if a is not None), default=None)
+    age = inbox.age_label(((now or inbox.now_utc()) - oldest).total_seconds()) if oldest else "?"
+    return ("awaiting: %d older than %s (oldest %s), not listed; see herdr-fleet log --owed; the owner closes them "
+            "with herdr-fleet ack --older-than %s --reason TEXT (--dry-run first)" % (len(stale), STALE_DEBT, age,
+                                                                                   STALE_DEBT))
 
 
 def git_branch(cwd: str) -> str:
@@ -308,7 +348,11 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
             where = c["pane_id"] or "-"
             lines.append("  %s  %s  %s%s" % (c["name"], where, c["state"],
                                               "  (%s)" % c["note"] if c["note"] else ""))
-    lines.extend(messages.owed_lines(data.get("owed", []), hint=True))  # design 23.4: how to settle it
+    owed = data.get("owed", [])
+    lines.extend(messages.owed_lines([o for o in owed if not o.get("stale")], hint=True))  # 23.4: how to settle it
+    stale = stale_line(owed)  # design 33.4: the old ones in one line
+    if stale:
+        lines.append(stale)
     if data.get("handover"):
         lines.append(handover_line(data["handover"]))
     queued = queued_line(data)
@@ -364,6 +408,7 @@ def run_doctor(ctx: Ctx) -> List[Check]:
     _check_permissions(ctx, fleet, add)
     if any(seat.kind == "claude" for seat in fleet.seats):  # design 18.7: the hooks are Claude Code's
         add(hooks.doctor_check(fleet.repo))
+    _check_unread(ctx, fleet, add)
     try:
         state = ctx.state
         add(("ok", "state file", state.path if state.existed else "%s (created on first up)" % state.path))
@@ -475,6 +520,26 @@ def _check_files(fleet: Fleet, add) -> None:
             add(("ok", "state_note", fleet.state_note))
         else:
             add(("warn", "state_note", "not readable yet: %s ({state} will be empty)" % fleet.state_note))
+
+
+def _check_unread(ctx: Ctx, fleet: Fleet, add) -> None:
+    """Design 33.3: a mailbox holding messages that are not due, whose name is no seat,
+    contact or ``owner`` here: the watcher does not deliver it, though it can be 31's
+    queue for a live agent with no fleet of its own, which ``deliver NAME`` delivers.
+    Read-only; warns, never fails."""
+    try:
+        summary = queued_summary(fleet)
+    except OSError as exc:
+        add(("warn", "inbox", "cannot read the mailboxes: %s" % exc))
+        return
+    now = inbox.now_utc()
+    flag = messages.fleet_flag(ctx)
+    for name in summary["queued_unread"]:
+        add(("warn", "inbox", "%s holds %d queued (oldest %s); it is no seat or contact here, so the watcher does "
+             "not deliver it. Read it with herdr-fleet inbox%s --as %s --read, deliver it with herdr-fleet deliver%s "
+             "%s if %s is a live agent, or (%s or the owner) drop it with herdr-fleet inbox%s --as %s --drop"
+             % (name, summary["queued"][name], inbox.age_since(summary["queued_oldest"][name], now) or "?",
+                flag, name, flag, name, name, name, flag, name)))
 
 
 def _check_permissions(ctx: Ctx, fleet: Fleet, add) -> None:

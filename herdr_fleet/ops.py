@@ -77,7 +77,7 @@ def drop_inboxes(ctx: Ctx, seats: Sequence[Seat], report: Report) -> None:
     these seats to ``cur/``, logged ``dropped``, so the kickoff starts clean."""
     for seat in seats:
         if ctx.dry_run:
-            count = len(inbox.queued(ctx.fleet.repo).get(seat.name, []))
+            count = len(inbox.queued(ctx.fleet.repo, ctx.fleet.fyi_ttl).get(seat.name, []))
             if count:
                 report.add(seat.name, "plan", "drop %d queued message%s" % (count, "" if count == 1 else "s"))
             continue

@@ -24,9 +24,9 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 - ``labels``: the seats' pane names (``pane rename``), kept by up, restart, swap,
   kickoff, tile and status, cleared by down.
 - ``inbox``: the mailboxes under ``.herdr/inbox`` (ids, message files, batches,
-  moves between ``new/`` and ``cur/``, ttl); ``messages``: ``send``, ``ack``, the
-  message log, owed replies and the delivery engine; ``mailroom``: ``deliver``
-  and ``inbox``;
+  moves between ``new/`` and ``cur/``, ttl and ``fyi_ttl``); ``messages``: ``send``,
+  ``ack``, the message log, owed replies and the delivery engine; ``mailroom``:
+  ``deliver``, ``inbox`` (``--drop`` too) and the watcher's expiry sweep;
   ``watch``: the foreground watcher that delivers as seats turn idle;
   ``board``: the board it draws in the strip (the model and its pure rendering);
   ``tui``: the curses screen it draws on (and the fake screen of the tests);
@@ -43,7 +43,7 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 
 import os
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

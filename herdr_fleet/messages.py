@@ -52,13 +52,14 @@ import datetime
 import json
 import os
 import re
+import shlex
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from herdr_fleet import contacts as contact_mod
 from herdr_fleet import crossfleet, inbox, presence, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, preflight
-from herdr_fleet.fleetfile import NAME_RE
+from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.herdr import HerdrError
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
 from herdr_fleet.kickoff import INBOX_HEADING
@@ -433,33 +434,47 @@ class Drop:
     agent: Dict = field(default_factory=dict)  # the agent record safe_prompt read (pane_id, kind)
 
 
-def expire_due(ctx: Ctx, name: str, now: Optional[datetime.datetime] = None) -> List[Message]:
-    """Move queued messages past their ttl to ``cur/``, each logged ``expired`` (18.4)."""
+def expire_due(ctx: Ctx, name: str, now: Optional[datetime.datetime] = None,
+               timer_mail: bool = True) -> List[Tuple[Message, str]]:
+    """Move queued messages that are due to ``cur/``, each logged ``expired`` with ``via``
+    ``ttl`` (18.4) or ``fyi_ttl`` (33.1), and return them with that reason. Without
+    ``timer_mail`` a message with timer metadata stays, for ``timers.cycle`` to expire
+    (the watcher's sweep, 33.1). The caller holds ``inbox.locked``."""
     now = now or inbox.now_utc()
     gone = []
     for message in queued_in(ctx, name):
-        if inbox.is_due(message, now):
+        reason = inbox.due_by(message, now, ctx.fleet.fyi_ttl)
+        if reason and (timer_mail or not message.timer):
             try:
                 inbox.move(ctx.fleet.repo, message, CUR)
             except OSError as exc:
                 ctx.warn("cannot expire %s: %s" % (message.path, exc))
                 continue
-            record(ctx, disposal_entry("expired", message, "ttl"))
-            gone.append(message)
+            record(ctx, disposal_entry("expired", message, reason))
+            gone.append((message, reason))
     return gone
+
+
+def drop_messages(ctx: Ctx, name: str, via: str, keep: Optional[Callable[[Message], bool]] = None) -> List[Message]:
+    """Move the queued messages of ``name`` that ``keep`` does not keep to ``cur/``, each
+    logged ``dropped`` with ``via``, and return them; nothing is sent. Shared by
+    ``--drop-inbox`` (18.5) and ``inbox --drop`` (33.3). The caller holds ``inbox.locked``."""
+    dropped = []
+    for message in queued_in(ctx, name):
+        if keep is not None and keep(message):
+            continue
+        inbox.move(ctx.fleet.repo, message, CUR)
+        record(ctx, disposal_entry("dropped", message, via))
+        dropped.append(message)
+    return dropped
 
 
 def drop_queued(ctx: Ctx, name: str) -> int:
     """``--drop-inbox``: move every queued message of ``name`` to ``cur/``, logged ``dropped``."""
-    count = 0
     if not inbox.has_queued(ctx.fleet.repo, name):
-        return count
+        return 0
     with inbox.locked(ctx.fleet.repo, name):
-        for message in queued_in(ctx, name):
-            inbox.move(ctx.fleet.repo, message, CUR)
-            record(ctx, disposal_entry("dropped", message, "drop-inbox"))
-            count += 1
-    return count
+        return len(drop_messages(ctx, name, "drop-inbox"))
 
 
 def inbox_block(ctx: Ctx, name: str) -> Tuple[str, List[Message], List[Message]]:
@@ -619,7 +634,7 @@ def refusal_waiting(ctx: Ctx, name: str, exclude: Sequence[str] = ()) -> bool:
     if not inbox.has_queued(ctx.fleet.repo, name):
         return False
     now = inbox.now_utc()
-    return has_refusal([m for m in queued_in(ctx, name) if not inbox.is_due(m, now)], exclude)
+    return has_refusal([m for m in queued_in(ctx, name) if not inbox.is_due(m, now, ctx.fleet.fyi_ttl)], exclude)
 
 
 def notify_owner(ctx: Ctx) -> Drop:
@@ -640,7 +655,8 @@ def notify_owner(ctx: Ctx) -> Drop:
         title = "%d messages for owner (oldest %s)" % (len(items), since_label(oldest.time))
         body = "\n".join("#%s %s: %s" % (m.short, m.sender, first_line(m.body)) for m in items)
     senders = sorted({m.sender for m in items})
-    body += "\nread: herdr-fleet inbox --as owner --history %s" % (senders[0] if len(senders) == 1 else "<name>")
+    body += "\nread: herdr-fleet inbox%s --as owner --history %s" % (fleet_flag(ctx), senders[0] if len(senders) == 1
+                                                                      else "<name>")
     if not notify(ctx.herdr, title, body, "request", errors=ctx.stderr):
         return Drop("failed", "notification failed", "", [], items)
     settle(ctx, items, "notify", "sent")
@@ -660,7 +676,7 @@ def position(ctx: Ctx, name: str, ident: str) -> Tuple[int, int]:
     """Where a queued message sits in its mailbox's delivery order: (1-based position,
     count), counting messages not past their ttl; (0, count) when it is not there."""
     now = inbox.now_utc()
-    waiting = [m for m in inbox.read_box(ctx.fleet.repo, name, NEW) if not inbox.is_due(m, now)]
+    waiting = [m for m in inbox.read_box(ctx.fleet.repo, name, NEW) if not inbox.is_due(m, now, ctx.fleet.fyi_ttl)]
     ids = [m.id for m in waiting]
     return (ids.index(ident) + 1 if ident in ids else 0), len(ids)
 
@@ -906,17 +922,35 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
     return EXIT_PARTIAL if EXIT_PARTIAL in codes else EXIT_OK
 
 
+def fleet_flag(ctx: Ctx) -> str:
+    """Design 33.5: `` --fleet PATH`` for a ``herdr-fleet inbox`` command line printed for
+    the caller to run, only when discovery from the caller's cwd, ignoring ``--fleet``,
+    ``--file`` and ``HERDR_FLEET_FILE``, would find another fleet file or none; else "".
+    Reads the file system only."""
+    path = ctx.fleet.path
+    try:
+        found: Optional[str] = find_fleet_file(ctx.cwd, None, {})
+    except FleetError:
+        found = None
+    if found is not None and os.path.realpath(found) == os.path.realpath(path):
+        return ""
+    return " --fleet %s" % shlex.quote(path)
+
+
 def inbox_note(ctx: Ctx, name: str, explicit: bool) -> Optional[str]:
-    """Design 23.1: when the sender's own mailbox holds messages not past their ttl,
+    """Design 23.1: when the sender's own mailbox holds messages that are not due,
     ``note: 1 unread from sample-orchestrator (#103001, 20:20); read it before you go on:
     herdr-fleet inbox --read``; for several, the senders in the order of their oldest
     message and ``(oldest #id, HH:MM)``. ``--as NAME`` names the mailbox in the command.
-    ``send`` prints it before its per-target lines; it only reads."""
+    Design 33.2: FYIs are counted apart (``2 unread (+1 fyi) from …``; ``1 unread fyi
+    from …`` when only FYIs wait), and the id and time are the oldest actionable
+    message's; 33.5: the command keeps ``--fleet``. ``send`` prints it before its
+    per-target lines; it only reads."""
     if not NAME_RE.match(name) or not inbox.has_queued(ctx.fleet.repo, name):
         return None
     now = inbox.now_utc()
-    waiting = sorted((m for m in inbox.read_box(ctx.fleet.repo, name, NEW) if not inbox.is_due(m, now)),
-                     key=Message.sort_key)
+    waiting = sorted((m for m in inbox.read_box(ctx.fleet.repo, name, NEW)
+                      if not inbox.is_due(m, now, ctx.fleet.fyi_ttl)), key=Message.sort_key)
     if not waiting:
         return None
     senders: List[str] = []
@@ -924,11 +958,17 @@ def inbox_note(ctx: Ctx, name: str, explicit: bool) -> Optional[str]:
         if message.sender not in senders:
             senders.append(message.sender)
     who = senders[0] if len(senders) == 1 else "%s and %s" % (", ".join(senders[:-1]), senders[-1])
+    actionable, fyis = inbox.split_fyi(waiting)
+    head = (actionable or fyis)[0]
     count = len(waiting)
-    oldest = "%s#%s, %s" % ("" if count == 1 else "oldest ", waiting[0].short, since_label(waiting[0].time))
-    command = "herdr-fleet inbox%s --read" % (" --as %s" % name if explicit else "")
-    return "note: %d unread from %s (%s); read %s before you go on: %s" % (
-        count, who, oldest, "it" if count == 1 else "them", command)
+    if actionable:
+        counted = "%d unread%s" % (len(actionable), " (+%d fyi)" % len(fyis) if fyis else "")
+    else:
+        counted = "%d unread fyi" % len(fyis)
+    oldest = "%s#%s, %s" % ("" if len(actionable or fyis) == 1 else "oldest ", head.short, since_label(head.time))
+    command = "herdr-fleet inbox%s%s --read" % (fleet_flag(ctx), " --as %s" % name if explicit else "")
+    return "note: %s from %s (%s); read %s before you go on: %s" % (
+        counted, who, oldest, "it" if count == 1 else "them", command)
 
 
 Lines = Tuple[List[str], int]
@@ -1190,7 +1230,8 @@ def _would_send(ctx: Ctx, target: Target, message: Message, state: str, mode: st
             return "would refuse %s (%s): nothing sent; %s" % (target.name, state, HOLD % hold)
         return "would queue in herdr-fleet for %s%s; %s" % (target.name, _label(state, message), HOLD % hold)
     now = inbox.now_utc()
-    queued = [m for m in inbox.read_box(ctx.fleet.repo, target.name, NEW) if not inbox.is_due(m, now)]
+    queued = [m for m in inbox.read_box(ctx.fleet.repo, target.name, NEW)
+              if not inbox.is_due(m, now, ctx.fleet.fyi_ttl)]
     _, size, pointer = compose_prompt(queued, message)
     if pointer:
         return "would queue in herdr-fleet for %s (%s) and prompt a pointer: %s" % (
@@ -1249,11 +1290,13 @@ def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Opti
     """Design 17.1, 18.8, 20.2 and 23.4: settle what the caller owes by hand. A name settles the
     caller's debt to that sender; an id (``#3f2a9c``) settles that one message;
     ``--older-than`` settles every message owed that was delivered longer ago, one by one
-    (names and ids restrict it). ``--reason TEXT`` goes with ids only and closes the debt of
-    each message whoever owes it, logged with the caller as ``by``; without it, an id owed
-    by someone else is a usage error and nothing is written. Appends one ``ack`` entry per
-    debt and sends nothing to anyone; ``--dry-run`` writes nothing. The caller is found as
-    for ``send``; herdr is asked only when ``--as`` does not say."""
+    (names and ids restrict it). ``--reason TEXT`` with ids closes the debt of each message
+    whoever owes it, logged with the caller as ``by``; without it, an id owed by someone
+    else is a usage error and nothing is written. Design 33.4: ``--older-than D --reason
+    TEXT`` without names or ids closes every debt in the log older than D, whoever owes it.
+    Appends one ``ack`` entry per debt and sends nothing to anyone; ``--dry-run`` writes
+    nothing. The caller is found as for ``send``; herdr is asked only when ``--as`` does
+    not say."""
     try:
         limit = inbox.parse_ttl(older_than, "--older-than") if older_than else None
     except ValueError as exc:
@@ -1262,17 +1305,30 @@ def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Opti
         raise UsageError("ack needs a name, a message id, --all or --older-than")
     if reason is not None and not reason.strip():
         raise UsageError("--reason needs a text (why the debt is closed)")
-    if reason is not None and (all_owed or limit is not None):
-        raise UsageError("--reason goes with message ids only (ack #id --reason TEXT), not with --all or "
-                         "--older-than")
-    if not as_name:
-        preflight(ctx)
-    caller = resolve_sender(ctx, as_name)
+    if reason is not None and all_owed:
+        raise UsageError("--reason goes with message ids (ack #id --reason TEXT) or with --older-than alone "
+                         "(ack --older-than D --reason TEXT), not with --all")
+    if reason is not None and limit is not None and names:
+        raise UsageError("ack --older-than D --reason TEXT closes every old debt, whoever owes it, and takes no "
+                         "name or id: %s" % ", ".join(names))
+    bulk = reason is not None and limit is not None
+    if bulk:  # design 33.4: the owner's only, found by the lookup whatever --as says
+        if ctx.inside_herdr():
+            preflight(ctx)
+        if resolve_sender(ctx, None) != OWNER:
+            raise UsageError("closing others' debts in bulk is the owner's; ack #id --reason TEXT closes one")
+        caller = OWNER
+    else:
+        if not as_name:
+            preflight(ctx)
+        caller = resolve_sender(ctx, as_name)
     repo = ctx.fleet.repo
     warnings: List[str] = []
     entries = read(repo, warnings)
     for warning in warnings:
         ctx.warn(warning)
+    if bulk:
+        return _close_older(ctx, entries, caller, limit, str(older_than), str(reason))
     known = {s.name for s in ctx.fleet.seats} | {c.name for c in ctx.fleet.contacts} | {OWNER}
     known |= {str(e.get(k)) for e in entries for k in ("from", "to")}
     items: List[Tuple[str, str]] = []  # ("name", NAME) or ("id", full id)
@@ -1380,6 +1436,48 @@ def _ack_older(ctx: Ctx, entries: Sequence[Dict], caller: str, items: Sequence[T
         if not ctx.dry_run:
             append(ctx.fleet.repo, ack_entry(caller, sender))
         ctx.say("%s %s %s" % (verb, sender, label))
+    return EXIT_OK
+
+
+def _close_older(ctx: Ctx, entries: Sequence[Dict], caller: str, limit: datetime.timedelta, spelled: str,
+                 reason: str) -> int:
+    """Design 33.4: ``ack --older-than D --reason TEXT``. Every unsettled request in this
+    fleet's log delivered more than ``limit`` ago, whoever owes it, is closed as 23.4's
+    ``ack #id --reason`` closes one (from its debtor, ``by`` the caller, with the reason). A
+    message without an id (sent before 0.6.0) is closed by its pair's names, as ``ack
+    --older-than`` does, and only when no newer message of that pair is still owed."""
+    now = inbox.now_utc()
+    items = [item for _, item in unsettled(entries)]
+
+    def age(item: Dict) -> float:
+        when = inbox.parse_time(item["since"])
+        return (now - when).total_seconds() if when is not None else -1.0
+
+    old = [i for i in items if age(i) > limit.total_seconds()]
+    if not old:
+        ctx.say("nothing owed older than %s" % spelled)
+        return EXIT_OK
+    verb = "would ack" if ctx.dry_run else "acked"
+    pairs_done: Set[Tuple[str, str]] = set()
+    for item in old:
+        label = "since %s, %s ago (%s), owed by %s; reason: %s" % (
+            since_label(item["since"]), inbox.age_label(age(item)), item["first_line"], item["to"], reason)
+        if item.get("id"):
+            if not ctx.dry_run:
+                log_ack(ctx, ack_entry(item["to"], item["from"], ident=item["id"], by=caller, reason=reason))
+            ctx.say("%s #%s from %s %s" % (verb, inbox.short_of(item["id"]), item["from"], label))
+            continue
+        pair = (item["to"], item["from"])
+        if pair in pairs_done:
+            continue
+        if any((i["to"], i["from"]) == pair and age(i) <= limit.total_seconds() for i in items):
+            ctx.say("skipped a message from %s to %s %s: it has no id, and closing it by name would also settle "
+                    "newer ones" % (item["from"], item["to"], label))
+            continue
+        pairs_done.add(pair)
+        if not ctx.dry_run:
+            append(ctx.fleet.repo, ack_entry(item["to"], item["from"], by=caller, reason=reason))
+        ctx.say("%s %s %s" % (verb, item["from"], label))
     return EXIT_OK
 
 
