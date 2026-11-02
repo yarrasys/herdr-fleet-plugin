@@ -22,13 +22,13 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from herdr_fleet import (MIN_HERDR_VERSION, contacts as contact_mod, context_size, gitinfo, hooks, inbox, messages,
                          permissions, presence)
-from herdr_fleet import build_identity, labels, seen, watchpane
+from herdr_fleet import build_identity, labels, limits, seen, watchpane
 from herdr_fleet.context import Ctx
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import Herdr, HerdrError, describe
 from herdr_fleet.seats import (QUIT_CONFIG_HINT, agent_args, contains_in_order, find_agent_process,
                                process_argv, quit_command)
-from herdr_fleet.state import StateError, prune_state
+from herdr_fleet.state import StateError, prune_state, read_agents
 
 # herdr's integration names that differ from the agent kind.
 INTEGRATION_ALIASES = {"agy": "antigravity-cli"}
@@ -118,10 +118,14 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
     agents = herdr.agent_list()
     live = {str(a["name"]): a for a in agents if a.get("name")}
     seats = []
+    on_disk = read_agents(fleet.repo)  # design 35.2: the watcher writes `limited` while this runs
     for seat in fleet.seats:
         agent = live.get(seat.name)
         entry = state.entry(seat.name) or {}
         adopted = bool(agent) and is_adopted(entry)
+        failover = failover_record(seat, entry)
+        limited = on_disk.get(seat.name, {}).get("limited")
+        running = str((agent or {}).get("agent") or entry.get("kind") or seat.kind)
         cwd = str((agent.get("foreground_cwd") or agent.get("cwd")) if agent else seat.cwd or "")
         seats.append({
             "name": seat.name,
@@ -131,13 +135,19 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
             "state": str(agent.get("agent_status") or "unknown") if agent else "absent",
             "cwd": cwd,
             "branch": git_branch(cwd),
-            "drift": drift_reasons(ctx, seat, agent, compare_args=not adopted) if agent else [],
+            "drift": (["failed over from %s" % failover.get("from")] if failover else [])
+            + (drift_reasons(ctx, seat, agent, compare_args=not adopted) if agent else []),
             "adopted": adopted,
             "notes": seat.notes,
             "blocked_at_startup": bool(entry.get("blocked_at_startup")),
             "last_kickoff_at": entry.get("last_kickoff_at"),
             "state_since": None,
         })
+        if seat.prefer:  # design 35.1 and 35.3
+            seats[-1].update(tier=seat.tier, prefer=list(seat.prefer), failover=failover)
+        if limited and limits.counts(limited):  # design 35.2: the kind with a limit still recorded
+            seats[-1]["limited"] = dict(limited)
+            seats[-1]["limit_holds"] = limits.holds(limited, running)
         if context:
             reading = context_size.seat_context(agent, ctx.env) if agent else None
             hint = fleet.restart_hint_tokens
@@ -173,9 +183,57 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
     data["cli"] = dict(build_identity.current())
     data["watcher"]["comparison"] = (build_identity.compare(data["cli"], data["watcher"]["launch"])
                                        if data["watcher"].get("running") else "unknown")
+    allowance = codex_allowance(ctx, live, seats, context)
+    if allowance is not None:
+        data["codex"] = allowance
     if integrations:
         data["integrations"] = integration_rows(herdr, fleet.kinds())
     return data
+
+
+def failover_record(seat: Seat, entry: Mapping) -> Optional[Dict]:
+    """The state entry's ``failover`` (design 35.3) for a tier seat that runs the kind it names."""
+    record = entry.get("failover") if isinstance(entry, Mapping) else None
+    if seat.prefer and isinstance(record, dict) and record.get("to") == seat.kind:
+        return dict(record)
+    return None
+
+
+def codex_allowance(ctx: Ctx, live: Mapping[str, Mapping], seats: Sequence[Dict], context: bool) -> Optional[Dict]:
+    """Design 35.2: the Codex allowance line's data, when any seat runs Codex. ``status`` reads no
+    transcript without ``--context`` (29.2), so the reading is the one the watcher recorded in the
+    state file (``codex_allowance``); with ``--context`` the live Codex seats' rollouts are read
+    now, the first that yields a record winning. None when no seat runs Codex."""
+    running = [s["name"] for s in seats if (s.get("live_kind") or s.get("kind")) == "codex"]
+    if not running:
+        return None
+    reading = None
+    if context:
+        for name in running:
+            reading = context_size.seat_allowance(live.get(name), ctx.env)
+            if reading is not None:
+                break
+    if reading is None:
+        recorded = ctx.state.data.get("codex_allowance")
+        reading = dict(recorded) if isinstance(recorded, dict) and recorded.get("used_percent") is not None else None
+    return {"seats": running, "reading": reading, "warn_at": ctx.fleet.failover_at_percent}
+
+
+def allowance_line(info: Mapping, now: Optional[datetime.datetime] = None) -> str:
+    """``codex: 83% of the weekly allowance (resets Thu 20:44)`` (design 35.2); the reading's
+    window names the allowance (a week, five hours), and a missing reading says how to get one."""
+    reading = info.get("reading")
+    if not reading:
+        return "codex: allowance not read yet (the watcher reads it every 10 minutes; status --context reads it now)"
+    minutes = reading.get("window_minutes")
+    window = {10080: "weekly", 300: "5-hour"}.get(minutes, "%d-minute" % minutes if minutes else "")
+    when = limits.epoch_time(reading.get("resets_at"))
+    percent = reading["used_percent"]
+    text = "codex: %s%% of the %s allowance" % (("%d" % percent) if float(percent).is_integer() else "%.1f" % percent,
+                                                 window or "account")
+    if when is not None:
+        text += " (resets %s)" % limits.reset_label(when)
+    return text + (" - at or above %d%%" % info["warn_at"] if percent >= info.get("warn_at", 101) else "")
 
 
 def queued_summary(fleet: Fleet, now: Optional[datetime.datetime] = None) -> Dict:
@@ -290,7 +348,13 @@ def state_label(seat: Dict, now: Optional[datetime.datetime] = None) -> str:
         label = "%s (inbox wait%s)" % (seat["state"], " " + age if age else "")
     else:
         label = seen.label(seat["state"], {"state": seat["state"], "since": seat.get("state_since")})
-    return label + startup_label(seat)
+    return label + startup_label(seat) + limited_suffix(seat)
+
+
+def limited_suffix(seat: Mapping) -> str:
+    """``, limited (claude, since 10:41)`` for a seat whose running kind has a limit recorded
+    that still holds its queue (design 35.2)."""
+    return ", " + limits.status_label(seat["limited"]) if seat.get("limited") and seat.get("limit_holds") else ""
 
 
 def handover_line(record: Dict) -> str:
@@ -355,6 +419,8 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
         lines.append(stale)
     if data.get("handover"):
         lines.append(handover_line(data["handover"]))
+    if data.get("codex"):
+        lines.append(allowance_line(data["codex"]))
     queued = queued_line(data)
     watcher = data.get("watcher") or {}
     if queued or watchpane.shown(watcher):  # design 18.6 and 19.1: who delivers, then what waits
@@ -403,10 +469,11 @@ def run_doctor(ctx: Ctx) -> List[Check]:
         level = "warn" if row["flag"] else "ok"
         add((level, "integration %s" % row["kind"], row["line"] or row["status"]))
     _check_quit(ctx, fleet, add)
+    _check_tiers(ctx, fleet, add)
     _check_presence(ctx, fleet, add)
     _check_pane_names(ctx, add)
     _check_permissions(ctx, fleet, add)
-    if any(seat.kind == "claude" for seat in fleet.seats):  # design 18.7: the hooks are Claude Code's
+    if any("claude" in seat.kinds() for seat in fleet.seats):  # design 18.7: the hooks are Claude Code's
         add(hooks.doctor_check(fleet.repo))
     _check_unread(ctx, fleet, add)
     try:
@@ -545,18 +612,41 @@ def _check_unread(ctx: Ctx, fleet: Fleet, add) -> None:
 def _check_permissions(ctx: Ctx, fleet: Fleet, add) -> None:
     """Design 16.6: advisory; warns, never fails."""
     missing: List[str] = []
-    if any(seat.kind == "claude" for seat in fleet.seats):
+    if any("claude" in seat.kinds() for seat in fleet.seats):  # design 35.1: a fallback may be Claude too
         missing, problems = permissions.check(fleet.repo, permissions.home_dir(ctx.env.get("HOME")))
         for problem in problems:
             add(("warn", "permissions", problem))
     for seat in fleet.seats:
         label = "permissions %s" % seat.name
-        if seat.kind != "claude":
-            add(("skip", label, "not checked (%s)" % seat.kind))
+        if "claude" not in seat.kinds():
+            add(("skip", label, "not checked (%s)" % "/".join(seat.kinds())))
         elif missing:
             add(("warn", label, permissions.suggestion(missing)))
         else:
             add(("ok", label, "herdr agent prompt/get/wait/read and herdr-fleet are allowed"))
+
+
+def _check_tiers(ctx: Ctx, fleet: Fleet, add) -> None:
+    """Design 35.1 and 35.3: one line per tier seat naming its kinds in order and, after a failover,
+    the kind it runs and how to return; one when a limit is recorded; one for a kind without limit
+    patterns (it is never read for a limit, 35.2). Informational."""
+    from herdr_fleet.seats import LIMIT_PATTERNS
+    recorded = read_agents(fleet.repo)
+    for seat in fleet.seats:
+        if not seat.prefer:
+            continue
+        entry = recorded.get(seat.name, {})
+        failover = failover_record(seat, entry)
+        text = " > ".join(seat.prefer) + (" (tier %s)" % seat.tier)
+        if failover:
+            text += "; failed over from %s to %s, `swap %s` returns it" % (failover.get("from"), seat.kind, seat.name)
+        add(("info", "tier %s" % seat.name, text))
+        limited = entry.get("limited")
+        if limits.counts(limited):
+            add(("info", "limit %s" % seat.name, limits.status_label(limited)))
+    unread = sorted({k for seat in fleet.seats for k in seat.kinds() if seat.prefer and k not in LIMIT_PATTERNS})
+    for kind in unread:
+        add(("info", "limits", "no limit pattern for kind %s; its seats are never read for a provider limit" % kind))
 
 
 def _check_presence(ctx: Ctx, fleet: Fleet, add) -> None:
@@ -567,7 +657,9 @@ def _check_presence(ctx: Ctx, fleet: Fleet, add) -> None:
         live = {str(a["name"]): str(a.get("agent") or "") for a in ctx.herdr.agent_list() if a.get("name")}
     except HerdrError:
         live = {}
-    for kind in presence.unchecked_kinds([live.get(seat.name) or seat.kind for seat in fleet.seats]):
+    kinds = [live.get(seat.name) or seat.kind for seat in fleet.seats] + [
+        kind for seat in fleet.seats for kind in seat.kinds()]  # design 35.1: the fallbacks too
+    for kind in presence.unchecked_kinds(kinds):
         add(("info", "presence", "no prompt glyph for kind %s; its seats are not held while the owner types" % kind))
 
 
@@ -593,9 +685,11 @@ def _check_quit(ctx: Ctx, fleet: Fleet, add) -> None:
     for problem in config.problems:  # design 23.7: an [interrupt] entry left out
         add(("warn", "plugin config", problem))
     for seat in fleet.seats:
-        command = quit_command(seat, seat.kind, config.quit)
-        if command:
-            add(("ok", "quit %s" % seat.name, "%s (%s)" % (command, seat.kind)))
-        else:
-            add(("warn", "quit %s" % seat.name, "no quit command for kind %s; restart and down will "
-                 "refuse it: %s" % (seat.kind, QUIT_CONFIG_HINT)))
+        for kind in seat.kinds():  # design 35.1: a tier seat may run any kind of its prefer list
+            command = quit_command(seat, kind, config.quit)
+            where = seat.name if len(seat.kinds()) == 1 else "%s/%s" % (seat.name, kind)
+            if command:
+                add(("ok", "quit %s" % where, "%s (%s)" % (command, kind)))
+            else:
+                add(("warn", "quit %s" % where, "no quit command for kind %s; restart and down will "
+                     "refuse it: %s" % (kind, QUIT_CONFIG_HINT)))

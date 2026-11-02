@@ -314,7 +314,9 @@ class Herdr:
         """The last ``lines`` lines of a pane's screen (``pane read PANE --lines N``), which
         herdr prints as plain text even in JSON mode; ``ansi`` keeps the escape sequences
         (``--format ansi``, design 32.8). Only the presence guard reads them (design 21.2,
-        invariant 19): for the prompt line alone, never kept."""
+        invariant 19), for the prompt line alone; and, only when ``agent read`` is refused for a working
+        seat (``agent_not_idle``), the watcher's quiet-seat limit check (design 35.6) and
+        ``ops.read_screen``, which confirms a limited seat before it is quit (35.6.4); never kept."""
         argv = ["pane", "read", pane_id, "--lines", str(int(lines))]
         if ansi:
             argv += ["--format", "ansi"]

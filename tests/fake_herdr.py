@@ -241,6 +241,39 @@ def prompt_screen(kind: str, typed: str = "") -> str:
     return "\n".join(["\u23fa Done.", "", RULE, line, RULE, STATUS.get(kind, "  ready")]) + "\n"
 
 
+def limit_screen(kind: str, line: str, typed: str = "", prose: str = "") -> str:
+    """A screen tail whose conversation ends in a provider's limit message above the kind's input
+    area, in the layouts seen live on 1 and 2 November (design 35.6): Claude Code's `⎿` line, a
+    `✻ Worked for` line, the rule, `❯`; Kimi's error, a wrapped line and its `/export-debug-zip`
+    hint above the input box (`╭`, `│ >`, `╰`); Codex's `■` line above its rule. ``typed`` is text in
+    the input line; ``prose`` is an assistant sentence placed above, as a seat that mentions limits has."""
+    above = ["\u23fa " + prose, ""] if prose else []
+    if kind == "kimi":
+        box = "\u2502 > " + typed
+        rows = above + ["  " + line, "  window ends. To continue now, purchase extra usage or upgrade your plan: "
+                        "https://example.test/quota", "  If this persists, run /export-debug-zip and attach the archive.",
+                        "", "\u256d" + "\u2500" * 58 + "\u256e", box + " " * max(1, 60 - len(box)) + "\u2502",
+                        "\u2570" + "\u2500" * 58 + "\u256f", "  agent (k3) \u00b7 idle"]
+    elif kind == "claude":
+        rows = above + ["  \u23bf  " + line, "", "\u273b Worked for 3s \u00b7 done", "", RULE,
+                        ("\u276f " + typed).rstrip(), RULE, STATUS["claude"]]
+    else:
+        rows = above + ["\u25a0 " + line, "", RULE, "\u203a " + (typed or PLACEHOLDERS.get(kind, "")), RULE,
+                        STATUS.get(kind, "  ready")]
+    return "\n".join(rows) + "\n"
+
+
+def show_limit(world: Dict, pane: str, line: str, typed: str = "", prose: str = "") -> None:
+    """Put ``line`` (a limit message) on the screen of the agent in ``pane``."""
+    set_screen(world, pane, limit_screen(world["panes"][pane]["agent"]["agent"], line, typed, prose))
+
+
+def shows_limit(text: str) -> bool:
+    """The fake's own judgment, independent of the plugin's, that a screen holds a provider's limit
+    message (design 35.6): the harness allows a quit of a ``working`` seat only after a read that did."""
+    return bool(re.search(r"usage limit|credit balance|\[provider\.api_error\]", text, re.I))
+
+
 def default_screen(world: Dict, pane: str) -> str:
     agent = world["panes"][pane].get("agent")
     if not agent:
@@ -659,6 +692,7 @@ class Sim:
         p = self.w["panes"][pid]
         p["agent"] = None
         p["quitting"] = None
+        (self.w.get("screens") or {}).pop(pid, None)  # the scripted screen went with the agent
         p["procs"] = [dict(SHELL, cwd=p["cwd"])]
         p["linger"] = int(self.b.get("linger_polls", 0))
 
@@ -815,6 +849,7 @@ class Sim:
         p = self.w["panes"][pid]
         status = p["agent"]["agent_status"]
         self.info["target_status"] = status
+        self.info["pane"] = pid
         self.info["target_name"] = p["agent"].get("name")
         self.info["owner_typing"] = owner_typing(self.w, pid)
         self.info["input_held"] = input_held(self.w, pid)  # design 23.11: whatever the focus
@@ -863,6 +898,7 @@ class Sim:
             if agent["agent_status"] not in until:
                 return _err("timeout", "timed out waiting for %s" % pos[0])
         record = self._agent_record(pid)
+        self.info["returned"] = agent["agent_status"]  # design 35.4: the watcher reads a settled seat's screen
         after = self.b.get("status_after_wait", {}).get(key)
         if after:
             agent["agent_status"] = after.pop(0)
@@ -892,6 +928,7 @@ class Sim:
         judged = raw[-count:] if count > 0 else raw
         line = prompt_of(agent["agent"], "\n".join(judged))
         self.info.update(input_text=line_holds_text(agent["agent"], line))  # design 23.11, for ctrl+u
+        self.info.update(limit_shown=shows_limit("\n".join(judged)))  # design 35.6
         ansi = "ansi" in (opts.get("--format") or []) or "--ansi" in opts
         shown = judged if ansi else [plain(item) for item in judged]
         return 0, "\n".join(shown) + "\n", ""
@@ -1068,6 +1105,10 @@ class Sim:
         count = int((opts.get("--lines") or ["0"])[0] or 0)
         self.info["lines"] = count
         shown = lines[-count:] if count > 0 else lines
+        agent = self.w["panes"][pid].get("agent")
+        self.info.update(pane=pid, limit_shown=shows_limit("\n".join(shown)),
+                         input_text=line_holds_text(agent["agent"], prompt_of(agent["agent"], "\n".join(shown)))
+                         if agent else False)
         return 0, "\n".join(shown) + "\n", ""
 
     def _pane_current(self, args: List[str]) -> Result:

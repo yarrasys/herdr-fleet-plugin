@@ -21,7 +21,9 @@ import os
 import shlex
 from typing import Callable, Dict, List, Optional, Sequence, Set, TextIO, Tuple
 
-from herdr_fleet import PLUGIN_ID, inbox, labels, presence, watchpane
+from herdr_fleet import PLUGIN_ID, inbox, labels, limits, presence, watchpane
+from herdr_fleet import messages as messages_mod
+from herdr_fleet import state as state_mod
 from herdr_fleet.bringup import (claim_seat, ensure_seat, follow_pane, label_for, label_of, require_caller_context,
                                 resolve_target, send_kickoffs, start_claimed, start_seat)
 from herdr_fleet.checks import drift_reasons, is_adopted
@@ -30,10 +32,10 @@ from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import HerdrError, describe, has_agent, pane_move_argv, render_cmd, start_argv
 from herdr_fleet.messages import OWNER, drop_queued, interrupt_entry, record, resolve_sender, resolve_targets
 from herdr_fleet.placement import Target, band_anchor, band_check, existing_panes, place_band, place_chain, place_grid
-from herdr_fleet.seats import (DEFAULT_INTERRUPT_WAIT_MS, EXIT_DIALOG_LINES, QUIT_CONFIG_HINT, SETTLED,
+from herdr_fleet.seats import (DEFAULT_INTERRUPT_WAIT_MS, EXIT_DIALOG_LINES, LIMIT_SCREEN_LINES, QUIT_CONFIG_HINT, SETTLED,
                                at_shell_prompt, describe_foreground, dialog_first_line, interrupt_agent,
                                interrupt_keys, live_by_name, quit_agent, quit_command, state_words)
-from herdr_fleet.state import pane_moved, prune_state
+from herdr_fleet.state import now_iso, pane_moved, prune_state
 
 WAIT_UNTIL = ("idle", "done", "blocked")
 
@@ -267,8 +269,11 @@ def _hint_caller(ctx: Ctx) -> None:
 
 
 def settle(ctx: Ctx, seat: Seat, agent: Dict, wait_ms: Optional[int], report: Report) -> Optional[Dict]:
-    """Return the agent if it may be quit now (idle or done), else report why not."""
+    """Return the agent if it may be quit now (idle or done, or working under a confirmed provider
+    limit, 35.6), else report why not."""
     status = str(agent.get("agent_status") or "unknown")
+    if status == "working" and limited_working(ctx, seat, agent, report):
+        return agent
     if status == "working" and wait_ms:
         if ctx.dry_run:
             report.add(seat.name, "plan", "wait up to %d ms for it to settle, then re-check" % wait_ms)
@@ -298,6 +303,49 @@ def settle(ctx: Ctx, seat: Seat, agent: Dict, wait_ms: Optional[int], report: Re
     return agent
 
 
+def read_screen(ctx: Ctx, name: str, agent: Dict) -> Optional[str]:
+    """The last LIMIT_SCREEN_LINES lines of a seat (``agent read``; when herdr refuses that for a
+    working seat, ``agent_not_idle``, the plain ``pane read``); None when neither could be read."""
+    try:
+        return ctx.herdr.agent_read(name, LIMIT_SCREEN_LINES)
+    except HerdrError as exc:
+        if exc.code != "agent_not_idle" or not agent.get("pane_id"):
+            return None
+    try:
+        return ctx.herdr.pane_read(str(agent["pane_id"]), LIMIT_SCREEN_LINES)
+    except HerdrError:
+        return None
+
+
+def limited_working(ctx: Ctx, seat: Seat, agent: Dict, report: Report) -> bool:
+    """Design 35.6, invariant 11's one new exception: a seat herdr reports ``working`` may be quit
+    when all of these hold (35.5 items 15 and 19): the state marks it limited and the record is of
+    the kind the live agent runs (compared here, explicitly); it has been ``working`` without a
+    break since before the limit was recorded (``state_seen`` says working, since a time not after
+    the record's ``at``), so a seat the owner resumed afterwards is not taken; a fresh read still
+    shows the limit line within the last QUIT_ABOVE (3) non-blank lines above its input, so a turn resumed
+    in place, which pushes it up, is not taken (35.5 item 21); and that input line is empty. Kimi leaves a limited seat
+    ``working``, so without this swap, restart and down refuse it for ever. The quit then goes
+    through ``safe_prompt`` with only the state rule relaxed (``ctx.limited_quit``), for that seat
+    alone, and the presence guard still runs. False (and nothing said) when any condition fails: the
+    seat is refused as a working seat is."""
+    kind = str(agent.get("agent") or seat.kind)
+    record = limits.holding(ctx.fleet.repo, seat.name, kind)
+    if record is None or record.get("kind") != kind or not limits.has_patterns(kind):
+        return False
+    seen_state = (state_mod.read_agents(ctx.fleet.repo).get(seat.name) or {}).get("state_seen") or {}
+    since, recorded = inbox.parse_time(seen_state.get("since")), inbox.parse_time(record.get("at"))
+    if seen_state.get("state") != "working" or since is None or recorded is None or since > recorded:
+        return False
+    screen = read_screen(ctx, seat.name, agent)
+    if screen is None or limits.limit_line(kind, screen, limits.QUIT_ABOVE) is None \
+            or not limits.input_empty(kind, screen):
+        return False
+    ctx.limited_quit.add(seat.name)
+    report.add(seat.name, "note", "working, but its %s limit is on screen and its input is empty; it is quit" % kind)
+    return True
+
+
 def _quit_live(ctx: Ctx, seat: Seat, agent: Dict, report: Report, then: str = "") -> Optional[str]:
     """Quit a settled live agent. Returns its pane when it is gone."""
     pane = str(agent.get("pane_id"))
@@ -320,8 +368,9 @@ def _quit_live(ctx: Ctx, seat: Seat, agent: Dict, report: Report, then: str = ""
     # logged delivered; its messages wait for the kickoff, which takes the lock again (design 32.5,
     # review N1). No timer lock is taken while it is held.
     with inbox.locked(ctx.fleet.repo, seat.name):
+        allow = SETTLED + ("working",) if seat.name in ctx.limited_quit else SETTLED  # design 35.6
         outcome = quit_agent(ctx.herdr, ctx.clock, seat.name, pane, command, ctx.quit_timeout_ms(),
-                             answer_exit=ctx.keys_allowed)  # design 23.7: never from a popup
+                             answer_exit=ctx.keys_allowed, allow=allow)  # design 23.7: never from a popup
     if not outcome.ok:
         report.add(seat.name, outcome.status, outcome.detail, "partial" if outcome.status == "refused" else "fail")
         if outcome.needs_owner:  # design 32.2: a dialog or menu only a person can answer
@@ -384,18 +433,40 @@ def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_
     return report
 
 
+def failover_of(ctx: Ctx, seat: Seat) -> Optional[Dict]:
+    """The seat's ``failover`` record (design 35.3) when the seat is a tier seat that runs the
+    kind it names; None otherwise (a record for a kind the seat no longer lists is ignored)."""
+    record = (ctx.state.entry(seat.name) or {}).get("failover")
+    if seat.prefer and isinstance(record, dict) and record.get("to") in seat.variants:
+        return record
+    return None
+
+
 def op_swap(ctx: Ctx, names: Sequence[str], note: Optional[str] = None,
-            wait_ms: Optional[int] = None) -> Report:
+            wait_ms: Optional[int] = None, fallback: bool = False) -> Report:
     """Restart exactly the seats that drifted from the file; start absent ones.
-    Without names, adopted sessions are skipped (design section 15)."""
+    Without names, adopted sessions are skipped (design section 15), and so are seats that
+    have failed over (35.3); ``swap NAME`` returns a failed-over seat to its primary kind.
+    ``fallback`` (``--fallback``, 35.3) moves one named tier seat to its next kind."""
+    if fallback:
+        return _swap_fallback(ctx, names, note, wait_ms)
     report = Report("swap")
     seats = select_seats(ctx.fleet, names)
     refuse_unknown_kinds(ctx)
     prune(ctx)
     live = live_by_name(ctx.herdr)
     changed: List[str] = []
+    returning: Dict[str, Dict] = {}  # seat -> its failover record, for the seats this swap returns to their primary
     for seat in seats:
         agent = live.get(seat.name)
+        record = failover_of(ctx, seat)
+        if record is not None:
+            if not names:
+                report.add(seat.name, "skipped", "failed over from %s to %s; swap %s returns it to %s"
+                           % (record.get("from"), record.get("to"), seat.name, seat.primary))
+                continue
+            returning[seat.name] = record
+            seat.use(seat.primary)  # in memory; the state file keeps the record until the restart worked
         if agent is None:
             changed.append(seat.name)
             report.add(seat.name, "would start" if ctx.dry_run else "absent", "not running")
@@ -409,10 +480,162 @@ def op_swap(ctx: Ctx, names: Sequence[str], note: Optional[str] = None,
             report.add(seat.name, "would restart" if ctx.dry_run else "drifted", "; ".join(reasons))
         else:
             report.add(seat.name, "unchanged", "matches the fleet file")
+    unchanged_returns = [n for n in returning if n not in changed]
+    for name in unchanged_returns:  # it already runs its primary: the record is stale
+        _clear_failover(ctx, name, report, "already runs %s" % ctx.fleet.seat(name).primary)
     if changed and not ctx.dry_run:
+        started = {n: (ctx.state.entry(n) or {}).get("started_at") for n in changed}
         report.extend(op_restart(ctx, changed, note, wait_ms, reason="swap", name_panes=False))
+        for name in [n for n in changed if n in returning]:
+            seat = ctx.fleet.seat(name)
+            entry = ctx.state.entry(name) or {}
+            if entry.get("kind") == seat.primary and entry.get("started_at") != started.get(name):
+                _clear_failover(ctx, name, report, "back on %s" % seat.primary)
+                _warn_still_limited(ctx, seat, report)
+            else:
+                seat.use(str(returning[name].get("to")))  # it did not start: still failed over
     labels.apply(ctx, None, report)
     return report
+
+
+def _clear_failover(ctx: Ctx, name: str, report: Report, detail: str) -> None:
+    entry = ctx.state.entry(name)
+    if entry is not None and "failover" in entry:
+        del entry["failover"]
+        ctx.state.dirty = True
+        ctx.save()
+    report.add(name, "failover cleared", detail)
+
+
+def _warn_still_limited(ctx: Ctx, seat: Seat, report: Report) -> None:
+    """A seat returned to a kind whose limit is still recorded is held again by the watcher
+    (35.2); say so, with the reset time when there is one."""
+    record = state_mod.read_agents(ctx.fleet.repo).get(seat.name, {}).get("limited")
+    if limits.holds(record, seat.kind):
+        when = limits.reset_time(record)
+        report.add(seat.name, "note", "its %s limit is still recorded%s; the watcher holds its queue until it "
+                   "resets, or `deliver %s` releases it" % (seat.kind, " (resets %s)" % limits.reset_label(when)
+                                                           if when else "", seat.name))
+
+
+def fallback_note(ctx: Ctx, seat: Seat, old: str, new: str, record: Optional[Dict], extra: Optional[str]) -> str:
+    """The note that starts the failed-over session's kickoff (35.3): who it replaces and why, the
+    last request delivered to the seat, and a reminder about the working tree; then ``--note``."""
+    if record and record.get("kind") == old and record.get("line"):
+        why = '%s hit its usage limit ("%s")' % (old, record["line"])
+    else:
+        allowance = (ctx.state.data.get("codex_allowance") or {}) if old == "codex" else {}
+        if allowance.get("used_percent") is not None:
+            why = "codex is at %d%% of its allowance%s" % (int(allowance["used_percent"]),
+                                                             " (resets %s)" % limits.reset_label(
+                                                                 limits.epoch_time(allowance.get("resets_at")))
+                                                             if allowance.get("resets_at") else "")
+        else:
+            why = "the owner asked for the fallback of %s with `swap %s --fallback`" % (old, seat.name)
+    lines = ["Failover: %s was running %s; this session runs %s because %s." % (seat.name, old, new, why)]
+    last = messages_mod.last_request(ctx.fleet.repo, seat.name)
+    if last:
+        lines.append("The last request delivered to %s was #%s from %s: %s"
+                     % (seat.name, last["short"], last["from"], last["first_line"]))
+    lines.append("Run git status: work in progress from the previous session may be in the working tree.")
+    if extra:
+        lines.append(extra)
+    return "\n".join(lines)
+
+
+def _swap_fallback(ctx: Ctx, names: Sequence[str], note: Optional[str], wait_ms: Optional[int]) -> Report:
+    """Design 35.3 and 35.6: ``swap [NAME...] --fallback``. Each named tier seat, one at a time, moves
+    to the next kind of its ``prefer`` after the one it runs, skipping any kind with a limit still
+    recorded; it is started, briefed with the failover note, and the state records ``failover``.
+    With no names, every tier seat the state marks limited (its running kind has a record that
+    holds). Usage errors (exit 2), found before anything moves: a name that is no tier seat, an
+    adopted live seat, a seat with no free kind to move to. In the all-seats form these seats are
+    reported and left instead."""
+    report = Report("swap")
+    refuse_unknown_kinds(ctx)
+    prune(ctx)
+    live = live_by_name(ctx.herdr)
+    agents = state_mod.read_agents(ctx.fleet.repo)
+    explicit = bool(names)
+    if explicit:
+        seats = select_seats(ctx.fleet, names, required=True)
+        for seat in seats:
+            if not seat.prefer:
+                raise UsageError("%s has no tier (it uses kind and args), so it has no fallback defined" % seat.name)
+    else:
+        seats = [s for s in ctx.fleet.seats if s.prefer and limits.holding(
+            ctx.fleet.repo, s.name, str((live.get(s.name) or {}).get("agent") or s.kind)) is not None]
+        if not seats:
+            report.add("fallback", "nothing", "no tier seat is marked limited")
+            return report
+    plans = []
+    for seat in seats:
+        plan = _fallback_plan(ctx, seat, live.get(seat.name), agents, explicit, report)
+        if plan is not None:
+            plans.append((seat,) + plan)
+    for seat, old, new, record in plans:
+        _fallback_one(ctx, seat, old, new, record, note, wait_ms, report)
+    labels.apply(ctx, None, report)
+    return report
+
+
+def _fallback_plan(ctx: Ctx, seat: Seat, agent: Optional[Dict], agents: Dict[str, Dict], explicit: bool,
+                   report: Report) -> Optional[Tuple[str, str, Optional[Dict]]]:
+    """The kind a tier seat runs and the next one (35.3), or the usage error (an explicit name) or
+    report line (the all-seats form) saying why not."""
+
+    def refuse(text: str) -> None:
+        if explicit:
+            raise UsageError(text)
+        report.add(seat.name, "refused", text, "partial")
+
+    if agent is not None and is_adopted(ctx.state.entry(seat.name)):
+        refuse("%s is an adopted session; herdr-fleet did not start it, so it will not move it to another kind "
+               "(restart it by hand, or `restart %s` to take it over first)" % (seat.name, seat.name))
+        return None
+    running = str((agent or {}).get("agent") or seat.kind)  # the kind it runs: the live agent's, else the file's
+    if running not in seat.prefer:
+        running = seat.kind
+    choices = limits.fallback_candidates(seat, limits.kinds_limited(agents), running)
+    if not choices:
+        others = [k for k in seat.prefer if k != running]
+        why = ("%s lists no other kind in prefer" % seat.name if not others else
+               "every other kind in prefer is limited (%s)" % ", ".join(
+                   "%s%s" % (k, _reset_words(agents, k)) for k in others))
+        refuse("%s: no fallback available: %s" % (seat.name, why))
+        return None
+    return running, choices[0], agents.get(seat.name, {}).get("limited")
+
+
+def _fallback_one(ctx: Ctx, seat: Seat, old: str, new: str, record: Optional[Dict], note: Optional[str],
+                  wait_ms: Optional[int], report: Report) -> None:
+    full_note = fallback_note(ctx, seat, old, new, record, note)
+    before = (ctx.state.entry(seat.name) or {}).get("started_at")
+    previous = seat.kind
+    seat.use(new)  # every reader of the seat sees the new kind from here on (35.1)
+    report.add(seat.name, "fallback", "%s -> %s%s" % (old, new, " (limit recorded)" if limits.counts(record) else ""))
+    report.extend(op_restart(ctx, [seat.name], full_note, wait_ms, reason="swap", name_panes=False))
+    if ctx.dry_run:
+        return
+    entry = ctx.state.entry(seat.name) or {}
+    if entry.get("kind") == new and entry.get("started_at") != before:
+        why = (record or {}).get("line") if (record or {}).get("kind") == old else None
+        ctx.state.update(seat.name, failover={"from": old, "to": new, "at": now_iso(),
+                                              "reason": str(why or "swap --fallback")[:200]})
+        ctx.save()
+        report.add(seat.name, "failed over", "from %s to %s; `swap %s` returns it to %s"
+                   % (old, new, seat.name, seat.primary))
+    else:
+        seat.use(previous)  # it did not start on the new kind: nothing is recorded
+
+
+def _reset_words(agents: Dict[str, Dict], kind: str) -> str:
+    for entry in agents.values():
+        record = entry.get("limited") if isinstance(entry, dict) else None
+        if record and record.get("kind") == kind and limits.counts(record):
+            when = limits.reset_time(record)
+            return " (resets %s)" % limits.reset_label(when) if when else " (no reset time known)"
+    return ""
 
 
 # -- kickoff and down --------------------------------------------------------------

@@ -101,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="restart exactly the seats whose kind or args drifted from the file")
     p.add_argument("names", nargs="*", metavar="NAME", help="only these seats (default: all)")
     p.add_argument("--dry-run", action="store_true", help="list what would change and why")
+    p.add_argument("--fallback", action="store_true",
+                   help="move the named tier seats (none named: every tier seat marked limited), one at a time, to the next kind "
+                        "of their `prefer` list (skipping a kind whose limit is recorded), briefing each with a "
+                        "failover note; `swap NAME` later returns one to its primary")
 
     sub.add_parser("handover", parents=[common],
                    help="(the handover pane runs this) wait for a seat's turn to end, then restart or swap it",
@@ -473,6 +477,9 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     if command == "handover":  # design 32.5: the helper pane
         return op_handover(ctx, stdin)
     note = _note(args)
+    if command == "swap" and args.fallback and args.handover:
+        raise UsageError("--fallback cannot be combined with --handover: a seat does not fail itself over; run "
+                         "`swap NAME --fallback` from another pane")
     if command in ("restart", "swap") and args.handover:  # design 32.5: the seat's own command
         return _finish(ctx, request_handover(ctx, command, args.names, note, args.wait,
                                              getattr(args, "drop_inbox", False)))
@@ -483,7 +490,7 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     if command == "restart":
         return _finish(ctx, op_restart(ctx, args.names, note, args.wait, drop_inbox=args.drop_inbox))
     if command == "swap":
-        return _finish(ctx, op_swap(ctx, args.names, note, args.wait))
+        return _finish(ctx, op_swap(ctx, args.names, note, args.wait, fallback=args.fallback))
     if command == "kickoff":
         return _finish(ctx, op_kickoff(ctx, args.names, note, drop_inbox=args.drop_inbox))
     if command == "down":

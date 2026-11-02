@@ -36,11 +36,12 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from herdr_fleet import contacts as contact_mod
-from herdr_fleet import context_size, inbox, seen
+from herdr_fleet import context_size, inbox, limits, seen
 from herdr_fleet.herdr import HerdrError, describe
 from herdr_fleet.mailroom import tags
 from herdr_fleet.messages import OWNER, first_line, log_path, owed, owed_lines, read, since_label, unsettled
 from herdr_fleet.seats import EXIT_DIALOG_LINES, dialog_lines
+from herdr_fleet.state import read_agents
 
 Span = Tuple[str, str]
 Line = List[Span]
@@ -106,6 +107,7 @@ class Row:
     pane: str = ""                  # the live agent's pane
     dialog: List[str] = field(default_factory=list)  # a blocked seat's dialog, up to four lines (25.2)
     window_tokens: Optional[int] = None  # the same event's reported window, when available
+    limited: str = ""               # design 35.2: `limited (claude, since 10:41)` while a recorded limit holds it
 
 
 @dataclass
@@ -260,6 +262,19 @@ def _queue(row: Row, messages: Sequence[inbox.Message], ws: WatcherState, now: d
         row.note = "pointed to inbox --read"
 
 
+def _limited(row: Row, repo: str, fallback_kind: str) -> None:
+    """Design 35.2: a seat whose running kind has a limit recorded that still holds shows it in the
+    ``doing`` cell, which it outranks (a Kimi seat stuck ``working`` after its limit says so)."""
+    try:
+        entry = read_agents(repo).get(row.name) or {}
+    except OSError:
+        return
+    record = entry.get("limited")
+    if limits.holds(record, row.kind or entry.get("kind") or fallback_kind):
+        row.limited = limits.status_label(record)
+        row.doing = row.limited
+
+
 def _debt(row: Row, debts: Sequence[Dict], fleet, now: datetime.datetime) -> None:
     mine = [o for o in debts if o.get("to") == row.name]
     if not mine:
@@ -368,6 +383,7 @@ def build(ctx, watcher_state: Optional[WatcherState] = None) -> Board:
             row.doing = row.dialog[0] if row.dialog else ""
         _queue(row, waiting.get(seat.name, []), ws, now)
         _debt(row, debts, fleet, now)
+        _limited(row, ctx.fleet.repo, seat.kind)
         if agent is not None:
             reading = cache.context(agent, ctx.env)
             if reading is not None:
@@ -1244,6 +1260,8 @@ class SeatPage(_Ringed):
         if row is None:
             return "%s%s? not a seat" % (self.name, DOT)
         parts = [row.shown, self.state_part(), row.kind or "?", row.pane or "no pane"]
+        if row.limited:
+            parts.append(row.limited)
         if row.tokens is not None:
             parts.append(context_text(row) + (" " + WARN if row.over else ""))
         return DOT.join(parts)

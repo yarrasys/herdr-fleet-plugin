@@ -72,6 +72,28 @@ DEFAULT_QUIT: Dict[str, str] = {
     "kimi": "/exit",
 }
 
+# Design 35.2 and 35.6: what a seat's screen shows when its provider refuses further turns. Regular
+# expressions per kind, matched (case-insensitively) at the START of one cleaned line, once its
+# `⎿` or `■` marker and leading spaces are gone, so only the provider's own wording counts and not
+# a sentence that quotes it. They count only within the last 6 non-blank lines above the seat's input
+# area (`limits.limit_line`); a kind with no entry is never read. A line that starts with a prompt
+# glyph (a prompt echoed) or an assistant message bullet is prose and is not matched. Seen live:
+# Claude Code `Credit balance too low`, Kimi Code CLI 2.4.1 `Error: [provider.api_error] 429 You've
+# reached your 5-hour usage limit`. Not seen live, from Claude Code's and Codex's documented
+# wording: Claude `usage limit reached`, `5-hour limit reached`, `Weekly limit reached`; Codex
+# `You've hit your usage limit` (which must also carry the `■` marker, LIMIT_MARKER_REQUIRED).
+LIMIT_PATTERNS: Dict[str, List[str]] = {
+    "claude": [r"^Credit balance (?:is )?too low", r"^(?:Claude )?usage limit reached", r"^5-hour limit reached",
+               r"^Weekly limit reached"],
+    "codex": [r"^You[\u2019']ve hit your usage limit"],
+    "kimi": [r"^Error: \[provider\.api_error\] 429"],
+}
+LIMIT_MARKER_REQUIRED: Dict[str, str] = {"codex": "\u25a0"}  # the line must carry this marker, as Codex's error does
+LIMIT_WINDOW_S: Dict[str, int] = {"kimi": 5 * 3600}  # 35.2: a kind whose line names no reset time but whose window is known
+LIMIT_WINDOW_HINTS: Dict[str, str] = {"kimi": "5h window"}
+LIMIT_SCREEN_LINES = 12                              # 35.2: `agent read NAME --lines 12`
+LIMIT_BULLETS = ("\u23fa", "\u25cf", "\u2022")        # an assistant message starts with one of these
+
 # Design 21.2: the first non-blank character of each kind's prompt line, as `pane read`
 # prints it (Claude Code `❯`, older builds `>`; Codex `›`; Antigravity `>`), and the
 # placeholder text an empty prompt line shows. A kind with no entry is not held while
@@ -216,7 +238,10 @@ def interrupt_keys(live_kind: str, fleet_keys: Mapping[str, Sequence[str]],
 
 
 def quit_command(seat: Seat, live_kind: str, config_quit: Mapping[str, str]) -> Optional[str]:
-    """Seat override (when the live kind is the seat's kind), then config, then defaults."""
+    """A tier seat's quit for the live kind (design 35.1: the seat's ``quit``, else the tier's),
+    then the seat override (when the live kind is the seat's kind), then config, then defaults."""
+    if seat.quit_for(live_kind):
+        return seat.quit_for(live_kind)
     if seat.quit and live_kind == seat.kind:
         return seat.quit
     if live_kind in config_quit:
@@ -419,7 +444,7 @@ def _await_ready(herdr: Herdr, clock: Clock, seat: Seat, pane: str, deadline: fl
 
 
 def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str,
-               timeout_ms: int, answer_exit: bool = True) -> Outcome:
+               timeout_ms: int, answer_exit: bool = True, allow: Sequence[str] = SETTLED) -> Outcome:
     """Quit one agent (design section 6). status: quit | refused | failed. A seat whose
     pane the owner is typing in is refused like a blocked one (design 21.2).
 
@@ -434,10 +459,14 @@ def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str
     highlighted numbered choice where it would be) reads the guard again every
     QUIT_SETTLE_POLL_S for up to QUIT_SETTLE_S, since a seat that has just turned done may
     still be repainting; then it is refused, naming the dialog by its first line
-    (``needs_owner``). Text in the input is refused at once."""
-    sent = safe_prompt(herdr, target, quit_cmd)
+    (``needs_owner``). Text in the input is refused at once.
+
+    Design 35.6: ``allow`` is idle and done for every quit but one: ``ops`` adds ``working`` for a
+    seat that a recorded provider limit holds, after a fresh read showed the limit line and an
+    empty input (invariant 11's one exception); the guard still runs."""
+    sent = safe_prompt(herdr, target, quit_cmd, allow)
     if not sent.ok and sent.status == "typing" and presence.is_dialog(sent.detail):
-        sent = _settle_held(herdr, clock, target, quit_cmd, sent)
+        sent = _settle_held(herdr, clock, target, quit_cmd, sent, allow)
     if not sent.ok:
         status = "refused" if sent.status in ("blocked", "unknown", "working", "typing") else "failed"
         return Outcome(False, status, sent.detail, sent.agent, needs_owner=sent.needs_owner)
@@ -479,7 +508,8 @@ def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str
             return Outcome(False, "failed", _no_exit(herdr, target, quit_cmd, timeout_ms, gone, answered))
 
 
-def _settle_held(herdr: Herdr, clock: Clock, target: str, quit_cmd: str, held: Outcome) -> Outcome:
+def _settle_held(herdr: Herdr, clock: Clock, target: str, quit_cmd: str, held: Outcome,
+                 allow: Sequence[str] = SETTLED) -> Outcome:
     """Design 32.2: the guard held the quit for a dialog or menu. Read the guard again
     (read-only) every QUIT_SETTLE_POLL_S for up to QUIT_SETTLE_S; once it passes, the quit
     goes through ``safe_prompt`` as usual, and text in the input refuses it at once. Still
@@ -493,7 +523,7 @@ def _settle_held(herdr: Herdr, clock: Clock, target: str, quit_cmd: str, held: O
         except HerdrError as exc:  # cannot tell: send nothing
             return Outcome(False, "error", "presence check: %s; nothing sent" % describe(exc), held.agent)
         if hold is None:
-            sent = safe_prompt(herdr, target, quit_cmd)
+            sent = safe_prompt(herdr, target, quit_cmd, allow)
             if sent.ok or sent.status != "typing" or not presence.is_dialog(sent.detail):
                 return sent
             held = sent

@@ -40,7 +40,7 @@ from herdr_fleet.context import EXIT_OK, EXIT_PARTIAL, Ctx, OpError, Report, Usa
 from herdr_fleet.fleetfile import NAME_RE, FleetError
 from herdr_fleet.herdr import HerdrError, describe, plugin_tab_argv, render_cmd
 from herdr_fleet.menu import wait_for_enter
-from herdr_fleet.ops import op_restart, op_swap, prune, select_seats
+from herdr_fleet.ops import failover_of, op_restart, op_swap, prune, select_seats
 from herdr_fleet.seats import SETTLED, live_by_name
 from herdr_fleet.state import ensure_gitignore, now_iso
 
@@ -76,7 +76,7 @@ def request(ctx: Ctx, op: str, names: Sequence[str], note: Optional[str] = None,
         raise UsageError(NOT_OWN % op)
     seat = seats[0]
     prune(ctx)  # a recorded handover pane that is gone is dropped first
-    if op == "swap" and not drift_reasons(ctx, seat, agent):
+    if op == "swap" and not failover_of(ctx, seat) and not drift_reasons(ctx, seat, agent):
         report.add(seat.name, "unchanged", "matches the fleet file")
         return report
     current = ctx.state.handover

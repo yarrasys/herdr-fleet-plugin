@@ -67,16 +67,18 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from herdr_fleet import board, build_identity, inbox, presence, seen, timers, tui
+from herdr_fleet import board, build_identity, context_size, inbox, limits, presence, seen, timers, tui
 from herdr_fleet.context import EXIT_OK, Ctx, OpError, UsageError
 from herdr_fleet.fleetfile import FleetError
 from herdr_fleet.herdr import HerdrError, describe
 from herdr_fleet.inbox import NEW, Message
-from herdr_fleet.mailroom import candidates, deliver_one, expire_all, herdr_target, sweep_expired
+from herdr_fleet.mailroom import (candidates, deliver_one, expire_all, herdr_target, limited_line, release_limit,
+                                  sweep_expired)
 from herdr_fleet.messages import (OWNER, Drop, agent_state, fleet_flag, notify_owner, op_ack, prompt_mailbox,
                                   since_label)
-from herdr_fleet.seats import SETTLED, state_words
-from herdr_fleet.state import ensure_gitignore, mark_notified, now_iso
+from herdr_fleet.seats import LIMIT_SCREEN_LINES, SETTLED, state_words
+from herdr_fleet.state import (ensure_gitignore, mark_notified, now_iso, patch_entry, patch_top,
+                               read_agents, read_top)
 
 LOCK_NAME = "watch.lock"
 WAIT_TIMEOUT_MS = 30000     # one `agent wait`; a timeout only lets the loop look again
@@ -89,6 +91,10 @@ EXIT_GRACE_S = 1.0          # on exit, how long waiters blocked in `agent wait` 
 BLOCKED_SCAN_S = 30.0       # with notify_blocked_after: how often `agent list` is read for blocked seats
 HOLD_RECHECK_S = 3.0        # design 21.2: while the owner types in a seat's pane, look again this often
 EXPIRE_SWEEP_S = 300.0      # design 33.1: how often the watcher expires what is due in every mailbox
+LIMIT_SCAN_S = 300.0        # design 35.6: the seats' screens are looked at for a limit this often ...
+LIMIT_QUIET_S = 300.0       # ... each seat whose state has not changed for this long, once per unchanged state
+ALLOWANCE_READ_S = 600.0    # design 35.2: Codex's allowance is read from a rollout this often ...
+ALLOWANCE_FIRST_S = 60.0    # ... the first time this long after the watcher starts, so a quiet watcher stays quiet
 LOG_NAME = "watch.log"      # design 24.1: in board mode the lines go here (and to the footer)
 BOARD_REFRESH_S = 5.0       # design 24.2: the board's model is rebuilt this often, and after every event
 KEY_POLL_S = 0.25           # how long one read of the keyboard waits, so events show at once
@@ -280,6 +286,10 @@ def _watch_once(ctx: Ctx) -> int:
     timer_states = {str(a.get("name")): str(a.get("agent_status") or "unknown") for a in agents}
     typing = []
     for name in order:
+        held = limited_line(ctx, name, len(waiting.get(name, [])))  # design 35.2: the hold stands
+        if held:
+            ctx.say(held)
+            continue
         line, code, drop = deliver_one(ctx, name, agents, waiting.get(name, []), via="watch")
         ctx.say(line)
         codes.append(code)
@@ -292,6 +302,12 @@ def _watch_once(ctx: Ctx) -> int:
         for line in timers.waiting_lines(pending, timer_states, typing):
             ctx.say(line)
     return max(codes)
+
+
+def read_state_allowance(repo: str) -> Dict:
+    """The watcher's last Codex allowance reading, as the state file keeps it (design 35.2)."""
+    value = read_top(repo, "codex_allowance")
+    return value if isinstance(value, dict) else {}
 
 
 def notify_delivery(ctx: Ctx, name: str, drop: Drop) -> None:
@@ -401,6 +417,11 @@ class Watcher:
         self.screen = screen
         self.events: "queue.Queue[str]" = queue.Queue()  # the threads post here; the main loop drains it
         self.holds: Dict[str, str] = {}          # mailbox -> the presence guard's detail, while held
+        self.limit_holds: Dict[str, str] = {}    # design 35.2: mailbox -> why a limit holds it (shown as a hold)
+        self.limit_read: Dict[str, str] = {}      # seat -> the `since` of the state whose screen was read for a limit
+        self.limit_said: Set[str] = set()        # "name kind at" of limit episodes and resets already notified
+        self.next_limit_scan = ctx.clock.monotonic() + LIMIT_SCAN_S  # when a stuck-working seat is next looked at
+        self.next_allowance = ctx.clock.monotonic() + ALLOWANCE_FIRST_S  # when Codex's allowance is next read
         self.failed_until: Dict[str, float] = {}  # mailbox -> when a failed delivery or wait is tried again
         self.last_event: Optional[board.Event] = None
         self.started = ctx.clock.monotonic()
@@ -481,7 +502,8 @@ class Watcher:
         with self.cond:
             state = board.WatcherState(
                 pid=os.getpid(), since=self.lock_since, warnings=list(self.warnings),
-                watching=max(0.0, now - self.started), waiting=sorted(self.waiters), holds=dict(self.holds),
+                watching=max(0.0, now - self.started), waiting=sorted(self.waiters),
+                holds=dict(self.limit_holds, **self.holds),
                 retries={n: t - now for n, t in self.failed_until.items() if t > now},
                 pointed=sorted(self.pointed), event=self.last_event, trouble=self.trouble,
                 cache=self.view.cache if self.view is not None else None)
@@ -554,6 +576,7 @@ class Watcher:
                 self.say(line)
         self.sweep()  # after the timer cycle has released its locks, before the mailboxes are read
         waiting = inbox.queued(self.repo, self.ctx.fleet.fyi_ttl)
+        self.limit_cycle(waiting)
         if waiting.get(OWNER):
             self.owner(waiting[OWNER])
         if self.blocked_after and self.ctx.clock.monotonic() >= self.next_scan and not self.stopping:
@@ -602,6 +625,192 @@ class Watcher:
                         ", ".join("%s %d" % (name, len(reasons)) for name, reasons in gone.items()),
                         ", ".join(r for r in ("ttl", "fyi_ttl") if r in used)))
 
+
+    # -- provider limits (design 35.2) ---------------------------------------------------------
+
+    def mark_limit(self, name: str, kind: str, line: str) -> None:
+        """Record a limit the screen showed, unless an episode for this kind is on record already;
+        then notify (one notification per episode)."""
+        entry = read_agents(self.repo).get(name) or {}
+        current = entry.get("limited")
+        now = inbox.now_utc()
+        if limits.counts(current, now) and current.get("kind") == kind:
+            return  # the same episode: recorded and notified already
+        record = limits.new_record(kind, line, now)
+        record["notified"] = True
+        recorded = patch_entry(self.repo, name, limits.replaced(entry, record, now))
+        episode = "%s %s %s" % (name, kind, line)
+        if recorded or episode not in self.limit_said:  # with no state entry to remember it in, say it once
+            self.limit_said.add(episode)
+            self.limit_notice(name, record)
+
+    def limit_notice(self, name: str, record: Dict) -> None:
+        """``Fleet: NAME hit its <kind> limit``: the body gives the line and the command that moves
+        the seat, or says no fallback is defined."""
+        seat = self.ctx.fleet.seat(name)
+        when = limits.reset_time(record)
+        reset = " (resets %s%s)" % (limits.reset_label(when), ", " + record["resets_hint"] if record.get("resets_hint")
+                                    else "") if when else ""
+        title = "Fleet: %s hit its %s limit" % (name, record["kind"])
+        body = "%s%s. %s" % (record.get("line", ""), reset, self.fallback_words(seat, record["kind"], name))
+        self.say("%s%s; holding its queue" % (title, reset), error=True)
+        self.ctx.notify(title, body, "request")
+
+    def fallback_words(self, seat, kind: str, name: str) -> str:
+        """The command for a tier seat (35.2): ``herdr-fleet swap NAME --fallback``, or why there is none."""
+        if seat is None or not seat.prefer:
+            return "no fallback defined"
+        limited = limits.kinds_limited(read_agents(self.repo))
+        if not limits.fallback_candidates(seat, limited, kind):
+            return "no fallback available: every other kind in prefer is limited"
+        return "Run: herdr-fleet swap %s --fallback%s" % (name, fleet_flag(self.ctx))
+
+    def hold_limit(self, name: str, record: Dict, count: int) -> None:
+        """Hold the mailbox of a limited seat through the hold mechanism (21.2): the board shows
+        ``holding: limited (claude)``; it ends with a swap, the reset time, or ``deliver NAME``."""
+        when = limits.reset_time(record)
+        detail = "limited (%s); %s" % (record.get("kind"), "resets %s" % limits.reset_label(when) if when
+                                       else "no reset time known; deliver %s releases it" % name)
+        with self.cond:
+            self.limit_holds[name] = detail
+        self.note(name, "%s limited (%s): holding %d%s" % (name, record.get("kind"), count,
+                                                          "" if when else "; deliver %s releases it" % name))
+
+    def limit_cycle(self, waiting: Dict[str, List[Message]]) -> None:
+        """Each pass (design 35.2 and 35.6): the holds follow the state file (a swap, a reset time
+        that passed or ``deliver NAME`` ends one), resets are notified once, every LIMIT_SCAN_S the
+        quiet seats' screens are looked at for a limit line (``scan_limits``, whatever their queues),
+        and every ALLOWANCE_READ_S Codex's allowance is read. Reads files; asks herdr only when one
+        of those is due."""
+        fleet = self.ctx.fleet
+        try:
+            recorded = read_agents(self.repo)
+        except OSError:
+            return
+        now = inbox.now_utc()
+        holds: Dict[str, str] = {}
+        for seat in fleet.seats:
+            entry = recorded.get(seat.name) or {}
+            for record in limits.records(entry):
+                if limits.passed(record, now) and not record.get("reset_notified"):
+                    self.reset_notice(seat, entry, record, now)
+            record = entry.get("limited")
+            queued = [m for m in waiting.get(seat.name, []) if not m.fyi]
+            if queued and limits.holds(record, entry.get("kind") or seat.kind, now):
+                self.hold_limit(seat.name, record, len(queued))
+                holds[seat.name] = self.limit_holds[seat.name]
+        with self.cond:
+            for name in [n for n in self.limit_holds if n not in holds]:
+                del self.limit_holds[name]
+        if self.stopping:
+            return
+        clock = self.ctx.clock.monotonic()
+        scan = clock >= self.next_limit_scan and any(limits.has_patterns(k) for k in fleet.kinds())
+        read = "codex" in fleet.kinds() and clock >= self.next_allowance
+        if not (scan or read):
+            return
+        agents = self.ctx.herdr.agent_list()
+        live = {str(a["name"]): a for a in agents if a.get("name")}
+        if scan:
+            self.next_limit_scan = clock + LIMIT_SCAN_S
+            self.scan_limits(live)
+        if read:
+            self.next_allowance = clock + ALLOWANCE_READ_S
+            self.read_allowance(live)
+
+    def reset_notice(self, seat, entry: Dict, record: Dict, now: datetime.datetime) -> None:
+        """A recorded reset time passed: one notification, then the record is marked so it is not
+        said again (also across a restarted watcher)."""
+        kind = str(record.get("kind"))
+        said = "reset %s %s %s" % (seat.name, kind, record.get("at"))
+        if said in self.limit_said:  # the state file could not remember it: once per watcher
+            return
+        self.limit_said.add(said)
+        failed = isinstance(entry.get("failover"), dict) and entry["failover"].get("to") != kind
+        title = ("Fleet: %s limit reset; swap %s returns it" % (kind, seat.name) if failed
+                 else "Fleet: %s limit reset; %s's queue goes out again" % (kind, seat.name))
+        marked = [dict(r, reset_notified=True) if r is record or r.get("kind") == kind else r
+                  for r in limits.records(entry)]
+        fields = {"limited": marked[0], "limited_also": marked[1:]} if entry.get("limited") else {
+            "limited_also": marked}
+        patch_entry(self.repo, seat.name, fields)
+        self.say(title)
+        self.ctx.notify(title, "%s, %s limit hit at %s" % (seat.name, kind, limits.since_label(record)), "request")
+
+    def scan_limits(self, live: Dict[str, Dict]) -> None:
+        """Design 35.6: every seat whose kind has limit patterns and whose state has not changed for
+        LIMIT_QUIET_S, whatever its queue, has its last twelve lines read once (``agent read``; the
+        plain ``pane read`` only when herdr answers ``agent_not_idle`` for a working seat) and
+        searched for the provider's limit line above its input. Each seat is read once per unchanged
+        state (``limit_read``), so it is read again only after its state changes. The lines are
+        kept nowhere. A seat already held is not read; blocked and unknown seats never are."""
+        states = {n: str(a.get("agent_status") or "unknown") for n, a in live.items()}
+        names = [s.name for s in self.ctx.fleet.seats if s.name in live]
+        try:
+            records = seen.observe(self.ctx, {n: states[n] for n in names})
+        except Exception:  # noqa: BLE001 - a state file problem never stops the watcher
+            return
+        for name in names:
+            agent = live[name]
+            kind = str(agent.get("agent") or "")
+            record = records.get(name) or {}
+            age = seen.age_of(record, states[name])
+            if (states[name] not in ("idle", "done", "working") or not limits.has_patterns(kind) or age is None
+                    or age < LIMIT_QUIET_S or self.limit_read.get(name) == record.get("since")
+                    or limits.holding(self.repo, name, kind) is not None):
+                continue
+            self.limit_read[name] = str(record.get("since"))
+            try:
+                try:
+                    screen = self.ctx.herdr.agent_read(name, LIMIT_SCREEN_LINES)
+                except HerdrError as exc:
+                    if exc.code != "agent_not_idle" or not agent.get("pane_id"):
+                        raise
+                    screen = self.ctx.herdr.pane_read(str(agent["pane_id"]), LIMIT_SCREEN_LINES)
+            except HerdrError:
+                continue
+            line = limits.limit_line(kind, screen)
+            del screen
+            if line:
+                self.mark_limit(name, kind, line)
+                found = limits.holding(self.repo, name, kind)
+                if found is not None:
+                    self.hold_limit(name, found, len(self.queued(name)))
+
+    def read_allowance(self, live: Dict[str, Dict]) -> None:
+        """Design 35.2: Codex's allowance belongs to the account, so one rollout answers for all
+        its seats: the first live Codex seat whose rollout holds a ``rate_limits`` record. The
+        reading is kept in the state file for ``status``; at or above ``failover_at_percent`` one
+        warning per reset window names every Codex seat."""
+        codex = [n for n, a in live.items() if str(a.get("agent")) == "codex" and self.ctx.fleet.seat(n)]
+        reading = None
+        for name in sorted(codex, key=lambda n: self.ctx.fleet.seat(n).index):
+            reading = context_size.seat_allowance(live[name], self.ctx.env)
+            if reading is not None:
+                break
+        if reading is None:
+            return
+        recorded = read_state_allowance(self.repo)
+        keep = {k: reading[k] for k in ("used_percent", "resets_at", "window_minutes", "at") if k in reading}
+        keep["read_at"] = inbox.iso_local(inbox.now_utc())
+        if recorded.get("warned_for") is not None and recorded.get("warned_for") == reading.get("resets_at"):
+            keep["warned_for"] = recorded["warned_for"]
+        threshold = self.ctx.fleet.failover_at_percent
+        if reading["used_percent"] >= threshold and keep.get("warned_for") != reading.get("resets_at", 0):
+            keep["warned_for"] = reading.get("resets_at", 0)
+            self.allowance_notice(reading, sorted(codex, key=lambda n: self.ctx.fleet.seat(n).index))
+        patch_top(self.repo, "codex_allowance", keep)
+
+    def allowance_notice(self, reading: Dict, names: List[str]) -> None:
+        when = limits.epoch_time(reading.get("resets_at"))
+        percent = int(reading["used_percent"])
+        title = "Fleet: Codex at %d%%%s" % (percent, " (resets %s)" % limits.reset_label(when) if when else "")
+        parts = []
+        for name in names:
+            parts.append("%s: %s" % (name, self.fallback_words(self.ctx.fleet.seat(name), "codex", name)))
+        self.say("%s; %s" % (title, "; ".join(parts)), error=True)
+        self.ctx.notify(title, "; ".join(parts), "request")
+
     def reload_timers(self) -> None:
         """Timer-aware watchers reload in log mode too; pristine fleets keep their old path."""
         if self.view is not None:
@@ -625,6 +834,8 @@ class Watcher:
         """A mailbox left alone for now: a pointer already named all of it (a new message
         lifts that), or a failure or an absent agent asked for a pause."""
         if name in self.pointed and {m.id for m in messages} <= self.pointed[name]:
+            return True
+        if name in self.limit_holds:  # design 35.2: the provider refuses turns; nothing is delivered
             return True
         return self.retry_at.get(name, 0.0) > self.ctx.clock.monotonic()
 
@@ -671,6 +882,10 @@ class Watcher:
             waiting = self.queued(name)
             if not waiting:
                 return  # read or delivered by someone else meanwhile
+            record = limits.holding(self.repo, name, str(agent.get("agent") or ""))
+            if record is not None:  # design 35.2: a limit holds it (recorded since this wait began)
+                self.hold_limit(name, record, len(waiting))
+                return
             self.say("%s %s; delivering %d" % (name, status, len(waiting)))
             self.ctx.clock.sleep(self.debounce_s)
             if self.stopping:
@@ -1144,6 +1359,10 @@ class BoardView:
             return
         for name in names:
             count = len(waiting[name])
+            held = limited_line(ctx, name, count)  # design 35.2: the hold stands for `d`; a seat page's `d` ends it
+            if held:
+                w.say(held)
+                continue
             why, detail = self.deliver_one(name, agents, waiting[name])
             if why == "absent":
                 w.say("%s: %s, %d left queued" % (name, detail, count))
@@ -1170,6 +1389,9 @@ class BoardView:
         if not waiting:
             self.show("nothing queued for %s" % name)
             return
+        released = release_limit(ctx, name)  # design 35.2: `d` on the seat's own page is `deliver NAME`
+        if released:
+            w.say(released)
         why, detail = self.deliver_one(name, agents, waiting)
         if why == "absent":
             self.show("%s: its next kickoff carries the queue" % detail if ctx.fleet.seat(name) else detail)

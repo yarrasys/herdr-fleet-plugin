@@ -495,8 +495,11 @@ class Harness(PageCase):
                        {"key": "g"}, focus, {"key": "3"}, focus)
         self.assert_safety()  # the allowed shapes pass
         os.remove(self.log_path)
-        self.assert_caught(watch_, idle, read)                                   # an idle seat, no p
-        self.assert_caught(watch_, idle, {"key": "p"}, read, read)               # one read per p
+        longer = {"argv": ["agent", "read", "sample-dev", "--lines", "16"], "exit": 0, "info": {}}
+        self.assert_caught(watch_, idle, longer)                                 # an idle seat, no p: only 12 lines (35.6)
+        self.assert_caught(watch_, {"argv": ["agent", "list"], "exit": 0, "info": {"states": {}}}, read)  # not a live seat
+        self.assert_caught(watch_, idle, dict(read, argv=read["argv"] + ["--source", "visible"]))  # never the visible screen
+        self.assert_caught(watch_, idle, {"key": "p"}, read, longer)             # one read per p
         self.assert_caught(watch_, zoom)                                         # no z
         self.assert_caught(watch_, {"key": "x"}, zoom)                           # not z
         self.assert_caught(watch_, {"key": "z"}, zoom, zoom)                     # one zoom per z

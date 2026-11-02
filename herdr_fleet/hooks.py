@@ -158,7 +158,7 @@ def op_hooks(ctx: Ctx, remove_them: bool = False) -> int:
         write(path, data)
         ctx.say("installed the %s hook%s in %s" % (" and ".join(events), "s" if len(events) > 1 else "", path))
         ctx.say("a running Claude Code session may start running new hook entries at once; after --remove, a running session can keep them until it restarts")
-    if not any(seat.kind == "claude" for seat in fleet.seats):
+    if not any("claude" in seat.kinds() for seat in fleet.seats):
         ctx.warn("no seat of kind claude in %s; only Claude Code runs these hooks" % fleet.path)
     if not shutil.which("herdr-fleet", path=ctx.env.get("PATH")):
         ctx.warn("herdr-fleet is not on PATH, so the hooks cannot run it; run `herdr-fleet install-cli`")

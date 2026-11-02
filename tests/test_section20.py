@@ -346,7 +346,10 @@ class BlockedNotification(WatchCase):
         self.assertEqual(notes[0]["sound"], "request")
         self.assertEqual(self.prompts_to("sample-dev"), [])  # never touched
         self.assertEqual([c["argv"][:2] for c in self.calls() if c["argv"][:2] not in (
-            ["agent", "list"], ["--version"], ["notification", "show"])], [])  # no wait, get or prompt
+            ["agent", "list"], ["--version"], ["notification", "show"], ["agent", "read"])], [])  # no wait, get or prompt
+        for c in self.calls():  # design 35.6: the quiet seats' limit check reads 12 lines of a seat that is not blocked
+            if c["argv"][:2] == ["agent", "read"]:
+                self.assertEqual(c["argv"][3:], ["--lines", "12"])
         self.assertTrue(self.read_state()["agents"]["sample-dev"]["state_seen"]["notified"])
         # a restarted watcher does not notify the same episode again
         self.clock.until = None

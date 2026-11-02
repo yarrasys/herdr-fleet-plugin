@@ -266,6 +266,13 @@ class FleetCase(unittest.TestCase):
                 return pid
         return None
 
+    def limit_read_allowed(self, argv: List[str], listed: Dict[str, Optional[str]]) -> bool:
+        """Design 35.6 (invariant 22): the watcher's `agent read NAME --lines 12` of a seat that was
+        idle, done or working at its last `agent list` (the quiet seats' limit check); never the
+        visible screen, never more than twelve lines."""
+        plain = argv[:4] == ["agent", "read", argv[2], "--lines"] and argv[4:5] == ["12"] and len(argv) == 5
+        return plain and listed.get(argv[2]) in ("idle", "done", "working")
+
     def assert_safety(self) -> None:
         """Design section 7 invariants, checked against the full call log. The exception
         (design 21.1): a prompt from `send --now` or `deliver --now` may reach a working
@@ -301,6 +308,7 @@ class FleetCase(unittest.TestCase):
         listed: Dict[str, Optional[str]] = {}  # the states the command's last `agent list` answered
         pressed: Optional[str] = None          # the last key the fake screen replayed, until a focus uses it
         peeked: Optional[str] = None           # the seat a `p` read, whose visible screen may follow (32.3)
+        limited: Dict[str, bool] = {}          # design 35.6: pane -> its last read showed a limit line, input empty
         timer_reads = 0
         starts = StartsCheck(self)
         helper: Optional[Dict] = None          # design 32.5: the handover helper's seat and pane
@@ -310,7 +318,7 @@ class FleetCase(unittest.TestCase):
                 command = call["command"]
                 keys = KeysCheck(self, command)
                 previous = None
-                listed, pressed, peeked = {}, None, None
+                listed, pressed, peeked, limited = {}, None, None, {}
                 timer_reads = 0
                 starts = StartsCheck(self)
                 helper = None
@@ -330,6 +338,8 @@ class FleetCase(unittest.TestCase):
                 self.assertLessEqual(timer_reads, 1, "timer inspection listed agents more than once")
             if argv[:2] == ["agent", "list"] and "states" in info:
                 listed = dict(info["states"])
+            if argv[:2] in (["agent", "read"], ["pane", "read"]) and info.get("pane"):
+                limited[info["pane"]] = bool(info.get("limit_shown")) and not info.get("input_text")
             if argv[:2] == ["agent", "get"] and info.get("name"):
                 keys.seen(str(info["name"]), info.get("status"))
             if argv[:2] == ["agent", "send-keys"]:
@@ -351,6 +361,8 @@ class FleetCase(unittest.TestCase):
                         peeked = argv[2]
                     elif after_peek:  # 32.3: the same `p`, read again with --source visible
                         peeked = None
+                    elif self.limit_read_allowed(argv, listed):
+                        pass
                     else:
                         self.assertIn(argv[2], seats, "the board read the screen of %s, not a seat: %s"
                                       % (argv[2], argv))
@@ -414,7 +426,10 @@ class FleetCase(unittest.TestCase):
                                  % (command[:1], argv))
                 self.assertFalse(info.get("input_held"), "%s prompted a pane whose input held text or showed no "
                                  "prompt line (design 23.11): %s" % (command[:1], argv))
-                allowed = ("idle", "done", None) + (("working",) if typed_ahead_allowed(command, argv, info) else ())
+                quit_of_limited = (command[:1] in (["restart"], ["swap"], ["down"], ["handover"])
+                                   and argv[3:4] in (["/exit"], ["/quit"]) and limited.get(info.get("pane")))
+                allowed = ("idle", "done", None) + (("working",) if typed_ahead_allowed(command, argv, info)
+                                                    or quit_of_limited else ())
                 self.assertIn(info.get("target_status"), allowed,
                               "%s prompted an agent in state %s: %s" % (command[:1], info.get("target_status"), argv))
             if argv[:2] == ["agent", "start"] and "--help" not in argv:

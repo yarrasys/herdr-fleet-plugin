@@ -36,7 +36,7 @@ import os
 from typing import Dict, List, Optional, Sequence, TextIO, Tuple
 
 from herdr_fleet import contacts as contact_mod
-from herdr_fleet import crossfleet, inbox, seen
+from herdr_fleet import crossfleet, inbox, limits, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, resolve_caller
 from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
@@ -81,11 +81,42 @@ def op_deliver(ctx: Ctx, names: Sequence[str], fyi_too: bool = False, now: bool 
     codes = [EXIT_OK]
     observed: Dict[str, str] = {}
     for name in order:
+        if names and not ctx.dry_run:  # design 35.2: `deliver NAME` ends the hold of a limited seat
+            released = release_limit(ctx, name)
+            if released:
+                ctx.say(released)
+        elif not names:  # without names the hold stands: NAME limited, N left queued
+            held = limited_line(ctx, name, len(waiting.get(name, [])))
+            if held:
+                ctx.say(held)
+                continue
         line, code, _ = deliver_one(ctx, name, agents, waiting.get(name, []), now=now, observed=observed)
         ctx.say(line)
         codes.append(code)
     seen.observe_agents(ctx, agents, observed)
     return max(codes)
+
+
+def release_limit(ctx: Ctx, name: str) -> Optional[str]:
+    """``deliver NAME`` (design 35.2) ends the hold on a limited seat's queue: the record is marked
+    released and the delivery goes on as for any seat. The line says so; None when nothing was held."""
+    seat = ctx.fleet.seat(name)
+    if seat is None:
+        return None
+    record = limits.holding(ctx.fleet.repo, name, seat.kind)
+    if record is None or not limits.release(ctx.fleet.repo, name, seat.kind):
+        return None
+    return "%s: %s limit released; delivering anyway" % (name, record.get("kind"))
+
+
+def limited_line(ctx: Ctx, name: str, count: int) -> Optional[str]:
+    """The line for a mailbox a limit holds (design 35.2) that a delivery without that seat's
+    name leaves alone; None when no limit holds it."""
+    seat = ctx.fleet.seat(name)
+    record = limits.holding(ctx.fleet.repo, name, seat.kind) if seat is not None else None
+    if record is None or not count:
+        return None
+    return "%s: limited (%s), %d left queued; deliver %s releases it" % (name, record.get("kind"), count, name)
 
 
 def expire_all(ctx: Ctx) -> None:

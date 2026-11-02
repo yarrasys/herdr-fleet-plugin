@@ -24,11 +24,13 @@ import fcntl
 import json
 import os
 import tempfile
-from typing import Dict, Iterator, List, Mapping, Optional
+from typing import Dict, Iterator, List, Mapping, Optional, Sequence
 
 from herdr_fleet.herdr import Herdr, HerdrError
 
 STATE_NAME = "fleet.state.json"
+FIELD_OWNED = ("state_seen", "limited", "limited_also")  # written field-only under the lock; save_state keeps the disk's value
+TOP_OWNED = ("codex_allowance",)  # the same, for top-level keys (design 35.2)
 IGNORED = (STATE_NAME, "messages.jsonl", "inbox/", "watch.lock", "watch.log", "timers.state.json", "timers.lock",
            "handover/")
 VERSION = 1
@@ -194,9 +196,16 @@ def save_state(state: State) -> None:
     with locked(folder):
         disk = _read(state.path) or {}
         for name, entry in (disk.get("agents") or {}).items():
-            seen = entry.get("state_seen") if isinstance(entry, dict) else None
-            if seen and isinstance(state.agents.get(name), dict):
-                state.agents[name]["state_seen"] = seen
+            if not isinstance(entry, dict) or not isinstance(state.agents.get(name), dict):
+                continue
+            for owned in FIELD_OWNED:
+                if entry.get(owned):
+                    state.agents[name][owned] = entry[owned]
+                else:
+                    state.agents[name].pop(owned, None)
+        for key in TOP_OWNED:
+            if disk.get(key):
+                state.data[key] = disk[key]
         _write(state.path, state.data)
     state.existed = True
     state.dirty = False
@@ -231,6 +240,63 @@ def record_seen(repo: str, observed: Mapping[str, str], now: datetime.datetime) 
         if changed:
             _write(path, data)
     return result
+
+
+def read_agents(repo: str) -> Dict[str, Dict]:
+    """The seat entries as they are on disk right now (a fresh read, no lock; empty when
+    there is no state file). The watcher reads ``limited`` and ``failover`` so (design 35.2)."""
+    data = _read(state_path(repo))
+    agents = (data or {}).get("agents") or {}
+    return {str(n): e for n, e in agents.items() if isinstance(e, dict)}
+
+
+def read_top(repo: str, key: str) -> Optional[object]:
+    """One top-level key of the state file as it is on disk right now (None when absent)."""
+    return (_read(state_path(repo)) or {}).get(key)
+
+
+def patch_entry(repo: str, name: str, fields: Optional[Mapping[str, object]] = None,
+                remove: Sequence[str] = ()) -> bool:
+    """Design 35.2: set and remove fields of one seat's entry, read fresh and rewritten under
+    the lock and nothing else (``limited`` is written by the watcher and by ``deliver``, which
+    must not write back the state they loaded earlier). False when there is no state file or
+    no entry for the seat."""
+    path = state_path(repo)
+    if not os.path.exists(path):
+        return False
+    with locked(os.path.dirname(path)):
+        data = _read(path)
+        entry = ((data or {}).get("agents") or {}).get(name)
+        if not isinstance(entry, dict):
+            return False
+        changed = False
+        for key in remove:
+            if key in entry:
+                del entry[key]
+                changed = True
+        for key, value in (fields or {}).items():
+            if entry.get(key) != value:
+                entry[key] = value
+                changed = True
+        if changed:
+            _write(path, data)
+    return True
+
+
+def patch_top(repo: str, key: str, value: object) -> bool:
+    """Design 35.2: set one top-level key (the watcher's ``codex_allowance`` reading), read fresh
+    and rewritten under the lock. False when there is no state file."""
+    path = state_path(repo)
+    if not os.path.exists(path):
+        return False
+    with locked(os.path.dirname(path)):
+        data = _read(path)
+        if data is None:
+            return False
+        if data.get(key) != value:
+            data[key] = value
+            _write(path, data)
+    return True
 
 
 def mark_notified(repo: str, name: str, since: str) -> None:

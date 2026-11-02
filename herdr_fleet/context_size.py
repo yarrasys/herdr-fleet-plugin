@@ -6,8 +6,11 @@ cache creation/read; Codex uses last_token_usage.total_tokens and an optional
 reported window, never cumulative usage or an inferred model limit.
 
 Boundary (invariants 8 and 9): parsers retain only usage numbers, timestamp and
-type/source tags. No prompt, tool content, rate limits, path or session id is
-returned or logged. Nothing under either provider's source root is written.
+type/source tags. No prompt, tool content, path or session id is returned or logged.
+Nothing under either provider's source root is written. Design 35.2 adds one more
+reading of the same Codex rollout, ``seat_allowance``: the latest ``rate_limits``
+record's ``primary.used_percent``, ``window_minutes`` and ``resets_at`` (numbers only),
+for the watcher's early warning; ``status`` shows it as one line.
 """
 
 from __future__ import annotations
@@ -168,6 +171,34 @@ def codex_usage_record(raw: bytes) -> Optional[Dict]:
     return result
 
 
+def codex_allowance_record(raw: bytes) -> Optional[Dict]:
+    """Whitelist the account allowance of a Codex ``token_count`` event (design 35.2): the
+    ``rate_limits.primary`` percent used, its window in minutes and its reset time (epoch
+    seconds). Nothing else of ``rate_limits`` (plan, credits, ids) is kept."""
+    if b'"rate_limits"' not in raw:
+        return None
+    try:
+        line = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    payload = line.get("payload") if isinstance(line, dict) else None
+    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+        return None
+    limits = payload.get("rate_limits")
+    primary = limits.get("primary") if isinstance(limits, dict) else None
+    used = primary.get("used_percent") if isinstance(primary, dict) else None
+    if not isinstance(used, (int, float)) or isinstance(used, bool) or not 0 <= used <= 1000:
+        return None
+    record: Dict = {"used_percent": float(used), "source": CODEX_SOURCE}
+    for key, out in (("resets_at", "resets_at"), ("window_minutes", "window_minutes")):
+        value = primary.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            record[out] = value
+    timestamp = line.get("timestamp")
+    record["at"] = timestamp if isinstance(timestamp, str) else None
+    return record
+
+
 def _last_record(path: str, parser: Callable, chunk: int, limit: int) -> Optional[Dict]:
     """The last usage record in a transcript, reading backwards from the end in
     ``chunk``-byte steps and at most ``limit`` bytes. A trailing partial line fails to
@@ -204,6 +235,10 @@ def last_usage(path: str, chunk: int = CHUNK, limit: int = LIMIT) -> Optional[Di
 
 def last_codex_usage(path: str, chunk: int = CHUNK, limit: int = LIMIT) -> Optional[Dict]:
     return _last_record(path, codex_usage_record, chunk, limit)
+
+
+def last_codex_allowance(path: str, chunk: int = CHUNK, limit: int = LIMIT) -> Optional[Dict]:
+    return _last_record(path, codex_allowance_record, chunk, limit)
 
 
 def read_context(provider: str, path: str) -> Optional[Dict]:
@@ -283,3 +318,14 @@ def context_label(info: Optional[Mapping], now: Optional[datetime.datetime] = No
         return label
     now = now or datetime.datetime.now(datetime.timezone.utc)
     return "%s (%s)" % (label, age_label((now - when).total_seconds()))
+
+
+def seat_allowance(agent: Optional[Mapping], env: Mapping[str, str]) -> Optional[Dict]:
+    """Design 35.2: a live Codex agent's latest account allowance (``used_percent``, optional
+    ``resets_at`` epoch seconds and ``window_minutes``, ``at``), found through the same session
+    lookup as the context reading; None for any other kind, or when nothing readable is there."""
+    resolved = resolve(agent, env)
+    if resolved is None or resolved[0] != "codex":
+        return None
+    path = find_source("codex", resolved[1], resolved[2])
+    return last_codex_allowance(path) if path else None

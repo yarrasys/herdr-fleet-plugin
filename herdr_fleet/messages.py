@@ -233,6 +233,32 @@ def read(repo: str, warnings: Optional[List[str]] = None) -> List[Dict]:
     return entries
 
 
+def last_request(repo: str, name: str) -> Optional[Dict]:
+    """The last request (not an FYI) that reached ``name``, by the log's account (design 35.3): its
+    short id, sender and first line, or None. A request reached the seat when its ``send`` entry says
+    it was typed at once (``sent`` or ``unconfirmed``), or a ``delivered`` entry for its id says the
+    mailbox was handed over later; the sender is the ``send`` entry's. The log is read, and
+    nothing else."""
+    entries = read(repo)
+    sent = {str(e.get("id")): e for e in entries if e.get("kind") == "send" and e.get("id")}
+    for entry in reversed(entries):
+        kind = entry.get("kind")
+        if entry.get("to") != name or not entry.get("id"):
+            continue
+        if kind == "delivered":
+            origin = sent.get(str(entry["id"]))
+        elif kind == "send" and entry.get("delivery") in ("sent", "unconfirmed"):
+            origin = entry
+        else:
+            continue
+        if origin is None or origin.get("fyi"):
+            continue
+        ident = str(entry["id"])
+        return {"id": ident, "short": inbox.short_of(ident), "from": str(origin.get("from") or "?"),
+                "first_line": str(origin.get("first_line") or entry.get("first_line") or "")}
+    return None
+
+
 def log_kickoff(repo: str, to: str, text: str, reason: Optional[str] = None) -> Optional[str]:
     """Record a kickoff (with its ``reason``: up, restart, swap, kickoff); returns a warning
     instead of failing the kickoff."""

@@ -29,7 +29,8 @@ FLEET_NAME = "fleet.toml"
 DIRECTIONS = ("right", "down")
 
 TOP_KEYS = {"workspace", "cwd", "state_note", "kickoff", "layout", "agents", "contacts", "quit_timeout_ms",
-            "restart_hint_tokens", "watch", "inbox_print_max", "interrupt", "timers", "fyi_ttl"}
+            "restart_hint_tokens", "watch", "inbox_print_max", "interrupt", "timers", "fyi_ttl", "tiers",
+            "failover_at_percent"}
 CONTACT_KEYS = {"name", "match", "note"}
 MATCH_KEYS = {"cwd", "kind", "name"}
 LAYOUT_KEYS = {"mode", "columns", "direction", "ratio", "top", "top_ratio"}
@@ -45,7 +46,8 @@ WATCH_RATIO_RANGE = (0.1, 0.4)       # herdr clamps every split ratio to 0.1-0.9
 TOP_RATIO = 0.3                      # [layout] top_ratio: the band's share of the tab's height (design 26.1)
 TOP_RATIO_RANGE = (0.1, 0.6)
 SEAT_KEYS = {"name", "kind", "args", "cwd", "split", "ratio", "from", "env", "kickoff",
-             "kickoff_text", "quit", "notes", "worktrees", "label"}
+             "kickoff_text", "quit", "notes", "worktrees", "label", "tier", "prefer", "extra_args"}
+FAILOVER_AT_PERCENT = 95             # design 35.2: Codex's allowance warning, percent used
 LABEL_MAX = 40                       # design 22.1: the seat key `label`, shown on the pane's border
 INTERRUPT_ALLOWED = ("ctrl+c", "esc", "enter")  # design 23.7: the keys an [interrupt] entry may name
 
@@ -77,6 +79,43 @@ class Seat:
     from_seat: Optional[str] = None  # chain mode: split from this earlier seat's pane (``from``)
     worktrees: List[str] = field(default_factory=list)  # path globs, ~ expanded (design 17.2)
     label: Optional[str] = None  # the pane's border name instead of the seat name (design 22.1)
+    tier: Optional[str] = None   # design 35.1: the seat takes its kind and args from this tier ...
+    prefer: List[str] = field(default_factory=list)  # ... in this order of kinds; prefer[0] is the primary
+    variants: Dict[str, "Variant"] = field(default_factory=dict)  # kind -> its arguments and quit command
+
+    @property
+    def primary(self) -> str:
+        """The kind the seat is started with unless it has failed over (35.1); a seat with no
+        tier has only ``kind``."""
+        return self.prefer[0] if self.prefer else self.kind
+
+    def kinds(self) -> List[str]:
+        """Every kind the seat may run: its ``prefer`` list, or just ``kind``."""
+        return list(self.prefer) if self.prefer else [self.kind]
+
+    def use(self, kind: str) -> bool:
+        """Make ``kind`` the effective kind of a tier seat: ``kind``, ``args`` and ``quit`` follow
+        it (35.1; every reader of the seat sees the effective pair). False for a kind that is not
+        one of the seat's variants, which changes nothing."""
+        variant = self.variants.get(kind)
+        if variant is None:
+            return False
+        self.kind, self.args, self.quit = kind, list(variant.args), variant.quit
+        return True
+
+    def quit_for(self, kind: str) -> Optional[str]:
+        """The quit command the fleet file names for a tier seat running ``kind`` (35.1), else None."""
+        variant = self.variants.get(kind)
+        return variant.quit if variant is not None else None
+
+
+@dataclass
+class Variant:
+    """One kind of a tier seat (design 35.1): the tier's arguments for it plus the seat's
+    ``extra_args``, and the quit command (the seat's ``quit``, else the tier's)."""
+
+    args: List[str]
+    quit: Optional[str] = None
 
 
 @dataclass
@@ -117,6 +156,8 @@ class Fleet:
     top_ratio: float = TOP_RATIO               # [layout] top_ratio, clamped to TOP_RATIO_RANGE
     timers: List[Timer] = field(default_factory=list)  # opt-in daily requests (design 30)
     fyi_ttl: Optional[int] = 86400             # design 33.1: seconds an FYI without a ttl waits; None: "off"
+    tiers: Dict[str, Dict[str, Variant]] = field(default_factory=dict)  # design 35.1: tier -> kind -> variant
+    failover_at_percent: int = FAILOVER_AT_PERCENT  # design 35.2: Codex's allowance warning
 
     def contact(self, name: str) -> Optional[Contact]:
         for contact in self.contacts:
@@ -131,7 +172,8 @@ class Fleet:
         return None
 
     def kinds(self) -> List[str]:
-        return sorted({seat.kind for seat in self.seats})
+        """Every kind a seat may run, tier seats' fallbacks included (design 35.1)."""
+        return sorted({kind for seat in self.seats for kind in seat.kinds()})
 
 
 def load_toml(path: str) -> Dict:
@@ -210,6 +252,11 @@ def load_fleet(path: str) -> Fleet:
         errors.append("inbox_print_max: must be a positive integer (bytes)")
         print_max = INBOX_PRINT_MAX
     fyi_ttl = _fyi_ttl(data.get("fyi_ttl", FYI_TTL), errors)
+    failover_at = data.get("failover_at_percent", FAILOVER_AT_PERCENT)
+    if not isinstance(failover_at, int) or isinstance(failover_at, bool) or not 1 <= failover_at <= 100:
+        errors.append("failover_at_percent: must be a whole number from 1 to 100 (percent of Codex's allowance)")
+        failover_at = FAILOVER_AT_PERCENT
+    tiers = parse_tiers(data.get("tiers", {}), errors)
 
     layout = data.get("layout", {})
     if not isinstance(layout, dict):
@@ -243,7 +290,7 @@ def load_fleet(path: str) -> Fleet:
     seats: List[Seat] = []
     seen = set()
     for index, raw in enumerate(raw_seats):
-        seat = _parse_seat(raw, index, repo, base_cwd, direction, ratio, errors, warnings)
+        seat = _parse_seat(raw, index, repo, base_cwd, direction, ratio, tiers, errors, warnings)
         if seat is None:
             continue
         if seat.name in seen:
@@ -268,7 +315,8 @@ def load_fleet(path: str) -> Fleet:
                  quit_timeout_ms=quit_timeout, seats=seats, warnings=warnings, mode=mode, columns=columns,
                  contacts=contacts, restart_hint_tokens=hint_tokens, watch=watch, watch_ratio=watch_ratio,
                  watch_position=watch_position, notify_blocked_after=blocked_after, inbox_print_max=print_max,
-                 interrupt=interrupt, top=top, top_ratio=top_ratio, timers=timers, fyi_ttl=fyi_ttl)
+                 interrupt=interrupt, top=top, top_ratio=top_ratio, timers=timers, fyi_ttl=fyi_ttl,
+                 tiers=tiers, failover_at_percent=failover_at)
 
 
 def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
@@ -277,13 +325,24 @@ def check_kinds(fleet: Fleet, kinds: Optional[Sequence[str]]) -> List[str]:
     if kinds is None:
         return []
     known = set(kinds)
-    return ["%s: agents[%d].kind %r is not a kind this herdr supports (%s)"
-            % (fleet.path, seat.index, seat.kind, "|".join(kinds))
-            for seat in fleet.seats if seat.kind not in known]
+    problems = []
+    for seat in fleet.seats:
+        where = "agents[%d].prefer" % seat.index if seat.prefer else "agents[%d].kind" % seat.index
+        for kind in seat.kinds():
+            if kind not in known:
+                problems.append("%s: %s %r is not a kind this herdr supports (%s)"
+                                % (fleet.path, where, kind, "|".join(kinds)))
+    for tier, table in fleet.tiers.items():  # design 35.1: a tier may name only kinds herdr supports
+        for kind in table:
+            if kind not in known and not any(kind in seat.kinds() for seat in fleet.seats if seat.tier == tier):
+                problems.append("%s: tiers.%s.%s is not a kind this herdr supports (%s)"
+                                % (fleet.path, tier, kind, "|".join(kinds)))
+    return problems
 
 
 def _parse_seat(raw: Dict, index: int, repo: str, base_cwd: str, direction: str,
-                ratio: Optional[float], errors: List[str], warnings: List[str]) -> Optional[Seat]:
+                ratio: Optional[float], tiers: Dict[str, Dict[str, Variant]], errors: List[str],
+                warnings: List[str]) -> Optional[Seat]:
     where = "agents[%d]" % index
     _unknown_keys(raw, SEAT_KEYS, where, warnings)
     name = raw.get("name")
@@ -292,14 +351,27 @@ def _parse_seat(raw: Dict, index: int, repo: str, base_cwd: str, direction: str,
         name = None
     else:
         where = "agents[%d] (%s)" % (index, name)
-    kind = raw.get("kind")
-    if not isinstance(kind, str) or not kind:
-        errors.append("%s.kind: required string" % where)
-        kind = None
-    args = raw.get("args", [])
-    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-        errors.append("%s.args: must be a list of strings" % where)
-        args = []
+    tiered = "tier" in raw or "prefer" in raw or "extra_args" in raw
+    kind: Optional[str] = None
+    args: List[str] = []
+    quit_cmd = _opt_str(raw, "quit", where + ".quit", errors)
+    tier_name: Optional[str] = None
+    prefer: List[str] = []
+    variants: Dict[str, Variant] = {}
+    if tiered:  # design 35.1: `tier` with `prefer`, never together with `kind` or `args`
+        tier_name, prefer, variants = _tier_seat(raw, where, tiers, quit_cmd, errors)
+        if prefer:
+            kind = prefer[0]
+            args, quit_cmd = list(variants[kind].args), variants[kind].quit
+    else:
+        kind = raw.get("kind")
+        if not isinstance(kind, str) or not kind:
+            errors.append("%s.kind: required string" % where)
+            kind = None
+        args = raw.get("args", [])
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            errors.append("%s.args: must be a list of strings" % where)
+            args = []
     cwd_raw = _opt_str(raw, "cwd", where + ".cwd", errors)
     cwd = resolve_path(cwd_raw, repo) if cwd_raw else base_cwd
     if not os.path.isdir(cwd):
@@ -314,7 +386,6 @@ def _parse_seat(raw: Dict, index: int, repo: str, base_cwd: str, direction: str,
     kickoff_text = _opt_str(raw, "kickoff_text", where + ".kickoff_text", errors)
     if kickoff and kickoff_text:
         errors.append("%s: set kickoff or kickoff_text, not both" % where)
-    quit_cmd = _opt_str(raw, "quit", where + ".quit", errors)
     notes = _opt_str(raw, "notes", where + ".notes", errors) or ""
     label = _label(raw, where + ".label", errors)
     from_seat = _opt_str(raw, "from", where + ".from", errors)
@@ -324,7 +395,109 @@ def _parse_seat(raw: Dict, index: int, repo: str, base_cwd: str, direction: str,
     return Seat(name=name, kind=kind, args=list(args), cwd=cwd, split=split,
                 ratio=seat_ratio if seat_ratio is not None else ratio, env=dict(env),
                 kickoff=kickoff, kickoff_text=kickoff_text, quit=quit_cmd, notes=notes, index=index,
-                from_seat=from_seat, worktrees=worktrees, label=label)
+                from_seat=from_seat, worktrees=worktrees, label=label, tier=tier_name, prefer=prefer,
+                variants=variants)
+
+
+def parse_tiers(value: object, errors: List[str]) -> Dict[str, Dict[str, "Variant"]]:
+    """``[tiers.NAME]`` (design 35.1): each key a herdr kind, each value an array of strings or
+    a table ``{ args = [...], quit = "..." }``. Whether herdr supports the kind is checked with
+    the seats' kinds (``check_kinds``)."""
+    if not isinstance(value, dict):
+        errors.append("tiers: must be a table of [tiers.NAME] tables")
+        return {}
+    tiers: Dict[str, Dict[str, Variant]] = {}
+    for name, table in value.items():
+        where = "tiers.%s" % name
+        if not NAME_RE.match(str(name)):
+            errors.append("%s: the tier name must match [a-z][a-z0-9_-]{0,31}" % where)
+            continue
+        if not isinstance(table, dict) or not table:
+            errors.append("%s: must be a non-empty table of kind = [args]" % where)
+            continue
+        kinds: Dict[str, Variant] = {}
+        for kind, entry in table.items():
+            at = "%s.%s" % (where, kind)
+            if isinstance(entry, list):
+                args, quit_cmd = entry, None
+            elif isinstance(entry, dict):
+                for extra in sorted(set(entry) - {"args", "quit"}):
+                    errors.append("%s: unknown key %r (a kind takes args and quit)" % (at, extra))
+                args, quit_cmd = entry.get("args"), entry.get("quit")
+                if quit_cmd is not None and not (isinstance(quit_cmd, str) and quit_cmd):
+                    errors.append("%s.quit: must be a non-empty string" % at)
+                    quit_cmd = None
+            else:
+                errors.append("%s: must be an array of strings or { args = [...], quit = \"...\" }" % at)
+                continue
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                errors.append("%s: args must be a list of strings" % at)
+                continue
+            kinds[str(kind)] = Variant(list(args), quit_cmd)
+        tiers[str(name)] = kinds
+    return tiers
+
+
+def _tier_seat(raw: Dict, where: str, tiers: Dict[str, Dict[str, "Variant"]], quit_cmd: Optional[str],
+               errors: List[str]) -> Tuple[Optional[str], List[str], Dict[str, "Variant"]]:
+    """A seat that uses ``tier`` and ``prefer`` (design 35.1): its tier, its kinds in order and
+    each kind's variant (the tier's arguments, then the seat's ``extra_args`` for the kind; the
+    seat's ``quit``, else the tier's). Every problem is an error."""
+    for key in ("kind", "args"):
+        if key in raw:
+            errors.append("%s: %s cannot be combined with tier; a seat uses kind and args, or tier and prefer"
+                          % (where, key))
+    tier = raw.get("tier")
+    prefer = raw.get("prefer")
+    if tier is None:
+        errors.append("%s.tier: required with prefer or extra_args" % where)
+        return None, [], {}
+    if not isinstance(tier, str) or tier not in tiers:
+        errors.append("%s.tier: %r is not a tier in this file (tiers: %s)"
+                      % (where, tier, ", ".join(sorted(tiers)) or "none"))
+        return None, [], {}
+    if (not isinstance(prefer, list) or not prefer or not all(isinstance(k, str) and k for k in prefer)):
+        errors.append("%s.prefer: required, a non-empty list of kinds from tier %s (%s)"
+                      % (where, tier, ", ".join(tiers[tier])))
+        return tier, [], {}
+    ok = True
+    for kind in prefer:
+        if kind not in tiers[tier]:
+            errors.append("%s.prefer: %r is not a kind of tier %s (%s)" % (where, kind, tier, ", ".join(tiers[tier])))
+            ok = False
+    if len(set(prefer)) != len(prefer):
+        errors.append("%s.prefer: a kind is listed twice" % where)
+        ok = False
+    extra = raw.get("extra_args", {})
+    if not isinstance(extra, dict) or not all(isinstance(v, list) and all(isinstance(a, str) for a in v)
+                                              for v in extra.values()):
+        errors.append("%s.extra_args: must be a table of kind = [args]" % where)
+        extra = {}
+    for kind in extra:
+        if kind not in prefer:
+            errors.append("%s.extra_args: %r is not in prefer (%s)" % (where, kind, ", ".join(map(str, prefer))))
+            ok = False
+    if not ok:
+        return tier, [], {}
+    variants = {kind: Variant(list(tiers[tier][kind].args) + list(extra.get(kind, [])),
+                              quit_cmd or tiers[tier][kind].quit) for kind in prefer}
+    return tier, list(prefer), variants
+
+
+def apply_failover(fleet: Fleet, agents: Mapping[str, Mapping]) -> List[str]:
+    """Design 35.1 and 35.3: a tier seat whose state entry records ``failover.to`` runs that kind
+    from now on (every reader of the seat sees the effective pair). A record naming a kind the
+    seat no longer lists is ignored. Returns the seats switched."""
+    switched = []
+    for seat in fleet.seats:
+        if not seat.prefer:
+            continue
+        entry = agents.get(seat.name)
+        record = entry.get("failover") if isinstance(entry, dict) else None
+        to = record.get("to") if isinstance(record, dict) else None
+        if isinstance(to, str) and to != seat.kind and seat.use(to):
+            switched.append(seat.name)
+    return switched
 
 
 def _label(raw: Dict, where: str, errors: List[str]) -> Optional[str]:

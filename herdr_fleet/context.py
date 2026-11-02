@@ -17,11 +17,12 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, TextIO
 
 from herdr_fleet import MIN_HERDR_VERSION, PLUGIN_ID
-from herdr_fleet.fleetfile import Fleet, FleetError, find_fleet_file, load_fleet, load_toml, parse_interrupt
+from herdr_fleet.fleetfile import (Fleet, FleetError, apply_failover, find_fleet_file, load_fleet, load_toml,
+                                    parse_interrupt)
 from herdr_fleet.herdr import Herdr, HerdrError
 from herdr_fleet.notify import notify
 from herdr_fleet.seats import DEFAULT_QUIT_TIMEOUT_MS, Clock
-from herdr_fleet.state import State, load_state, save_state
+from herdr_fleet.state import State, StateError, load_state, save_state
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_PARTIAL = 0, 1, 2, 3
 
@@ -177,6 +178,7 @@ class Ctx:
         self._fleet: Optional[Fleet] = None
         self._state: Optional[State] = None
         self._config: Optional[PluginConfig] = None
+        self.limited_quit: set = set()  # design 35.6: seats whose limit a fresh read confirmed this command
         self.keys_allowed = True  # design 23.7: a popup (the `manage` menu) never presses a key
 
     # -- output ------------------------------------------------------------
@@ -212,7 +214,20 @@ class Ctx:
             self._fleet = load_fleet(self._find_fleet())
             for warning in self._fleet.warnings:
                 self.warn(warning)
+            self.apply_failover()
         return self._fleet
+
+    def apply_failover(self) -> None:
+        """Design 35.1: a tier seat that has failed over runs the kind its state entry names, so
+        every reader of the fleet sees the effective kind and args. A state file that cannot be
+        read changes nothing here (the command that needs it says so)."""
+        fleet = self._fleet
+        if fleet is None or not any(seat.prefer for seat in fleet.seats):
+            return
+        try:
+            apply_failover(fleet, self.state.agents)
+        except StateError:
+            pass
 
     def reload_fleet(self) -> Fleet:
         """Read the fleet file again, from the path already in use (design 26.6: the
@@ -222,6 +237,7 @@ class Ctx:
         for warning in fleet.warnings:
             self.warn(warning)
         self._fleet = fleet
+        self.apply_failover()
         return fleet
 
     def _find_fleet(self) -> str:
