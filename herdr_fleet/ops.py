@@ -324,8 +324,8 @@ def limited_working(ctx: Ctx, seat: Seat, agent: Dict, report: Report) -> bool:
     the kind the live agent runs (compared here, explicitly); it has been ``working`` without a
     break since before the limit was recorded (``state_seen`` says working, since a time not after
     the record's ``at``), so a seat the owner resumed afterwards is not taken; a fresh read still
-    shows the limit line within the last QUIT_ABOVE (3) non-blank lines above its input, so a turn resumed
-    in place, which pushes it up, is not taken (35.5 item 21); and that input line is empty. Kimi leaves a limited seat
+    shows only the limit line, its own wrapped lines and declared trailers above an empty input
+    (37.1), so a turn resumed in place is not taken. Kimi leaves a limited seat
     ``working``, so without this swap, restart and down refuse it for ever. The quit then goes
     through ``safe_prompt`` with only the state rule relaxed (``ctx.limited_quit``), for that seat
     alone, and the presence guard still runs. False (and nothing said) when any condition fails: the
@@ -339,8 +339,7 @@ def limited_working(ctx: Ctx, seat: Seat, agent: Dict, report: Report) -> bool:
     if seen_state.get("state") != "working" or since is None or recorded is None or since > recorded:
         return False
     screen = read_screen(ctx, seat.name, agent)
-    if screen is None or limits.limit_line(kind, screen, limits.QUIT_ABOVE) is None \
-            or not limits.input_empty(kind, screen):
+    if screen is None or not limits.limit_block(kind, screen):
         return False
     ctx.limited_quit.add(seat.name)
     report.add(seat.name, "note", "working, but its %s limit is on screen and its input is empty; it is quit" % kind)
@@ -519,9 +518,11 @@ def _warn_still_limited(ctx: Ctx, seat: Seat, report: Report) -> None:
                                                            if when else "", seat.name))
 
 
-def fallback_note(ctx: Ctx, seat: Seat, old: str, new: str, record: Optional[Dict], extra: Optional[str]) -> str:
+def fallback_note(ctx: Ctx, seat: Seat, old: str, new: str, record: Optional[Dict], extra: Optional[str],
+                  failures: Sequence[Tuple[str, str]] = ()) -> str:
     """The note that starts the failed-over session's kickoff (35.3): who it replaces and why, the
-    last request delivered to the seat, and a reminder about the working tree; then ``--note``."""
+    last request delivered to the seat, any earlier kinds that did not start (37.2), and a reminder
+    about the working tree; then ``--note``."""
     if record and record.get("kind") == old and record.get("line"):
         why = '%s hit its usage limit ("%s")' % (old, record["line"])
     else:
@@ -538,6 +539,7 @@ def fallback_note(ctx: Ctx, seat: Seat, old: str, new: str, record: Optional[Dic
     if last:
         lines.append("The last request delivered to %s was #%s from %s: %s"
                      % (seat.name, last["short"], last["from"], last["first_line"]))
+    lines.extend("%s did not start: %s" % (kind, reason) for kind, reason in failures)
     lines.append("Run git status: work in progress from the previous session may be in the working tree.")
     if extra:
         lines.append(extra)
@@ -545,13 +547,10 @@ def fallback_note(ctx: Ctx, seat: Seat, old: str, new: str, record: Optional[Dic
 
 
 def _swap_fallback(ctx: Ctx, names: Sequence[str], note: Optional[str], wait_ms: Optional[int]) -> Report:
-    """Design 35.3 and 35.6: ``swap [NAME...] --fallback``. Each named tier seat, one at a time, moves
-    to the next kind of its ``prefer`` after the one it runs, skipping any kind with a limit still
-    recorded; it is started, briefed with the failover note, and the state records ``failover``.
-    With no names, every tier seat the state marks limited (its running kind has a record that
-    holds). Usage errors (exit 2), found before anything moves: a name that is no tier seat, an
-    adopted live seat, a seat with no free kind to move to. In the all-seats form these seats are
-    reported and left instead."""
+    """Design 35.3, 35.6 and 37.2: ``swap [NAME...] --fallback``. Each named tier seat, one at a time,
+    tries its free ``prefer`` kinds in order until one starts; a failed start is reported and the next
+    kind follows in the same pane. A started seat is briefed with the failover note and records
+    ``failover``. With no names, every tier seat the state marks limited is covered."""
     report = Report("swap")
     refuse_unknown_kinds(ctx)
     prune(ctx)
@@ -574,16 +573,16 @@ def _swap_fallback(ctx: Ctx, names: Sequence[str], note: Optional[str], wait_ms:
         plan = _fallback_plan(ctx, seat, live.get(seat.name), agents, explicit, report)
         if plan is not None:
             plans.append((seat,) + plan)
-    for seat, old, new, record in plans:
-        _fallback_one(ctx, seat, old, new, record, note, wait_ms, report)
+    for seat, old, choices, record in plans:
+        _fallback_one(ctx, seat, old, choices, record, note, wait_ms, report)
     labels.apply(ctx, None, report)
     return report
 
 
 def _fallback_plan(ctx: Ctx, seat: Seat, agent: Optional[Dict], agents: Dict[str, Dict], explicit: bool,
-                   report: Report) -> Optional[Tuple[str, str, Optional[Dict]]]:
-    """The kind a tier seat runs and the next one (35.3), or the usage error (an explicit name) or
-    report line (the all-seats form) saying why not."""
+                   report: Report) -> Optional[Tuple[str, List[str], Optional[Dict]]]:
+    """The kind a tier seat runs and every candidate in order (35.3, 37.2), or the usage error (an
+    explicit name) or report line (the all-seats form) saying why not."""
 
     def refuse(text: str) -> None:
         if explicit:
@@ -594,7 +593,7 @@ def _fallback_plan(ctx: Ctx, seat: Seat, agent: Optional[Dict], agents: Dict[str
         refuse("%s is an adopted session; herdr-fleet did not start it, so it will not move it to another kind "
                "(restart it by hand, or `restart %s` to take it over first)" % (seat.name, seat.name))
         return None
-    running = str((agent or {}).get("agent") or seat.kind)  # the kind it runs: the live agent's, else the file's
+    running = str((agent or {}).get("agent") or seat.kind)
     if running not in seat.prefer:
         running = seat.kind
     choices = limits.fallback_candidates(seat, limits.kinds_limited(agents), running)
@@ -605,29 +604,88 @@ def _fallback_plan(ctx: Ctx, seat: Seat, agent: Optional[Dict], agents: Dict[str
                    "%s%s" % (k, _reset_words(agents, k)) for k in others))
         refuse("%s: no fallback available: %s" % (seat.name, why))
         return None
-    return running, choices[0], agents.get(seat.name, {}).get("limited")
+    return running, choices, agents.get(seat.name, {}).get("limited")
 
 
-def _fallback_one(ctx: Ctx, seat: Seat, old: str, new: str, record: Optional[Dict], note: Optional[str],
-                  wait_ms: Optional[int], report: Report) -> None:
-    full_note = fallback_note(ctx, seat, old, new, record, note)
+def _start_failed_at_shell(ctx: Ctx, seat: Seat, attempt: Report) -> bool:
+    """A failed candidate may be followed only when its start left no agent and a bare shell (37.2).
+    A refused quit, a blocked agent or a slow kind's process still running all stop the loop."""
+    if not any(r.level == "fail" for r in attempt.results):
+        return False
+    pane = (ctx.state.entry(seat.name) or {}).get("pane_id")
+    if not pane:
+        return False
+    try:
+        ctx.herdr.agent_get(seat.name)
+        return False
+    except HerdrError as exc:
+        if "not_found" not in exc.code:
+            return False
+    try:
+        return at_shell_prompt(ctx.herdr.process_info(str(pane)))
+    except HerdrError:
+        return False
+
+
+def _start_cause(detail: str) -> str:
+    """The start's cause without 32.1's owner remedy, for a fallback step or the next kind's note."""
+    for marker in ("; a quit agent may have left mouse tracking", "; the pane is at a shell;"):
+        detail = detail.split(marker, 1)[0]
+    return detail
+
+
+def _fallback_one(ctx: Ctx, seat: Seat, old: str, choices: Sequence[str], record: Optional[Dict],
+                  note: Optional[str], wait_ms: Optional[int], report: Report) -> None:
     before = (ctx.state.entry(seat.name) or {}).get("started_at")
     previous = seat.kind
-    seat.use(new)  # every reader of the seat sees the new kind from here on (35.1)
-    report.add(seat.name, "fallback", "%s -> %s%s" % (old, new, " (limit recorded)" if limits.counts(record) else ""))
-    report.extend(op_restart(ctx, [seat.name], full_note, wait_ms, reason="swap", name_panes=False))
-    if ctx.dry_run:
-        return
-    entry = ctx.state.entry(seat.name) or {}
-    if entry.get("kind") == new and entry.get("started_at") != before:
-        why = (record or {}).get("line") if (record or {}).get("kind") == old else None
-        ctx.state.update(seat.name, failover={"from": old, "to": new, "at": now_iso(),
-                                              "reason": str(why or "swap --fallback")[:200]})
-        ctx.save()
-        report.add(seat.name, "failed over", "from %s to %s; `swap %s` returns it to %s"
-                   % (old, new, seat.name, seat.primary))
-    else:
-        seat.use(previous)  # it did not start on the new kind: nothing is recorded
+    failures: List[Tuple[str, str]] = []
+    for index, new in enumerate(choices):
+        full_note = fallback_note(ctx, seat, old, new, record, note, failures)
+        seat.use(new)  # every reader of the seat sees this candidate from here on (35.1)
+        if index == 0:
+            report.add(seat.name, "fallback", "%s -> %s%s" % (old, new, " (limit recorded)" if limits.counts(record) else ""))
+        collecting = ctx.failed_start_notices
+        ctx.failed_start_notices = []
+        try:
+            attempt = op_restart(ctx, [seat.name], full_note, wait_ms, reason="swap", name_panes=False)
+        finally:
+            notices = ctx.failed_start_notices or []
+            ctx.failed_start_notices = collecting
+        if ctx.dry_run:
+            report.extend(attempt)
+            return
+        entry = ctx.state.entry(seat.name) or {}
+        if entry.get("kind") == new and entry.get("started_at") != before:
+            report.extend(attempt)
+            for title, detail in notices:
+                ctx.notify(title, detail, "request")
+            why = (record or {}).get("line") if (record or {}).get("kind") == old else None
+            ctx.state.update(seat.name, failover={"from": old, "to": new, "at": now_iso(),
+                                                  "reason": str(why or "swap --fallback")[:200]})
+            ctx.save()
+            report.add(seat.name, "failed over", "from %s to %s; `swap %s` returns it to %s"
+                       % (old, new, seat.name, seat.primary))
+            return
+        if not _start_failed_at_shell(ctx, seat, attempt):
+            report.extend(attempt)
+            seat.use(previous)
+            for title, detail in notices:
+                ctx.notify(title, detail, "request")
+            return
+        failed = next((r for r in reversed(attempt.results) if r.status == "failed" and r.level == "fail"), None)
+        reason = _start_cause(failed.detail) if failed is not None else "the agent did not start"
+        for result in attempt.results:
+            if result is not failed or index + 1 == len(choices):
+                report.results.append(result)
+        failures.append((new, reason))
+        trying = "; trying %s" % choices[index + 1] if index + 1 < len(choices) else ""
+        report.add(seat.name, "fallback", "%s did not start (%s)%s" % (new, reason, trying))
+    seat.use(previous)  # no candidate started: no failover and no limited record is written
+    if failed is None:
+        report.add(seat.name, "failed", "no fallback kind started (tried %s)"
+                   % ", ".join(kind for kind, _ in failures), "fail")
+    ctx.notify("Fleet: %s did not start" % seat.name,
+               "\n".join("%s did not start: %s" % (kind, reason) for kind, reason in failures), "request")
 
 
 def _reset_words(agents: Dict[str, Dict], kind: str) -> str:

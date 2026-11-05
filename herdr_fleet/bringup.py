@@ -256,7 +256,11 @@ def start_seat(ctx: Ctx, seat: Seat, pane: str, created: bool, report: Report, a
     if after_quit and outcome.shell and remedy.split("; ", 1)[1] not in detail:
         detail = "%s; %s" % (detail, remedy)
     report.add(seat.name, "failed", detail, "fail")
-    ctx.notify("Fleet: %s did not start" % seat.name, detail, "request")
+    notice = ("Fleet: %s did not start" % seat.name, detail)
+    if ctx.failed_start_notices is None:
+        ctx.notify(notice[0], notice[1], "request")
+    else:
+        ctx.failed_start_notices.append(notice)
     if outcome.slow:  # its agent usually comes up later: brief it then (32.1 as the review amended it)
         ctx.state.update(seat.name, blocked_at_startup=True, **record)
         ctx.save()

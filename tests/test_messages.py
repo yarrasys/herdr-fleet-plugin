@@ -348,12 +348,12 @@ class KickoffsAreLogged(FleetCase):
         self.assertTrue(entries[0]["first_line"].startswith("You are sample-orchestrator"))
         self.assertEqual(messages.owed(entries), [])  # kickoffs never create an obligation
 
-    def test_roster_tells_seats_to_send_reports_with_fyi(self):  # design 17.1
+    def test_roster_tells_seats_when_not_to_send_an_fyi(self):  # design 37.3
         self.assertEqual(self.run_cli("up")[0], 0)
         for name in ("sample-orchestrator", "sample-dev", "sample-reviewer"):
             (kickoff,) = self.prompts_to(name)
             self.assertIn("| sample-reviewer | codex |", kickoff)
-            self.assertIn("status reports go with `--fyi`; a message that asks for something does not.", kickoff)
+            self.assertIn("Finished work, a verdict or an answer someone is waiting for goes as a plain message", kickoff)
 
 
 def entry(sender, to, minute, kind="send", first="m", fyi=False):

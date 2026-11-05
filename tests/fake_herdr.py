@@ -245,19 +245,30 @@ def prompt_screen(kind: str, typed: str = "") -> str:
     return "\n".join(["\u23fa Done.", "", RULE, line, RULE, STATUS.get(kind, "  ready")]) + "\n"
 
 
-def limit_screen(kind: str, line: str, typed: str = "", prose: str = "") -> str:
+def limit_screen(kind: str, line: str, typed: str = "", prose: str = "", wrap: int = 1) -> str:
     """A screen tail whose conversation ends in a provider's limit message above the kind's input
     area, in the layouts seen live on 1 and 2 November (design 35.6): Claude Code's `⎿` line, a
-    `✻ Worked for` line, the rule, `❯`; Kimi's error, a wrapped line and its `/export-debug-zip`
-    hint above the input box (`╭`, `│ >`, `╰`); Codex's `■` line above its rule. ``typed`` is text in
-    the input line; ``prose`` is an assistant sentence placed above, as a seat that mentions limits has."""
+    `✻ Worked for` line, the rule, `❯`; Kimi's error, one to three less-indented wrapped lines and its
+    `/export-debug-zip` hint above the input box (`╭`, `│ >`, `╰`, 37.1), all with the live screen's
+    one-column margin; Codex's `■` line above its rule. ``typed`` is input text; ``prose`` is above."""
     above = ["\u23fa " + prose, ""] if prose else []
     if kind == "kimi":
+        wraps = {
+            1: ["window ends. To continue now, purchase extra usage or upgrade your plan: "
+                "https://www.kimi.com/membership/subscription?tab=quota"],
+            2: ["window ends. To continue now, purchase extra usage or upgrade your plan:",
+                "https://www.kimi.com/membership/subscription?tab=quota"],
+            3: ["window ends. To continue now, purchase extra usage or",
+                "upgrade your plan:", "https://www.kimi.com/membership/subscription?tab=quota"],
+        }
+        if wrap not in wraps:
+            raise ValueError("Kimi's limit screen wraps to 1, 2 or 3 lines")
         box = "\u2502 > " + typed
-        rows = above + ["  " + line, "  window ends. To continue now, purchase extra usage or upgrade your plan: "
-                        "https://example.test/quota", "  If this persists, run /export-debug-zip and attach the archive.",
-                        "", "\u256d" + "\u2500" * 58 + "\u256e", box + " " * max(1, 60 - len(box)) + "\u2502",
-                        "\u2570" + "\u2500" * 58 + "\u256f", "  agent (k3) \u00b7 idle"]
+        rows = above + ["  " + line] + wraps[wrap] + [
+            "  If this persists, run `/export-debug-zip` and share the file with us for diagnosis.",
+            "", "\u256d" + "\u2500" * 58 + "\u256e", box + " " * max(1, 60 - len(box)) + "\u2502",
+            "\u2570" + "\u2500" * 58 + "\u256f", "  agent (k3) \u00b7 idle"]
+        rows = [" " + row for row in rows]
     elif kind == "claude":
         rows = above + ["  \u23bf  " + line, "", "\u273b Worked for 3s \u00b7 done", "", RULE,
                         ("\u276f " + typed).rstrip(), RULE, STATUS["claude"]]
@@ -267,9 +278,9 @@ def limit_screen(kind: str, line: str, typed: str = "", prose: str = "") -> str:
     return "\n".join(rows) + "\n"
 
 
-def show_limit(world: Dict, pane: str, line: str, typed: str = "", prose: str = "") -> None:
+def show_limit(world: Dict, pane: str, line: str, typed: str = "", prose: str = "", wrap: int = 1) -> None:
     """Put ``line`` (a limit message) on the screen of the agent in ``pane``."""
-    set_screen(world, pane, limit_screen(world["panes"][pane]["agent"]["agent"], line, typed, prose))
+    set_screen(world, pane, limit_screen(world["panes"][pane]["agent"]["agent"], line, typed, prose, wrap))
 
 
 def shows_limit(text: str) -> bool:

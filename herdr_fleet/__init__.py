@@ -35,8 +35,8 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
   ``contacts``: peers the team messages but never manages; ``statenote``:
   ``state`` sections; ``permissions``: the advisory Claude Code permission
   check in ``doctor``.
-- ``limits``: provider limits and failover (design 35): the limit line in a screen, reset
-  times, the ``limited`` record's rules and the fallback order; pure, no herdr.
+- ``limits``: provider limits and failover (design 35): the limit line and block in a screen,
+  reset times, the ``limited`` record's rules and the fallback order; pure, no herdr.
 - ``worktrees``: the read-only ``worktrees`` listing; ``gitinfo``: read-only git
   helpers (also the doctor's ``fleet file vs git`` check); ``context_size``: the
   transcript reader behind ``status --context`` (usage numbers only).
@@ -45,7 +45,7 @@ Modules, by responsibility (``docs/design.md`` section 9; AGENTS.md has a map):
 
 import os
 
-__version__ = "0.19.1"
+__version__ = "0.19.2"
 PLUGIN_ID = "yarrasys.fleet"
 MIN_HERDR_VERSION = (0, 9, 4)
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

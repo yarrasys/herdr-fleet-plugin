@@ -312,7 +312,7 @@ class FleetCase(unittest.TestCase):
         peeked: Optional[str] = None           # the seat a `p` read, whose visible screen may follow (32.3)
         limited: Dict[str, bool] = {}          # design 35.6: pane -> its last read showed a limit line, input empty
         timer_reads = 0
-        starts = StartsCheck(self)
+        starts = StartsCheck(self, command)
         helper: Optional[Dict] = None          # design 32.5: the handover helper's seat and pane
         for call in entries:
             if "command" in call:
@@ -323,7 +323,7 @@ class FleetCase(unittest.TestCase):
                 previous_exit, previous_info = 0, {}
                 listed, pressed, peeked, limited = {}, None, None, {}
                 timer_reads = 0
-                starts = StartsCheck(self)
+                starts = StartsCheck(self, command)
                 helper = None
                 caller = call.get("pane") or self.env.get("HERDR_PANE_ID")  # the helper runs in its own pane
                 if command[:1] == ["handover"] and call.get("handover"):
@@ -502,12 +502,15 @@ class FleetCase(unittest.TestCase):
 class StartsCheck:
     """Design 32.1 for one command's calls: a second ``agent start`` to a pane only right after
     a ``process-info`` read of it that showed a bare shell, with no successful ``agent get`` of
-    it in between, and never a third. Starts herdr refused as busy, or rejected as a usage
-    error (an older herdr without ``--timeout``), started nothing and do not count."""
+    it in between, and never a third. Within ``swap --fallback`` the budget is per (pane, kind),
+    and the first start of each later kind also follows that read (37.2). Starts herdr refused as
+    busy, or rejected as a usage error, started nothing and do not count."""
 
-    def __init__(self, case: "FleetCase"):
+    def __init__(self, case: "FleetCase", command: List[str]):
         self.case = case
-        self.count: Dict[str, int] = {}
+        self.per_kind = command[:1] == ["swap"] and "--fallback" in command
+        self.count: Dict[Tuple[str, str], int] = {}
+        self.earlier: Dict[str, int] = {}  # pane -> starts of earlier kinds in this fallback command
         self.shell: Dict[str, bool] = {}   # pane -> its last process-info read showed a bare shell
 
     def see(self, argv: List[str], info: Dict, code: int) -> None:
@@ -518,10 +521,15 @@ class StartsCheck:
         elif (argv[:2] == ["agent", "start"] and "--pane" in argv and "--help" not in argv and not info.get("busy")
               and not info.get("usage")):
             pane = argv[argv.index("--pane") + 1]
-            self.count[pane] = self.count.get(pane, 0) + 1
-            if self.count[pane] > 1:
-                self.case.assertLessEqual(self.count[pane], 2, "a third agent start in %s: %s" % (pane, argv))
-                self.case.assertTrue(self.shell.get(pane), "a second agent start in %s without a process-info read "
+            kind = argv[argv.index("--kind") + 1] if self.per_kind else ""
+            key = (pane, kind)
+            earlier = self.earlier.get(pane, 0)
+            self.earlier[pane] = earlier + 1
+            self.count[key] = self.count.get(key, 0) + 1
+            if self.count[key] > 1 or (self.per_kind and earlier):
+                self.case.assertLessEqual(self.count[key], 2, "a third agent start for %s in %s: %s"
+                                          % (kind or "the kind", pane, argv))
+                self.case.assertTrue(self.shell.get(pane), "another agent start in %s without a process-info read "
                                      "showing its bare shell first: %s" % (pane, argv))
             self.shell[pane] = False
 

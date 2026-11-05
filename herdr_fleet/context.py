@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, TextIO
+from typing import Dict, List, Mapping, Optional, TextIO, Tuple
 
 from herdr_fleet import MIN_HERDR_VERSION, PLUGIN_ID
 from herdr_fleet.fleetfile import (Fleet, FleetError, apply_failover, find_fleet_file, load_fleet, load_toml,
@@ -179,6 +179,7 @@ class Ctx:
         self._state: Optional[State] = None
         self._config: Optional[PluginConfig] = None
         self.limited_quit: set = set()  # design 35.6: seats whose limit a fresh read confirmed this command
+        self.failed_start_notices: Optional[List[Tuple[str, str]]] = None  # 37.2: fallback collects these
         self.keys_allowed = True  # design 23.7: a popup (the `manage` menu) never presses a key
 
     # -- output ------------------------------------------------------------

@@ -234,12 +234,11 @@ class LimitLines(unittest.TestCase):
         for label, (kind, rows) in screens.items():
             self.assertIsNone(limits.limit_line(kind, "\n".join(rows) + "\n"), label)
 
-    def test_the_real_layouts_put_the_line_within_the_last_three_lines_above_the_input(self):
-        # positions 2 (Claude: the line, then `✻ Worked for`), 3 (Kimi: the line, a wrap, the hint) and 1 (Codex)
+    def test_the_real_layouts_form_a_limit_block(self):
         for kind, line in (("claude", CLAUDE_LIMIT), ("kimi", KIMI_LIMIT), ("codex", CODEX_LIMIT)):
-            self.assertTrue(limits.limit_line(kind, screen(kind, line), limits.QUIT_ABOVE), kind)
-            self.assertTrue(limits.limit_line(kind, screen(kind, line, prose="earlier prose"), limits.QUIT_ABOVE), kind)
-        self.assertEqual((limits.ABOVE_INPUT, limits.QUIT_ABOVE), (6, 3))
+            self.assertTrue(limits.limit_block(kind, screen(kind, line)), kind)
+            self.assertTrue(limits.limit_block(kind, screen(kind, line, prose="earlier prose")), kind)
+        self.assertEqual(limits.ABOVE_INPUT, 6)
 
     def test_a_pattern_needs_the_start_of_the_line_after_its_marker_and_spaces(self):
         rows = lambda text: "\n".join([text, "", fake_herdr.RULE, "\u276f", fake_herdr.RULE])  # noqa: E731
@@ -748,17 +747,17 @@ class LimitedQuit(TierLive):
                 self.assertIn("agent is working", out)
                 self.assertEqual([p for p in self.prompts_to("sample-dev") if p.startswith("/")], [])
 
-    def test_a_kimi_turn_resumed_in_place_pushes_the_line_out_of_reach(self):
-        # the reviewer's screen: the error, its wrap and the hint, then the owner's "continue" and a spinner, then the
-        # box. The seat has been `working` since before the record, so only the line's place tells it apart.
+    def test_a_kimi_turn_resumed_in_place_is_not_a_limit_block(self):
+        # The error, its wrap and the hint, then the owner's "continue" and a spinner: the resumed turn
+        # after the trailer refuses even when the seat has been working since before the record.
         self.limited()
         box = "\u2570" + "\u2500" * 58 + "\u256f"
-        rows = ["  " + KIMI_LIMIT, "  window ends. To continue now, purchase extra usage or upgrade your plan",
-                "  If this persists, run /export-debug-zip and attach the archive.", "  continue",
+        rows = ["  " + KIMI_LIMIT, "window ends. To continue now, purchase extra usage or upgrade your plan",
+                "  If this persists, run `/export-debug-zip` and attach the archive.", "  continue",
                 "  \u280b Thinking\u2026", "", "\u256d" + "\u2500" * 58 + "\u256e", "\u2502 > " + " " * 55 + "\u2502", box]
         fake_herdr.set_screen(self.world, "w2:p2", "\n".join(rows) + "\n")
         self.assertTrue(limits.limit_line("kimi", "\n".join(rows)))  # the watcher's six lines still see it
-        self.assertIsNone(limits.limit_line("kimi", "\n".join(rows), limits.QUIT_ABOVE))
+        self.assertFalse(limits.limit_block("kimi", "\n".join(rows)))
         code, out, err = self.run_cli("restart", "sample-dev")
         self.assertEqual(code, 3, out + err)
         self.assertIn("agent is working", out)

@@ -89,6 +89,11 @@ LIMIT_PATTERNS: Dict[str, List[str]] = {
     "codex": [r"^You[\u2019']ve hit your usage limit"],
     "kimi": [r"^Error: \[provider\.api_error\] 429"],
 }
+# 37.1: only these lines may follow the error and its contiguous, less-indented wraps for the limited quit.
+LIMIT_TRAILERS: Dict[str, List[str]] = {
+    "kimi": [r"^If this persists, run `/export-debug-zip`"],
+    "claude": [r"^\u273b \S+ for \d"],
+}
 LIMIT_MARKER_REQUIRED: Dict[str, str] = {"codex": "\u25a0"}  # the line must carry this marker, as Codex's error does
 LIMIT_WINDOW_S: Dict[str, int] = {"kimi": 5 * 3600}  # 35.2: a kind whose line names no reset time but whose window is known
 LIMIT_WINDOW_HINTS: Dict[str, str] = {"kimi": "5h window"}

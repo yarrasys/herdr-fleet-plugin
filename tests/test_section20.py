@@ -665,8 +665,8 @@ class Roster(unittest.TestCase):
     def test_the_sentence_says_how_to_settle_and_how_to_order(self):
         text = roster_table([("a", "claude", "w1:p1", "/r")])
         self.assertTrue(text.endswith(ROSTER_SENTENCE))
-        self.assertIn("When you have acted on a request, reply with `--fyi` or `ack #id`, since the plugin cannot "
-                      "see what you did.", ROSTER_SENTENCE)
+        self.assertIn("When you have acted on a request, report it, or close it with `ack #id` when there is nothing "
+                      "to report, since the plugin cannot see what you did.", ROSTER_SENTENCE)
         self.assertIn("To control order, queue (`--queue`) and let the watcher or the next kickoff deliver in one "
                       "batch.", ROSTER_SENTENCE)
 

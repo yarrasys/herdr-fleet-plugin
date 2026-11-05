@@ -145,8 +145,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "(--now refuses)")
     p.add_argument("--all", dest="all_seats", action="store_true", help="every live seat except the sender")
     p.add_argument("--fyi", action="store_true",
-                   help='a report that awaits no reply and normally stays queued; explicit delivery or a pending '
-                        'refusal request can deliver it (text starting with "FYI:" or "FYI " counts too)')
+                   help='nothing for the recipient to act on: it never wakes an idle seat and goes with its next '
+                        'delivery, or expires after fyi_ttl; finished work or a verdict someone waits for is not an '
+                        'FYI (text starting with "FYI:" or "FYI " counts too)')
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--queue", action="store_true",
                       help="only queue it; it waits for the seat to be idle or done (use it to control order)")

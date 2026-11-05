@@ -2026,7 +2026,7 @@ Round 3, answering the reviewer's FIX (#f6a0f1):
 
 Round 4, answering the reviewer's R1 (#d58dca):
 
-21. **The quit asks for a nearer line.** `limits.limit_line` takes an `above` count (default `ABOVE_INPUT`, 6, which the watcher's detection keeps); `ops.limited_working` passes `QUIT_ABOVE`, 3, so the limit line must be within the last 3 non-blank lines above the input area to quit a `working` seat. A turn resumed in place pushes the line up: after the Kimi error, its wrapped line and the `/export-debug-zip` hint come the owner's `continue`, a spinner line and the input box, which puts the error 5th, so the quit is refused while `state_seen` (working since before the record) cannot tell the two apart. The reviewer's screen is a test that must be refused, and the watcher still sees that line within 6. The real layouts pass: the line is 2nd for Claude (then `✻ Worked for`), 3rd for Kimi (a wrap and the hint below it) and 1st for Codex. **How Kimi draws a turn resumed in place is not verified live**: the screen is built from the reviewer's description, so a layout that keeps the error within 3 lines while working would still be taken, and one that draws the box differently would be refused.
+21. **The quit asks for a nearer line (replaced by 37.1).** `limits.limit_line` takes an `above` count (default `ABOVE_INPUT`, 6, which the watcher's detection keeps); `ops.limited_working` passes `QUIT_ABOVE`, 3, so the limit line must be within the last 3 non-blank lines above the input area to quit a `working` seat. A turn resumed in place pushes the line up: after the Kimi error, its wrapped line and the `/export-debug-zip` hint come the owner's `continue`, a spinner line and the input box, which puts the error 5th, so the quit is refused while `state_seen` (working since before the record) cannot tell the two apart. The reviewer's screen is a test that must be refused, and the watcher still sees that line within 6. The real layouts pass: the line is 2nd for Claude (then `✻ Worked for`), 3rd for Kimi (a wrap and the hint below it) and 1st for Codex. **How Kimi draws a turn resumed in place is not verified live**: the screen is built from the reviewer's description, so a layout that keeps the error within 3 lines while working would still be taken, and one that draws the box differently would be refused.
 
 Checks: both interpreter suites and `compileall` pass (counts in the builder's report); every file parses with the Python 3.8 grammar; an actual 3.8 interpreter was not run. Not verified live: the real limit messages beyond those in 35.2, how Claude Code words a limit with a reset time (the parser handles the forms above), whether Kimi's `agent read` of a working seat is refused, and a real Codex rollout through the watcher (the fixture follows the format of a local rollout, numbers only).
 
@@ -2136,3 +2136,123 @@ Live with the 0.19.1 working tree (herdr 0.9.5, Claude Code 2.1.316, `tui = "ful
 **Not verified live:**
 - the board's blocked-dialog lines on a short pane (the fake covers them);
 - a held quit's and a timed-out quit's dialog naming on a short pane.
+
+## 37. Failover on real screens, and what an FYI is for (0.19.2)
+
+Three field reports between 2 and 5 November 2026. Two came on the day 0.19.0 shipped:
+- a limited Kimi seat stuck `working` could not be quit by `swap --fallback`;
+- a fallback kind that failed to start was tried again on every run, so the seat never reached the next kind.
+
+In both, coordinators worked around the plugin by hand; two fleets hit both. The third: a fleet sat idle because a seat reported finished work with `--fyi`, as the plugin's own kickoff text tells it to.
+
+### 37.1 The limited quit reads the error block, not a line count
+
+Kimi Code CLI wraps its 429 message itself, at the pane's width; `recent-unwrapped` does not join the lines. Below the message it prints `If this persists, run /export-debug-zip and share the file with us for diagnosis. …`. On a pane of ordinary width the message took three lines, so with the hint the limit line was the 4th non-blank line above the input area:
+
+```
+   Error: [provider.api_error] 429 You've reached your 5-hour usage limit. Your quota will reset when the curr…
+ window ends. To continue now, purchase extra usage or upgrade your plan:
+ https://www.kimi.com/membership/subscription?tab=quota
+   If this persists, run `/export-debug-zip` and share the file with us for diagnosis. Please don't share it p…
+
+ ╭──────────────────────────────────────────────╮
+ │ >                                            │
+ ╰──────────────────────────────────────────────╯
+```
+
+Kimi draws the whole screen one column in from the pane's edge, so the plugin's read shows the error at column 3, its wrap at column 1 and the hint at column 3.
+
+`QUIT_ABOVE` (3, 35.5 item 21) refused it, and `swap --fallback` answered `refused - agent is working`, while the watcher's detection, which counts 6, had marked the seat. Item 21 counted one wrapped line, but the count changes with the pane's width, so no fixed count is right.
+
+The rule: `ops.limited_working` accepts the screen when `limits.limit_block(kind, screen)` holds, and `QUIT_ABOVE` goes. `limit_block` holds when the screen shows, in this order:
+1. the limit line, found as today within the last `ABOVE_INPUT` (6) non-blank lines above the input area;
+2. zero or more **continuation lines**, the message's own wrap. Each one meets three conditions:
+   - it directly follows the limit line or another continuation, with no blank line between;
+   - it is indented less than the limit line once box borders are removed (on the screen above, column 1 against column 3), so the rule holds whatever margin the kind draws;
+   - its first character after that indentation is a letter or a digit, so a spinner (`⠋`, `✢`, `✽`, `·`), a bullet, a prompt glyph or `✻` is never one.
+
+   (Amended after the first build and its review. The first text said column 0, which the real screen's margin fails, and it accepted any line at that column.) Unindented prose directly under the error, with no blank line, still reads as a wrap. Telling the two apart would need the provider's wrap rule. The quit's other conditions still apply: working since before the record, and an empty input.
+3. zero or more lines that match one of the kind's `seats.LIMIT_TRAILERS`, matched like `LIMIT_PATTERNS` against the cleaned line (Kimi: `^If this persists, run \`/export-debug-zip\``; Claude: `^✻ \S+ for \d`, the `✻ Worked for …` line item 21 saw 2nd);
+4. then the input area, empty (`limits.input_empty`, unchanged).
+
+Anything else between the limit line and the input refuses: an echoed prompt, a spinner, assistant output, a continuation line after a trailer. The other conditions of 35.6 item 4 and 35.5 item 19 stand: the record's kind is the live kind, `state_seen` shows working since before the record, and the read is fresh. The resumed-in-place screen of item 21 (error, wrap, hint, then the owner's `continue`, a spinner and the input box) is still refused, because its `continue` comes after the trailer. Codex's layout (the line alone above the input) passes as before.
+
+Tests: the screen above, with its one-column margin and with none, accepted at widths that wrap the message to 1, 2 and 3 lines; the same screen with a wrapped line indented as deep as the error refused; the review's screens refused: a spinner between the wrap and the hint, a blank line and then text with no hint, and Claude's spinner between the error and its trailer; Claude's error with `✻ Worked for 2m 3s` below it; item 21's resumed screen refused; a spinner, a prompt line or assistant text between the block and the input refused; text in the input refused; the watcher's detection unchanged (its tests stand).
+
+### 37.2 `--fallback` moves past a kind that does not start
+
+In one repository Codex failed at startup (`Error: account/read failed during TUI bootstrap: … invalid data (code -32603)`; the cause was a `-c` override in the seat's arguments); in another it exited at once on an MCP configuration error. `swap --fallback` started Codex, 32.1's retry started it again, and the seat was left absent. Every later `--fallback` planned Codex again (a dry run too), so the seat never reached Claude. In both fleets the coordinator started Claude by hand.
+
+The rule: in `ops._swap_fallback`, when the start of candidate K fails, the plugin reports `fallback - K did not start (<the start's reason>); trying L` and starts the next candidate L in the same pane, in the same command. A failed start means 32.1's two attempts both left a bare shell (the command never ran, or the agent exited at once), or the start failed in any other way that leaves the pane at its shell. Candidates are tried once each, in `limits.fallback_candidates` order, which skips limited kinds as today.
+- A slow start (32.1: a process of the kind still coming up) is not a failure; it is waited for as today. One still not ready at the deadline (`its process runs in PANE but herdr has not seen it ready after 45 s`) is reported and notified as today. The fallback stops there with that kind recorded, since its process is running. (Amended after review: the first build dropped that notification.)
+- A step line gives only the cause: `fallback - codex did not start (the start command did not run in PANE twice, or the agent exited at once); trying kimi`. 32.1's remedy (`run herdr-fleet up NAME`, the mouse-tracking hint) is printed only when the seat is left absent.
+- A start that ends `blocked` (a dialog at startup) stops there, as today: only the owner answers it.
+- When every candidate fails, each failure is reported, the seat is left absent, and one notification names the seat and the kinds tried (`request` sound). Exit 1.
+- A failed start is not a limit. It records no `limited` entry and is not remembered across commands, so the next `--fallback` tries the same order again: the cause is a configuration the owner fixes.
+- `failover.to` and the failover note name the kind that started. The note adds one line per kind that did not start (`codex did not start: <reason>`), so the new agent knows why it is not the first fallback.
+
+Invariants: 32.1's start budget becomes per candidate kind. A pane gets at most two `agent start` calls for each kind it tries, the second only after a `process-info` read showing the bare shell; the first start of the next kind also follows a `process-info` read showing the bare shell. `tests/support.py`'s start counting counts per (pane, kind) within one `swap --fallback` command and keeps today's per-pane count everywhere else.
+
+Tests: Codex scripted to exit at once on both attempts, then Claude started and briefed with the failover note naming Codex's failure; every candidate failing (each reported, one notification, the seat absent, no `limited` record, exit 1); a `blocked` first candidate stopping without trying the next; a slow first candidate waited for and kept; several names, where the first seat's fallback skips a failed kind and the second seat's run tries it again.
+
+### 37.3 An FYI is for what nobody has to act on
+
+The report, 5 November. A coordinator gave its builder one fix round, said "when the dev reports back, I'll run my full gate", and went idle. The builder finished nine minutes later and reported with `--fyi`. An FYI never wakes an idle seat (20.8), so both seats sat idle until the owner noticed. The same had happened that morning to the builder's "built, every check passes" report, which waited 52 minutes until the coordinator happened to read its inbox. Until that day the builder had reported finished work as a plain message, and the coordinator had answered with a `Thanks (#id)` FYI, which settles the obligation without waking anyone.
+
+The cause is the plugin's own wording. Every kickoff's `{roster}` sentence says "When you have acted on a request, reply with `--fyi` or `ack #id`". `send --help` describes `--fyi` as "a report that awaits no reply". Both define an FYI from the sender's side (no reply wanted), while what the plugin does with one concerns the recipient (it is never woken). Finished work is where the two differ: the builder wants no reply, but the coordinator acts on it.
+
+**Not a wake rule.** An FYI that settles the target's open request looks, in the log, exactly like the coordinator's `Thanks (#id)` FYI that settles a reviewer's verdict. A rule that woke the one would wake the other, and such thanks are most of a busy fleet's FYIs. So 20.8's delivery rules stay as they are; the fix is the wording, plus one hint at the moment of sending.
+
+1. **Wording.** An FYI is "nothing for the recipient to act on".
+   - `kickoff.ROSTER_SENTENCE` begins: ``Message a seat with `herdr-fleet send <name> "..."`. Finished work, a verdict or an answer someone is waiting for goes as a plain message, even when you want no reply; `--fyi` is only for what nobody has to act on, because an FYI never wakes an idle seat. When you have acted on a request, report it, or close it with `ack #id` when there is nothing to report, since the plugin cannot see what you did.`` From "To control order" on, the sentence is unchanged.
+   - `send --help` for `--fyi`: `nothing for the recipient to act on: it never wakes an idle seat and goes with its next delivery, or expires after fyi_ttl; finished work or a verdict someone waits for is not an FYI (text starting with "FYI:" or "FYI " counts too)`.
+   - README: the `{roster}` row, the `send` row and the FYI section say the same.
+2. **The hint.** When `send` queues an FYI for a local seat or contact (not a routed target) that it found idle or done and whose queue no limit record holds (35.2; `deliver NAME` would release that hold), and that FYI settles a request the target sent to the sender (one that `messages.unsettled` lists from the target to the sender just before this send is logged), the output gains one line after the outcome:
+   `note: sample-orchestrator is idle and an FYI does not wake it; this one answers its #3f2a9c. If it is waiting for this, run: herdr-fleet deliver sample-orchestrator; otherwise leave it.`
+   The line says `done` for a done seat and adds `--fleet PATH` under 33.5's rule. A dry run prints it too. Nothing else changes: the FYI stays queued, the watcher does not wake the seat for it, and `deliver NAME` is the existing guarded path.
+
+There is no new prompt path, key path or log field. The hint reads only the log.
+
+Tests:
+- the roster sentence's new text, with no "reply with `--fyi`";
+- the `--fyi` help text;
+- the hint for an FYI to an idle seat and to a done seat whose request to the sender is open;
+- no hint when the target is working, when a limit record holds its queue, when its request was already settled (an `ack`, or an earlier reply), when it never asked, for a plain send, for a routed target, or for `--fyi --now` (which delivers);
+- the dry-run hint;
+- the FYI still queued and no waiter started for it.
+
+### 37.4 Version and documents
+
+0.19.2 in `herdr-plugin.toml` and `herdr_fleet/__init__.py`.
+- AGENTS.md's paragraph on design 35 names `limits.limit_block` in place of `QUIT_ABOVE`, and the per-kind start budget of `--fallback`. Its harness paragraph gains the per-(pane, kind) start count.
+- README's failover section says that `--fallback` tries the next kind when one does not start; the messaging sections take 37.3's wording.
+- `docs/testing.md` lists `tests/test_section37.py`.
+- 35.5 item 21 gains "(replaced by 37.1)".
+
+### 37.5 Amendments from the build
+
+- A request old enough to have no id still gets the FYI hint, but its line says `this one answers its open request` rather than inventing an id. Requests with ids use 37.3's exact line.
+
+### 37.6 Verification (designer, 5 November 2026)
+
+These checks ran live on the working tree (herdr 0.9.5). The scratch fleet had two seats in their own workspace. One was a tier seat preferring Claude Haiku, then Codex with an argument Codex rejects, then Kimi K3.1 Pro; the other was a plain Claude Haiku seat.
+
+- **37.1, on a real screen.** `limits.limit_block` was run on a Kimi screen saved when the 429 hit, read through the plugin's own read on 2 November.
+  - The first build refused it: Kimi draws every line one column in, and that build looked for the wrap at column 0. The rule was amended to relative indentation.
+  - After the fix round the screen is accepted.
+  - The same screen is refused with a spinner line inserted before the hint, and with an echoed `continue` after it.
+  - A live 429 was not provoked; the fake covers the layouts.
+- **37.2.** `swap NAME --fallback` from Claude tried Codex, which exited at once twice. In the same command the plugin reported `codex did not start (the start command did not run in … twice, or the agent exited at once); trying kimi`, started Kimi, briefed it, and recorded `failover.to` kimi with no `limited` record, in 36 s. After the fix round the step line gives only the cause.
+  - `swap NAME` returned the seat to Claude.
+  - A second `--fallback` tried Codex again, so the failure was not remembered.
+- **37.3.** The plain seat sent a request to `owner`. `owner`'s answer, sent as an FYI while the seat was done, printed `note: … is done and an FYI does not wake it; this one answers its #…`.
+  - The dry run, using the `FYI:` prefix, printed the same note.
+  - A second FYI, after the request was settled, printed none.
+  - Both FYIs stayed queued.
+
+**Not verified live:**
+- every candidate failing;
+- a slow start past its deadline under `--fallback`;
+- the hint for a contact or with `--fleet`.
+
+The fake covers each of these.

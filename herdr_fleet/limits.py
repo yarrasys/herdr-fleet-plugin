@@ -2,8 +2,9 @@
 
 A seat whose provider refuses further turns shows it on its screen. ``limit_line`` finds that
 line in the last 6 non-blank lines above the input area of a screen (``seats.LIMIT_PATTERNS``, one
-list per kind, anchored at the start of the cleaned line) and
-``new_record`` builds the ``limited`` record the watcher keeps in the seat's state entry:
+list per kind, anchored at the start of the cleaned line). ``limit_block`` (37.1) additionally accepts
+only the line's contiguous, less-indented alphanumeric wraps and ``seats.LIMIT_TRAILERS`` before an empty input for the limited
+working-seat quit. ``new_record`` builds the ``limited`` record the watcher keeps in the seat's state entry:
 ``kind``, the matched ``line``, ``at``, and ``resets_at`` when the line names a time (or the
 kind's window is known: Kimi's is five hours) with ``resets_hint`` for the second case.
 
@@ -24,8 +25,8 @@ import re
 from typing import Dict, List, Mapping, Optional, Sequence
 
 from herdr_fleet import inbox
-from herdr_fleet.seats import (LIMIT_BULLETS, LIMIT_MARKER_REQUIRED, LIMIT_PATTERNS, LIMIT_WINDOW_HINTS, LIMIT_WINDOW_S, PROMPT_GLYPHS,
-                               PROMPT_PLACEHOLDER_PATTERNS, PROMPT_PLACEHOLDERS)
+from herdr_fleet.seats import (LIMIT_BULLETS, LIMIT_MARKER_REQUIRED, LIMIT_PATTERNS, LIMIT_TRAILERS, LIMIT_WINDOW_HINTS,
+                               LIMIT_WINDOW_S, PROMPT_GLYPHS, PROMPT_PLACEHOLDER_PATTERNS, PROMPT_PLACEHOLDERS)
 from herdr_fleet.state import patch_entry, read_agents
 
 LINE_MAX = 200
@@ -52,7 +53,6 @@ INPUT_GLYPHS = ("\u276f", "\u203a", ">")   # the first character of an input lin
 BORDER_CHARS = set("\u2500\u2501\u256d\u256e\u2570\u256f \u2502\u2503")  # a rule or the top of an input box
 MARKERS = "\u23bf\u25a0 \xa0"                # a result or error marker that starts the line
 ABOVE_INPUT = 6                               # design 35.6: a limit line counts within this many non-blank lines
-QUIT_ABOVE = 3                                # ... and, to quit a working seat, within this many (35.5 item 21)
 
 
 def _bare(raw: str) -> str:
@@ -77,35 +77,85 @@ def _bare_raw(raw: str) -> str:
     return ESCAPE_RE.sub("", raw).strip()
 
 
-def limit_line(kind: str, screen: str, above: int = ABOVE_INPUT) -> Optional[str]:
-    """The last line of ``screen`` that matches one of the kind's limit patterns, cleaned (no escapes,
-    at most LINE_MAX characters), or None. Only the last ABOVE_INPUT non-blank lines above the input
-    area count (35.6; ``above`` narrows that: the quit of a limited working seat asks for QUIT_ABOVE,
-    35.5 item 21); no input area on screen counts nothing. A pattern is anchored at the start of
-    the line once its marker (`⎿`, `■`) and leading spaces are removed (35.5 item 18), so a sentence,
-    list item, table row or tool output that merely quotes the message does not match; a kind that
-    names a required marker (Codex's `■`) matches only a line that carried it. Lines that start with
-    the kind's prompt glyph or an assistant bullet are skipped."""
+def _limit_at(kind: str, lines: List[str], top: int, above: int) -> Optional[int]:
     compiled = patterns_for(kind)
     if not compiled:
         return None
-    lines = screen.splitlines()
-    top = input_top(lines)
-    if top is None:
-        return None
-    region = [raw for raw in lines[:top] if raw.strip()][-above:]
+    region = [index for index, raw in enumerate(lines[:top]) if raw.strip()][-above:]
     skip = tuple(PROMPT_GLYPHS.get(kind, ())) + tuple(LIMIT_BULLETS)
     marker = LIMIT_MARKER_REQUIRED.get(kind)
-    for raw in reversed(region):
-        bare = _bare(raw)
+    for index in reversed(region):
+        bare = _bare(lines[index])
         if not bare or bare.startswith(skip):
             continue
         if marker and not bare.startswith(marker):
             continue
         text = bare.lstrip(MARKERS).strip()
         if any(p.match(text) for p in compiled):
-            return text[:LINE_MAX]
+            return index
     return None
+
+
+def limit_line(kind: str, screen: str, above: int = ABOVE_INPUT) -> Optional[str]:
+    """The last line of ``screen`` that matches one of the kind's limit patterns, cleaned (no escapes,
+    at most LINE_MAX characters), or None. Only the last ``above`` non-blank lines above the input
+    area count (35.6); no input area on screen counts nothing. A pattern is anchored at the start of
+    the line once its marker (`⎿`, `■`) and leading spaces are removed (35.5 item 18), so a sentence,
+    list item, table row or tool output that merely quotes the message does not match; a kind that
+    names a required marker (Codex's `■`) matches only a line that carried it. Lines that start with
+    the kind's prompt glyph or an assistant bullet are skipped."""
+    lines = screen.splitlines()
+    top = input_top(lines)
+    if top is None:
+        return None
+    index = _limit_at(kind, lines, top, above)
+    if index is None:
+        return None
+    return _bare(lines[index]).lstrip(MARKERS).strip()[:LINE_MAX]
+
+
+def _outside_borders(raw: str) -> str:
+    text = ESCAPE_RE.sub("", raw).rstrip()
+    if text.endswith(("\u2502", "\u2503")):
+        text = text[:-1].rstrip()
+    left = text.lstrip()
+    if left.startswith(("\u2502", "\u2503")):
+        text = left[1:]
+    return text
+
+
+def limit_block(kind: str, screen: str) -> bool:
+    """True for a limit line, its contiguous, less-indented alphanumeric continuations and declared
+    trailers, then an empty input area (37.1). The line comes from the same six-line window as
+    ``limit_line``; anything else between it and the input refuses the quit."""
+    lines = screen.splitlines()
+    top = input_top(lines)
+    if top is None or not input_empty(kind, screen):
+        return False
+    index = _limit_at(kind, lines, top, ABOVE_INPUT)
+    if index is None:
+        return False
+    limit_text = _outside_borders(lines[index])
+    limit_indent = len(limit_text) - len(limit_text.lstrip())
+    trailers = [re.compile(p, re.IGNORECASE) for p in LIMIT_TRAILERS.get(kind, [])]
+    trailer_seen = False
+    can_continue = True
+    for raw in lines[index + 1:top]:
+        if not raw.strip():
+            can_continue = False
+            continue
+        text = _bare(raw).lstrip(MARKERS).strip()
+        if any(p.match(text) for p in trailers):
+            trailer_seen = True
+            can_continue = False
+            continue
+        content = _outside_borders(raw)
+        stripped = content.lstrip()
+        continuation = (can_continue and len(content) - len(stripped) < limit_indent
+                        and stripped[:1].isalnum())
+        if trailer_seen or not continuation:
+            return False
+    return True
 
 
 def input_empty(kind: str, screen: str) -> bool:

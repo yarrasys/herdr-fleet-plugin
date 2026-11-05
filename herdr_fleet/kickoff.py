@@ -105,9 +105,11 @@ def strip_comments(template: str) -> str:
     return "".join(kept)
 
 
-ROSTER_SENTENCE = ("Message a seat with `herdr-fleet send <name> \"...\"`: status reports go with `--fyi`; "
-                   "a message that asks for something does not. When you have acted on a request, reply with "
-                   "`--fyi` or `ack #id`, since the plugin cannot see what you did. To control order, queue "
+ROSTER_SENTENCE = ("Message a seat with `herdr-fleet send <name> \"...\"`. Finished work, a verdict or an answer "
+                   "someone is waiting for goes as a plain message, even when you want no reply; `--fyi` is only for "
+                   "what nobody has to act on, because an FYI never wakes an idle seat. When you have acted on a "
+                   "request, report it, or close it with `ack #id` when there is nothing to report, since the plugin "
+                   "cannot see what you did. To control order, queue "
                    "(`--queue`) and let the watcher or the next kickoff deliver in one batch. To wait for a "
                    "reply, run `herdr-fleet inbox --wait --timeout 600000` instead of sleeping or polling: it "
                    "returns with the reply inside your turn and costs nothing while it waits. `ack NAME` settles "

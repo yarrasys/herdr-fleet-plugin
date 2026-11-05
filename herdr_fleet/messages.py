@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from herdr_fleet import contacts as contact_mod
-from herdr_fleet import crossfleet, inbox, presence, seen
+from herdr_fleet import crossfleet, inbox, limits, presence, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, preflight
 from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.herdr import HerdrError
@@ -881,13 +881,38 @@ def queued_by_for(mode: str, fyi: bool, when_ready: bool) -> str:
     return "queue" if when_ready else "refusal"
 
 
+def _request_to_sender(ctx: Ctx, target: Target, sender: str, reply_to: Optional[str]) -> Optional[Dict]:
+    """The open request from a local target to this sender which the send is about to settle (37.3).
+    The log is read before the new send is appended; an exact reply selects only its named request."""
+    if target.destination or target.kind not in ("seat", "contact"):
+        return None
+    found = [item for _, item in unsettled(read(ctx.fleet.repo))
+             if item.get("from") == target.name and item.get("to") == sender]
+    if reply_to:
+        found = [item for item in found if item.get("id") == reply_to]
+    return found[-1] if found else None
+
+
+def _fyi_hint(ctx: Ctx, target: Target, message: Message, request: Optional[Dict], state: Optional[str],
+              code: int) -> Optional[str]:
+    """The send-time note of 37.3: only for an FYI left queued to an idle or done local seat/contact
+    whose queue no limit holds. It prints a command; it never runs one or changes delivery."""
+    if (request is None or not message.fyi or code != EXIT_OK or state not in SETTLED or message.box != NEW
+            or limits.holding(ctx.fleet.repo, target.name) is not None):
+        return None
+    ident = "its #" + inbox.short_of(str(request["id"])) if request.get("id") else "its open request"
+    return ("note: %s is %s and an FYI does not wake it; this one answers %s. If it is waiting for this, run: "
+            "herdr-fleet deliver%s %s; otherwise leave it."
+            % (target.name, state, ident, fleet_flag(ctx), target.name))
+
+
 def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_name: Optional[str] = None,
             when_ready_ms: Optional[int] = None, all_seats: bool = False, fyi: bool = False,
             queue: bool = False, now: bool = False, reply_to: Optional[str] = None,
             ttl: Optional[str] = None, urgent: bool = False) -> int:
-    """Design 18.3, 20.3 and 23.1. The inbox note first, then one line per target. Exit 0 when every
-    message was sent or queued, 1 on a failed write, a herdr failure, an unconfirmed
-    prompt or a ``--now`` refusal."""
+    """Design 18.3, 20.3, 23.1 and 37.3. The inbox note first, then one line per target, with a note
+    after a queued FYI that answers an idle or done target's open request. Exit 0 when every message
+    was sent or queued, 1 on a failed write, a herdr failure, an unconfirmed prompt or ``--now`` refusal."""
     if queue and now:
         raise UsageError("--queue and --now cannot be combined")
     names, text = message_text(words, text_file, all_seats)
@@ -930,6 +955,7 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
                           ttl=inbox.iso_local(stamp + lifetime) if lifetime else None, file=text_file,
                           queued_by=queued_by, priority=1 if urgent else None)
         log_file = os.path.abspath(text_file) if text_file else None
+        request = _request_to_sender(ctx, target, sender, answers) if fyi and mode != "now" else None
         if target.destination:
             lines, code = _send_routed(ctx, target, message, mode, when_ready_ms, log_file, observed, taken)
         else:
@@ -940,6 +966,9 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
             reason = "; source-owned: %s" % target.route_reason if target.route_reason else ""
             fyi_pull = "; available to pull inbox immediately; native delivery remains deferred" if message.fyi and code == EXIT_OK and (ctx.dry_run or message.box == NEW) else ""
             ctx.say(line + "; mailbox: %s :: %s%s%s%s" % (owner, target.name, route, reason, fyi_pull))
+        hint = _fyi_hint(ctx, target, message, request, observed.get(target.name), code) if mode != "now" else None
+        if hint:
+            ctx.say(hint)
         codes.append(code)
     if agents:
         seen.observe_agents(ctx, agents, observed)
@@ -949,8 +978,8 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
 
 
 def fleet_flag(ctx: Ctx) -> str:
-    """Design 33.5: `` --fleet PATH`` for a ``herdr-fleet inbox`` command line printed for
-    the caller to run, only when discovery from the caller's cwd, ignoring ``--fleet``,
+    """Design 33.5 and 37.3: `` --fleet PATH`` for a printed ``inbox`` or ``deliver`` command,
+    only when discovery from the caller's cwd, ignoring ``--fleet``,
     ``--file`` and ``HERDR_FLEET_FILE``, would find another fleet file or none; else "".
     Reads the file system only."""
     path = ctx.fleet.path
