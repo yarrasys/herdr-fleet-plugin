@@ -12,8 +12,8 @@
   mailbox too); ``messages.owed`` over the log, parsed again only when
   ``.herdr/messages.jsonl`` changed; Claude and Codex seats' context size from their
   transcripts (``context_size``, usage numbers only); for a ``blocked`` seat only,
-  ``agent read NAME --lines 16`` and the first line of the dialog it shows
-  (``seats.dialog_first_line``), kept in the model being built and nothing else
+  ``seats.read_screen`` over ``agent read NAME --lines 16`` (36's visible fallback) and the
+  first line of the dialog it shows (``seats.dialog_first_line``), kept in the model being built and nothing else
   of the screen kept at all (invariants 19 and 22); and the watcher's own state
   (``WatcherState``: what it waits on, holds and their reasons, retries, the last
   event, the last error). Nothing here prompts, presses a key or moves the focus.
@@ -40,7 +40,7 @@ from herdr_fleet import context_size, inbox, limits, seen
 from herdr_fleet.herdr import HerdrError, describe
 from herdr_fleet.mailroom import tags
 from herdr_fleet.messages import OWNER, first_line, log_path, owed, owed_lines, read, since_label, unsettled
-from herdr_fleet.seats import EXIT_DIALOG_LINES, dialog_lines
+from herdr_fleet.seats import EXIT_DIALOG_LINES, dialog_lines, read_screen
 from herdr_fleet.state import read_agents
 
 Span = Tuple[str, str]
@@ -305,7 +305,7 @@ def _dialog(ctx, name: str) -> List[str]:
     being 23.7's first dialog line, and nothing else of the screen, which is dropped here
     (invariant 22)."""
     try:
-        screen = ctx.herdr.agent_read(name, DIALOG_LINES)
+        screen = read_screen(ctx.herdr, name, DIALOG_LINES)
     except HerdrError:
         return []
     lines = [clean(line) for line in dialog_lines(screen, DIALOG_SHOWN)]

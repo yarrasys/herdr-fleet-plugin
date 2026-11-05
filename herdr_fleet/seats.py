@@ -23,9 +23,10 @@
   presence guard runs first; a hold for a dialog or menu is read again for up to 5 s,
   then named and left to the owner, design 32.2), then poll until the agent is gone
   and the shell is back, or give up without retrying. When the agent is still there
-  ``EXIT_DIALOG_AFTER_S`` later, its screen is read once (``agent read``) and the
-  kind's exit confirmation (``EXIT_DIALOGS``), with the exit choice highlighted,
-  gets one Enter (design 23.7, invariant 21); any other screen gets no key.
+  ``EXIT_DIALOG_AFTER_S`` later, ``read_screen`` reads its screen (one ``--source visible``
+  fallback only after ``agent_not_idle``, design 36) and the kind's exit confirmation
+  (``EXIT_DIALOGS``), with the exit choice highlighted, gets one Enter (design 23.7,
+  invariant 21); any other screen gets no key.
 - ``interrupt_agent``: the kind's interrupt keys (``INTERRUPT_KEYS``, overridable
   per kind by ``[interrupt]``), 300 ms apart, then ``agent wait`` until idle or
   done (design 23.7). ``interrupt`` is its only caller.
@@ -443,6 +444,16 @@ def _await_ready(herdr: Herdr, clock: Clock, seat: Seat, pane: str, deadline: fl
         clock.sleep(POLL_S)
 
 
+def read_screen(herdr: Herdr, target: str, lines: int) -> str:
+    """Read the current screen, falling back to the viewport only after ``agent_not_idle``."""
+    try:
+        return herdr.agent_read(target, lines)
+    except HerdrError as exc:
+        if exc.code != "agent_not_idle":
+            raise
+        return herdr.agent_read(target, lines, source="visible")
+
+
 def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str,
                timeout_ms: int, answer_exit: bool = True, allow: Sequence[str] = SETTLED) -> Outcome:
     """Quit one agent (design section 6). status: quit | refused | failed. A seat whose
@@ -494,7 +505,7 @@ def quit_agent(herdr: Herdr, clock: Clock, target: str, pane: str, quit_cmd: str
         elif not looked and clock.monotonic() - started >= EXIT_DIALOG_AFTER_S:
             looked = True
             try:
-                screen = herdr.agent_read(target, EXIT_DIALOG_LINES)
+                screen = read_screen(herdr, target, EXIT_DIALOG_LINES)
             except HerdrError:
                 screen = ""
             if shows_exit_dialog(kind, screen):
@@ -530,7 +541,7 @@ def _settle_held(herdr: Herdr, clock: Clock, target: str, quit_cmd: str, held: O
         elif not presence.is_dialog(hold):
             return Outcome(False, "typing", hold, held.agent)
     try:
-        first = dialog_first_line(herdr.agent_read(target, EXIT_DIALOG_LINES))
+        first = dialog_first_line(read_screen(herdr, target, EXIT_DIALOG_LINES))
     except HerdrError:
         first = None
     pane = str(held.agent.get("pane_id") or target)
@@ -601,7 +612,7 @@ def _no_exit(herdr: Herdr, target: str, quit_cmd: str, timeout_ms: int, gone: bo
     first = None
     if not gone:
         try:
-            first = dialog_first_line(herdr.agent_read(target, EXIT_DIALOG_LINES))
+            first = dialog_first_line(read_screen(herdr, target, EXIT_DIALOG_LINES))
         except HerdrError:
             first = None
     if first is not None:

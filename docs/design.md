@@ -1605,7 +1605,7 @@ When the guard (21.2) holds a quit because no prompt line is on screen, or a hig
 
 ### 32.3 `peek` on a working seat
 
-herdr refuses `agent read --lines N` (default source `recent`) for a working seat whose history lives in the alternate screen: `agent_not_idle: cannot read 14 lines while … is working`. Both reports name this, and a working seat is the one an orchestrator most wants to look at. `Herdr.agent_read` gains `source` (`None`, `visible` or `recent`), and `peek NAME` gains `--source visible|recent`. Without `--source`, a `peek` refused with `agent_not_idle` reads `--source visible` once instead and prints `(working: the visible screen only)` to stderr before the text. The board's `p` key follows `peek`. `quit_agent`, `interrupt` and the board's blocked-dialog read keep their reads as they are: what they decide from is the current screen, and they never fall back silently.
+herdr refuses `agent read --lines N` (default source `recent`) for a working seat whose history lives in the alternate screen: `agent_not_idle: cannot read 14 lines while … is working`. Both reports name this, and a working seat is the one an orchestrator most wants to look at. `Herdr.agent_read` gains `source` (`None`, `visible` or `recent`), and `peek NAME` gains `--source visible|recent`. Without `--source`, a `peek` refused with `agent_not_idle` reads `--source visible` once instead and prints `(working: the visible screen only)` to stderr before the text. The board's `p` key follows `peek`. `quit_agent`, `interrupt` and the board's blocked-dialog read keep their reads as they are: what they decide from is the current screen, and they never fall back silently (amended by 36: on a pane too short for their read, they read the viewport once).
 
 ### 32.4 A seat waiting in `inbox --wait` is shown as waiting
 
@@ -2067,3 +2067,72 @@ Live against a real Kimi usage limit (herdr 0.9.5, Kimi Code CLI 2.4.1, Claude C
 - the reset notification (5 h).
 
 The estimated reset is 5 h after detection, which is later than Kimi's real window, as 35.5 records.
+
+## 36. Screen reads that fit a short pane (0.19.1)
+
+A field report on 2 November 2026: `swap` on a Claude seat with two background shells open sent `/exit`, and Claude Code showed its exit confirmation (`Background work is running` … `❯ 1. Exit and stop tasks`). The plugin did not press its one Enter (23.7). The quit timed out with the generic `did not exit within 20000 ms after /exit; not retried, no keys sent, seat left alone`, and the coordinator answered the dialog by hand. The same seat's board row showed no dialog lines.
+
+### 36.1 The herdr fact
+
+herdr 0.9.5 answers `agent read NAME --lines N` (default source `recent`) from the pane's viewport when N is at most the viewport's rows (`pane get` → `scroll.viewport_rows`), whatever the agent's state. For more rows than that, it must collect the app's own history, which for an app in the alternate screen it does only while the agent is `idle` or `done`. Otherwise it refuses: `agent_not_idle: cannot read N lines while NAME is blocked: its alternate-screen history can only be captured by …` (and the same for `working` and `unknown`). `agent read --source visible` and `pane read` return the viewport rows in every state. Claude Code with `tui = "fullscreen"` draws in the alternate screen.
+
+Verified live on 2 November 2026 (herdr 0.9.5, Claude Code 2.1.316):
+- A grid of seven seats gave panes of 13 rows. `--lines 12` read a working seat; `--lines 16` was refused `agent_not_idle`; `--lines 16 --source visible` and `pane read --lines 16` returned the 13 rows.
+- On a 60-row pane with the exit confirmation up (`blocked`), `--lines 16` read it and `--lines 70` was refused.
+- herdr's log showed every `agent read` of the reported seat failing from 1 s after `/exit` until it exited.
+
+So on any pane shorter than 16 rows, every read below fails while the seat is not settled, and 32.3's decision ("`quit_agent`, `interrupt` and the board's blocked-dialog read keep their reads as they are") left them unable to see the dialog they exist to see.
+
+### 36.2 The rule
+
+`seats.read_screen(herdr, target, lines)` is the one helper for a read that decides from what is on screen now. It runs `agent read TARGET --lines N`. When herdr refuses that with `agent_not_idle`, and only then, it runs `agent read TARGET --lines N --source visible` once and returns that. Any other error is raised as today. herdr refuses only for an app in the alternate screen, which has no host scrollback, so the viewport it returns is the bottom of what the app draws now: the dialog, prompt or menu the caller looks for.
+
+Its callers, with their line counts unchanged:
+1. `quit_agent`'s exit-confirmation read 3 s after the quit command (23.7). With the fallback it sees the dialog on a short pane and presses its one Enter, exactly as on a tall one.
+2. The dialog naming of a held quit (`_settle_held`, 32.2) and of a timed-out one (`_no_exit`, 23.7).
+3. `interrupt`'s read before its keys (`ops.op_interrupt`, 23.7): a dialog in the viewport still refuses the keys (`refused NAME: a dialog is on screen (…)`). Before this, the refusal of the read failed the command (`failed NAME: reading its screen: …; no keys sent`), so `interrupt` could not interrupt a full-screen seat in a short pane.
+4. The board's blocked-dialog lines (`board._dialog`, 24.2).
+
+Unchanged:
+- `peek` and the board's `p` (32.3), which already fall back and say so.
+- The limit reads (35.2, 35.6), which already fall back to `pane read`.
+- `interrupt`'s Ctrl-U check, which runs only after the seat is `idle` or `done`.
+- Report wording. A fallback read is not mentioned in reports: what it shows is the current screen, which is what the caller asked for. A read that still fails keeps today's handling at each caller.
+
+No new key path, no new prompt path, and no new herdr command. The fallback is one more read-only `agent read`, at most once for each read it replaces.
+
+### 36.3 Code, invariants and tests
+
+- `seats.read_screen` is the helper. The five call sites in `seats.py`, `ops.py` and `board.py` use it. Section 32.3's sentence on these reads gains "(amended by 36)".
+- Invariants 19 to 22 stand. An `agent read --source visible` from restart, swap, down, interrupt, the `handover` helper (which runs restart or swap, 32.5), the `manage` menu (whose held or timed-out quit names the dialog, and which still presses no key) or the watcher is allowed only as the fallback: right after an `agent read` of the same target, with the same `--lines` and no `--source`, that the fake answered `agent_not_idle`.
+  - Only a read that succeeded counts as the screen a key decision was made from. A refused or failed read never authorizes the Enter of 23.7 or `interrupt`'s keys; after a refusal, only the visible read that follows it can.
+  - The Enter of 23.7 may then follow the visible read when that read showed the highlighted exit confirmation.
+  - `interrupt`'s keys may then follow it when it showed no dialog.
+  - The watcher's visible read is allowed only for a seat that was `blocked` at the last `agent list`, as for the read it replaces.
+  - `peek` and the board's `p` keep their own rule.
+- `tests/fake_herdr.py` models the herdr fact: `viewport_rows(world, pane, rows)` (default: no limit) makes an `agent read` without `--source visible` and with `--lines` above `rows` answer `agent_not_idle` for an agent that is not `idle` or `done`. A visible read returns the last `rows` lines. The existing `agent_not_idle` switch stays.
+- `tests/test_section36.py`:
+  - On a 13-row pane, a `swap` and a `restart` on a seat whose quit shows the exit confirmation answer it with one Enter after the visible read.
+  - With the dialog not highlighted, no Enter is pressed.
+  - A held quit and a timed-out one name the dialog.
+  - `interrupt` on a working seat in a 13-row pane presses its keys when no dialog shows, and is refused naming the dialog when one does.
+  - The board shows a blocked seat's dialog lines.
+  - Each of these on a tall pane makes exactly the reads it makes today, with no visible read.
+  - The harness fails a visible read from these commands that does not follow a refused read.
+- Version 0.19.1 in `herdr-plugin.toml` and `herdr_fleet/__init__.py`. AGENTS.md's architecture paragraph names the fallback where it describes `quit_agent`, `interrupt` and the board. `docs/testing.md` lists `test_section36.py`.
+
+### 36.4 Verification (designer, 2 November 2026)
+
+Live with the 0.19.1 working tree (herdr 0.9.5, Claude Code 2.1.316, `tui = "fullscreen"`). The scratch fleet ran one Claude Haiku seat in its own workspace. A plain shell pane split below it left the seat's pane 13 rows tall, the height of the reported grid.
+
+- **Exit confirmation.** The seat had one background shell open. `restart` sent `/exit`, and Claude Code showed `Background work is running` … `❯ 1. Exit and stop tasks`; herdr reported the seat `blocked`.
+  - A sampler running alongside saw every `agent read --lines 16` refused `agent_not_idle` while the dialog was up.
+  - `restart` reported `quit - answered its exit confirmation (exit and stop tasks)`, then `started` and `briefed` in the same pane.
+  - On the same seat in a 60-row pane, 0.19.0 had answered the same dialog, since its 16-line read fitted.
+- **`interrupt`.** With the seat `working` in a foreground command on the 13-row pane:
+  - The installed 0.19.0 answered `failed …: reading its screen: herdr error agent_not_idle: cannot read 16 lines while … is working …; no keys sent`.
+  - The working tree answered `interrupted … (done)`, and the screen showed `Interrupted · What should Claude do instead?` above an empty input.
+
+**Not verified live:**
+- the board's blocked-dialog lines on a short pane (the fake covers them);
+- a held quit's and a timed-out quit's dialog naming on a short pane.

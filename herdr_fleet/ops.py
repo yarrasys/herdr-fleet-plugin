@@ -34,7 +34,8 @@ from herdr_fleet.messages import OWNER, drop_queued, interrupt_entry, record, re
 from herdr_fleet.placement import Target, band_anchor, band_check, existing_panes, place_band, place_chain, place_grid
 from herdr_fleet.seats import (DEFAULT_INTERRUPT_WAIT_MS, EXIT_DIALOG_LINES, LIMIT_SCREEN_LINES, QUIT_CONFIG_HINT, SETTLED,
                                at_shell_prompt, describe_foreground, dialog_first_line, interrupt_agent,
-                               interrupt_keys, live_by_name, quit_agent, quit_command, state_words)
+                               interrupt_keys, live_by_name, quit_agent, quit_command,
+                               read_screen as read_current_screen, state_words)
 from herdr_fleet.state import now_iso, pane_moved, prune_state
 
 WAIT_UNTIL = ("idle", "done", "blocked")
@@ -869,7 +870,7 @@ def op_interrupt(ctx: Ctx, name: str, wait_ms: Optional[int] = None, as_name: Op
     if held:
         return EXIT_PARTIAL, "refused %s: %s; no keys sent" % (name, held)
     try:
-        dialog = dialog_first_line(ctx.herdr.agent_read(name, EXIT_DIALOG_LINES))
+        dialog = dialog_first_line(read_current_screen(ctx.herdr, name, EXIT_DIALOG_LINES))
     except HerdrError as exc:
         if "not_found" in exc.code:
             return EXIT_PARTIAL, "nothing to interrupt: %s is absent" % name

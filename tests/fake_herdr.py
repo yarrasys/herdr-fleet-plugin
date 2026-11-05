@@ -42,7 +42,11 @@ acts, writes it back and appends one JSON line to the call log (env
 - Reading a working seat (32.3): with ``agent_not_idle`` (true, or a list of names) an
   ``agent read`` without ``--source visible`` of a ``working`` agent answers
   ``agent_not_idle`` as live herdr does for alternate-screen history; every ``agent read``
-  records its ``source``.
+  records its ``source``. ``viewport_rows(world, pane, rows)`` (36) refuses a history read
+  above ``rows`` for any agent that is not idle or done; a visible read returns at most the
+  last ``rows`` lines. The refusal is logged as ``info.error`` for the harness.
+  ``agent_read_errors`` ({name or pane: code}, or {name or pane: {plain|visible: code}})
+  scripts an error for every read or only one source.
 - Menus for the guard (32.2): ``show_menu(world, pane, reads)`` puts a highlighted
   numbered menu on the pane for the next ``reads`` ``pane read`` calls (``agent read``
   shows it too while it lasts, without counting).
@@ -386,6 +390,15 @@ def set_screen(world: Dict, pane: str, text: Optional[str]) -> None:
         screens.pop(pane, None)
     else:
         screens[pane] = text
+
+
+def viewport_rows(world: Dict, pane: str, rows: Optional[int] = None) -> None:
+    """Limit ``agent read`` history on ``pane`` to ``rows`` viewport lines (None: no limit)."""
+    viewports = world["behaviors"].setdefault("viewport_rows", {})
+    if rows is None:
+        viewports.pop(pane, None)
+    else:
+        viewports[pane] = int(rows)
 
 
 def screen_of(world: Dict, pane: str) -> str:
@@ -919,13 +932,27 @@ class Sim:
         source = (opts.get("--source") or [None])[0]
         agent = self.w["panes"][pid]["agent"]
         self.info.update(pane=pid, lines=count, name=agent.get("name"), source=source)
+        errors = self.b.get("agent_read_errors", {})
+        failure = errors.get(agent.get("name")) or errors.get(pid)
+        if isinstance(failure, dict):
+            failure = failure.get("visible" if source == "visible" else "plain")
+        if failure:
+            self.info["error"] = failure
+            return _err(failure, "cannot read %s" % (agent.get("name") or pid))
         refusing = self.b.get("agent_not_idle")
-        if (source != "visible" and agent["agent_status"] == "working"
-                and (refusing is True or (isinstance(refusing, list) and agent.get("name") in refusing))):
-            return _err("agent_not_idle", "cannot read %d lines while %s is working: its alternate-screen history "
-                        "can only be captured by scrolling while idle." % (count, agent.get("name") or pid))
+        viewport = self.b.get("viewport_rows", {}).get(pid)
+        refused = (agent["agent_status"] == "working"
+                   and (refusing is True or (isinstance(refusing, list) and agent.get("name") in refusing)))
+        refused = refused or (viewport is not None and count > viewport
+                              and agent["agent_status"] not in ("idle", "done"))
+        if source != "visible" and refused:
+            self.info["error"] = "agent_not_idle"
+            return _err("agent_not_idle", "cannot read %d lines while %s is %s: its alternate-screen history "
+                        "can only be captured by scrolling while idle."
+                        % (count, agent.get("name") or pid, agent["agent_status"]))
         raw = screen_of(self.w, pid).splitlines()
-        judged = raw[-count:] if count > 0 else raw
+        shown_count = min(count, viewport) if source == "visible" and viewport is not None and count > 0 else count
+        judged = raw[-shown_count:] if shown_count > 0 else (raw if count == 0 else [])
         line = prompt_of(agent["agent"], "\n".join(judged))
         self.info.update(input_text=line_holds_text(agent["agent"], line))  # design 23.11, for ctrl+u
         self.info.update(limit_shown=shows_limit("\n".join(judged)))  # design 35.6

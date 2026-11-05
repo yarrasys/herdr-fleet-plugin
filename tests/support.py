@@ -305,6 +305,8 @@ class FleetCase(unittest.TestCase):
                 entries = [json.loads(line) for line in handle if line.strip()]
         keys = KeysCheck(self, command)
         previous: Optional[List[str]] = None
+        previous_exit = 0
+        previous_info: Dict = {}
         listed: Dict[str, Optional[str]] = {}  # the states the command's last `agent list` answered
         pressed: Optional[str] = None          # the last key the fake screen replayed, until a focus uses it
         peeked: Optional[str] = None           # the seat a `p` read, whose visible screen may follow (32.3)
@@ -318,6 +320,7 @@ class FleetCase(unittest.TestCase):
                 command = call["command"]
                 keys = KeysCheck(self, command)
                 previous = None
+                previous_exit, previous_info = 0, {}
                 listed, pressed, peeked, limited = {}, None, None, {}
                 timer_reads = 0
                 starts = StartsCheck(self)
@@ -343,7 +346,7 @@ class FleetCase(unittest.TestCase):
             if argv[:2] == ["agent", "get"] and info.get("name"):
                 keys.seen(str(info["name"]), info.get("status"))
             if argv[:2] == ["agent", "send-keys"]:
-                keys.check(argv, info, previous, call["exit"])
+                keys.check(argv, info, previous, previous_exit, call["exit"])
             starts.see(argv, info, call["exit"])
             if helper is not None:
                 self.assert_helper(helper, argv, info)
@@ -351,9 +354,13 @@ class FleetCase(unittest.TestCase):
                 self.assertIn(command[:1] and command[0], READ_COMMANDS, "%s read a screen: %s" % (command[:1], argv))
                 visible = "--source" in argv and argv[argv.index("--source") + 1:][:1] == ["visible"]
                 after_peek = visible and peeked == argv[2] and (previous or [])[:3] == ["agent", "read", argv[2]]
-                if visible:  # design 32.3: the visible screen only from peek and the board's `p`
-                    self.assertTrue(command[:1] == ["peek"] or after_peek,
-                                    "%s read the visible screen: %s" % (command[:1], argv))
+                fallback = (visible and command[:1] in (["restart"], ["swap"], ["down"], ["interrupt"], ["handover"],
+                                                        ["menu"], ["watch"])
+                            and previous == ["agent", "read", argv[2], "--lines", argv[4]]
+                            and previous_exit == 1 and previous_info.get("error") == "agent_not_idle")
+                if visible:  # 32.3: peek and the board's `p`; 36: one fallback after agent_not_idle
+                    self.assertTrue(command[:1] == ["peek"] or after_peek or fallback,
+                                    "%s read the visible screen without its allowed fallback: %s" % (command[:1], argv))
                 if command[:1] == ["watch"]:
                     seats = fake_herdr.fleet_names(fleet_file(command, self.env, self.repo))
                     if pressed == "p":  # design 25.2: the owner asked for the seat's screen
@@ -368,11 +375,13 @@ class FleetCase(unittest.TestCase):
                                       % (argv[2], argv))
                         self.assertEqual(listed.get(argv[2]), "blocked", "the board read the screen of %s, which "
                                          "was %s at the last agent list: %s" % (argv[2], listed.get(argv[2]), argv))
-                keys.read.add(argv[2])
-                keys.text[argv[2]] = bool(info.get("input_text"))
+                if call["exit"] == 0:  # 36: a failed read is not a screen a key decision can trust
+                    keys.read.add(argv[2])
+                    keys.text[argv[2]] = bool(info.get("input_text"))
             if command[:1] == ["peek"]:
                 self.assertIn(argv[:2] if argv[:1] != ["--version"] else argv[:1], PEEK_CALLS, "peek ran %s" % argv)
             previous = argv
+            previous_exit, previous_info = call["exit"], info
             if command[:1] == ["inbox"]:
                 self.assertIn(argv[:2], INBOX_CALLS, "inbox ran more than the caller lookup: %s" % argv)
                 if "--drop" not in command:  # design 33.3: `inbox --drop --as NAME` looks the caller up
@@ -533,7 +542,7 @@ class KeysCheck:
     def seen(self, name: str, status: Optional[str]) -> None:
         self.status[name] = status
 
-    def check(self, argv: List[str], info: Dict, previous: Optional[List[str]], code: int) -> None:
+    def check(self, argv: List[str], info: Dict, previous: Optional[List[str]], previous_exit: int, code: int) -> None:
         case, command = self.case, self.command
         what = command[:1] and command[0]
         case.assertNotIn(what, NO_KEYS_COMMANDS, "%s sent keys: %s" % (command[:1], argv))
@@ -549,6 +558,7 @@ class KeysCheck:
                             % argv)
             case.assertEqual((previous or [])[:3], ["agent", "read", argv[2]],
                              "enter not right after an `agent read` of %s: %s" % (argv[2], argv))
+            case.assertEqual(previous_exit, 0, "enter after a failed agent read of %s: %s" % (argv[2], argv))
             self.enters[name] = self.enters.get(name, 0) + 1
             case.assertEqual(self.enters[name], 1, "a second enter for %s in one command" % name)
             return
@@ -566,6 +576,9 @@ class KeysCheck:
                              "interrupt pressed keys in %s, which was %s at its last agent get"
                              % (name, self.status.get(name)))
             case.assertIn(argv[2], self.read, "interrupt pressed keys in %s without reading its screen" % name)
+            case.assertEqual((previous or [])[:3], ["agent", "read", argv[2]],
+                             "interrupt keys not right after an agent read of %s: %s" % (argv[2], argv))
+            case.assertEqual(previous_exit, 0, "interrupt keys after a failed agent read of %s: %s" % (argv[2], argv))
         if code == 0:
             record["keys"].extend(sent)
         else:

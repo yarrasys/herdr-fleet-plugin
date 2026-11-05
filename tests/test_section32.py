@@ -12,7 +12,8 @@ when its turn ends. 32.6: a kickoff that cannot be sent waits first in the seat'
 ``tests/support.py`` checks every test's log as before, and also: a second ``agent start``
 to a pane only after a ``process-info`` read showing a bare shell with no successful ``agent
 get`` in between, never a third; the handover helper acting only for its recorded seat; and
-``agent read --source visible`` only from ``peek`` and the board's ``p``."""
+``agent read --source visible`` from ``peek`` and the board's ``p``, with 36's fallback only
+immediately after the same read answered ``agent_not_idle``."""
 
 from __future__ import annotations
 
@@ -355,12 +356,13 @@ class PeekWorking(S32):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(self.argvs("agent", "read"), [["agent", "read", "sample-dev", "--lines", "30"]])
 
-    def test_interrupt_keeps_its_read(self):
+    def test_interrupt_falls_back_to_the_visible_screen(self):
         code, out, _ = self.run_cli("interrupt", "sample-dev")
-        self.assertEqual(code, 1, out)
-        self.assertIn("reading its screen", out)
-        self.assertNotIn("--source", [a for argv in self.argvs("agent", "read") for a in argv])
-        self.assertEqual(self.argvs("agent", "send-keys"), [])
+        self.assertEqual((code, out), (0, "interrupted sample-dev (done)\n"))
+        self.assertEqual(self.argvs("agent", "read")[:2],
+                         [["agent", "read", "sample-dev", "--lines", "16"],
+                          ["agent", "read", "sample-dev", "--lines", "16", "--source", "visible"]])
+        self.assertEqual(self.argvs("agent", "send-keys"), [["agent", "send-keys", "sample-dev", "ctrl+c"]])
 
 
 # -- 32.4 ---------------------------------------------------------------------------------------
