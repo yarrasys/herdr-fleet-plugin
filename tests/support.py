@@ -55,7 +55,8 @@ def policy_output(output: str) -> str:
 
 # Design 18.5: `inbox` asks herdr only who the caller is (and nothing at all with --as);
 # 18.7: `inbox --hook` only `agent get` on its own pane.
-INBOX_CALLS = (["pane", "current"], ["agent", "get"], ["pane", "get"], ["pane", "process-info"])
+INBOX_CALLS = (["pane", "current"], ["agent", "get"], ["pane", "get"], ["pane", "process-info"],
+               ["agent", "list"])  # design 38: only CLI Codex's thread lookup (checked below)
 HOOK_CALLS = (["agent", "get"],)
 # Design 18.6: the watcher runs agent wait/get/list/prompt and notification show, plus the
 # local `herdr --version` of the common preconditions; design 21.2: the presence guard's
@@ -228,6 +229,20 @@ class FleetCase(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         env = env if env is not None else self.env
         marker: Dict = {"command": list(argv)}
+        # Independent invariant 6 oracle: the CLI's Codex thread, never its daemon's pane.
+        thread = (env.get("CODEX_THREAD_ID") if not env.get("HERDR_PLUGIN_ACTION_ID")
+                  and not env.get("HERDR_PLUGIN_ENTRYPOINT_ID") else None)
+        caller = env.get("HERDR_PANE_ID")
+        protected = {caller} if caller else set()
+        if thread:
+            panes = [pid for pid, p in self.world["panes"].items()
+                     if isinstance((p.get("agent") or {}).get("agent_session"), dict)
+                     and p["agent"]["agent_session"].get("source") == "herdr:codex"
+                     and p["agent"]["agent_session"].get("value") == thread]
+            caller = panes[0] if len(panes) == 1 else None
+            protected = ({caller} if caller else {pid for pid, p in self.world["panes"].items()
+                                                  if (p.get("agent") or {}).get("agent") == "codex"})
+        marker.update(caller_pane=caller, caller_panes=sorted(protected), codex_thread=thread)
         if env.get("HERDR_FLEET_HANDOVER"):  # design 32.5: whose helper made the calls below, and its pane
             marker.update(handover=env["HERDR_FLEET_HANDOVER"], pane=env.get("HERDR_PANE_ID"))
         with open(self.log_path, "a", encoding="utf-8") as handle:  # marks which command made the calls below
@@ -314,6 +329,8 @@ class FleetCase(unittest.TestCase):
         timer_reads = 0
         starts = StartsCheck(self, command)
         helper: Optional[Dict] = None          # design 32.5: the handover helper's seat and pane
+        codex_thread = None
+        protected = set()
         for call in entries:
             if "command" in call:
                 keys.finish()
@@ -325,7 +342,9 @@ class FleetCase(unittest.TestCase):
                 timer_reads = 0
                 starts = StartsCheck(self, command)
                 helper = None
-                caller = call.get("pane") or self.env.get("HERDR_PANE_ID")  # the helper runs in its own pane
+                caller = call.get("caller_pane", call.get("pane") or self.env.get("HERDR_PANE_ID"))
+                codex_thread = call.get("codex_thread")
+                protected = set(call.get("caller_panes", [caller] if caller else []))
                 if command[:1] == ["handover"] and call.get("handover"):
                     helper = {"seat": json.loads(call["handover"]).get("seat"), "pane": call.get("pane")}
                 continue
@@ -333,6 +352,11 @@ class FleetCase(unittest.TestCase):
                 pressed = call["key"]
                 continue
             argv, info = call["argv"], call["info"]
+            if codex_thread and argv[:2] in (["agent", "send-keys"], ["agent", "prompt"]):
+                if argv[:2] == ["agent", "send-keys"] or (command[:1] in (
+                        ["restart"], ["swap"], ["down"], ["handover"], ["menu"])):
+                    self.assertNotIn(info.get("pane"), protected,
+                                     "key or quit prompt reached a possible caller's pane: %s" % argv)
             self.assertTrue(argv, "bare herdr was run")
             if command[:1] == ["timers"]:
                 self.assertNotIn("--dry-run", command, "offline timers called Herdr")
@@ -384,6 +408,8 @@ class FleetCase(unittest.TestCase):
             previous_exit, previous_info = call["exit"], info
             if command[:1] == ["inbox"]:
                 self.assertIn(argv[:2], INBOX_CALLS, "inbox ran more than the caller lookup: %s" % argv)
+                if argv[:2] == ["agent", "list"]:
+                    self.assertTrue(codex_thread, "inbox listed agents without a Codex thread")
                 if "--drop" not in command:  # design 33.3: `inbox --drop --as NAME` looks the caller up
                     self.assertNotIn("--as", command, "inbox --as ran a herdr command: %s" % argv)
                 if "--hook" in command:
@@ -443,7 +469,7 @@ class FleetCase(unittest.TestCase):
                               "%s prompted an agent in state %s: %s" % (command[:1], info.get("target_status"), argv))
             if argv[:2] == ["agent", "start"] and "--help" not in argv:
                 pane = argv[argv.index("--pane") + 1]
-                self.assertNotEqual(pane, caller, "started into the caller's pane")
+                self.assertNotIn(pane, protected, "started into the caller's pane or a possible caller's pane")
                 if call["exit"] == 0 or "at_shell" in info:
                     self.assertTrue(info.get("at_shell"), "agent start into a pane not at a shell: %s" % argv)
             if argv[:2] == ["pane", "close"] and call["exit"] == 0:

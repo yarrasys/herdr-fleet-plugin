@@ -555,7 +555,14 @@ def _check_herdr(ctx: Ctx, add) -> None:
     else:
         add(("warn", "HERDR_ENV", "not set; operations other than doctor must run inside a herdr pane"))
     try:
-        add(("ok", "herdr server", "reachable (%d live agents)" % len(ctx.herdr.agent_list())))
+        agents = ctx.herdr.agent_list()
+        add(("ok", "herdr server", "reachable (%d live agents)" % len(agents)))
+        if ctx.invocation.codex_thread:
+            from herdr_fleet.context import resolve_caller
+            resolve_caller(ctx, agents)
+            inv = ctx.invocation
+            detail = ("%s (%s)" % (inv.pane_id, inv.caller_reason) if inv.pane_id else inv.caller_reason)
+            add(("info", "caller", "by Codex thread %s: %s" % (inv.codex_thread, detail)))
     except HerdrError as exc:
         add(("fail", "herdr server", describe(exc)))
 

@@ -33,8 +33,30 @@ from herdr_fleet import board as B
 CLAUDE = ["--model", "claude-opus-5-5"]
 CODEX = ["-m", "gpt-6-astra"]
 KIMI = ["-m", "kimi-code/k3.1-pro", "-y"]
-CLAUDE_LIMIT = "Claude usage limit reached. Your limit will reset at 3pm (Australia/Melbourne)."
-CODEX_LIMIT = "You've hit your usage limit. Try again at Nov 5th, 2026 8:44 PM."
+
+
+def claude_limit(now=None):
+    """Keep a recurring daily reset comfortably ahead of the wall-clock cases too."""
+    reset = ((now or limits.inbox.now_utc()) + datetime.timedelta(hours=6)).astimezone()
+    return "Claude usage limit reached. Your limit will reset at %d:%02d%s." % (
+        reset.hour % 12 or 12, reset.minute, "pm" if reset.hour >= 12 else "am")
+
+
+def codex_limit(now=None):
+    """A provider-format reset two days after the test's clock, never a dated deadline."""
+    reset = ((now or limits.inbox.now_utc()).astimezone() + datetime.timedelta(days=2)).replace(
+        second=0, microsecond=0)
+    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    suffix = "th" if 11 <= reset.day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(reset.day % 10, "th")
+    return "You've hit your usage limit. Try again at %s %d%s, %d %d:%02d %s." % (
+        months[reset.month - 1], reset.day, suffix, reset.year, reset.hour % 12 or 12, reset.minute,
+        "PM" if reset.hour >= 12 else "AM")
+
+
+CLAUDE_LIMIT = claude_limit()
+CODEX_LIMIT = codex_limit()
+ALLOWANCE_RESET = int((limits.inbox.now_utc() + datetime.timedelta(days=7)).timestamp())
+NEXT_ALLOWANCE_RESET = ALLOWANCE_RESET + 7 * 86400
 KIMI_LIMIT = ("Error: [provider.api_error] 429 You've reached your 5-hour usage limit. Your quota will reset "
               "when the current 5-hour window ends.")
 SID = "00000000-0000-4000-8000-000000000035"
@@ -272,10 +294,26 @@ class LimitLines(unittest.TestCase):
         self.assertEqual((later.hour, later.minute, later.date()), (11, 5, now.date()))
         tomorrow = limits.parse_reset("limit reached, resets 9am", now)
         self.assertEqual(tomorrow.date(), (now + datetime.timedelta(days=1)).date())
-        dated = limits.parse_reset(CODEX_LIMIT, now)
-        self.assertEqual((dated.year, dated.month, dated.day, dated.hour, dated.minute), (2026, 11, 5, 20, 44))
+        dated = limits.parse_reset(codex_limit(now), now)
+        self.assertEqual(dated, now + datetime.timedelta(days=2))
         self.assertIsNone(limits.parse_reset(KIMI_LIMIT, now))
         self.assertIsNone(limits.parse_reset("resets 25pm", now))
+
+    def test_limit_fixtures_follow_the_test_clock_across_years(self):
+        for now in (datetime.datetime(2035, 12, 31, 23, 59, tzinfo=datetime.timezone.utc),
+                    datetime.datetime(2098, 4, 9, 8, 44, tzinfo=datetime.timezone.utc)):
+            with self.subTest(now=now), mock.patch.object(limits.inbox, "now_utc", return_value=now):
+                line = codex_limit()
+                self.assertEqual(limits.parse_reset(line, now), now.astimezone() + datetime.timedelta(days=2))
+                self.assertTrue(limits.counts(limits.new_record("codex", line, now), now))
+                claude = limits.new_record("claude", claude_limit(), now)
+                self.assertTrue(limits.counts(claude, now + datetime.timedelta(minutes=2)))
+
+    def test_reset_time_with_a_named_zone_keeps_its_clock_hour(self):
+        now = datetime.datetime(2026, 11, 2, 0, 0, tzinfo=datetime.timezone.utc)
+        reset = limits.parse_reset(
+            "Claude usage limit reached. Your limit will reset at 3pm (Australia/Melbourne).", now)
+        self.assertEqual((reset.hour, reset.minute), (15, 0))
 
     def test_kimis_record_carries_its_5_hour_window(self):
         now = datetime.datetime(2026, 11, 2, 10, 41, tzinfo=datetime.timezone.utc)
@@ -765,7 +803,8 @@ class LimitedQuit(TierLive):
 
     def test_a_seat_last_seen_in_another_state_is_refused(self):
         self.limited()
-        self.put_state("sample-dev", state_seen={"state": "idle", "since": "2026-11-02T09:00:00+11:00"})
+        self.put_state("sample-dev", state_seen={"state": "idle", "since": limits.inbox.iso_local(
+            limits.inbox.now_utc() - datetime.timedelta(minutes=10))})
         code, out, err = self.run_cli("restart", "sample-dev")
         self.assertEqual(code, 3, out + err)
         self.put_state("sample-dev", state_seen=None)
@@ -797,10 +836,11 @@ class LimitedQuit(TierLive):
         self.assertIn("pass --wait MS", out)
 
 
-def rollout(root, percent, resets_at=1793871854, window=10080, sid=SID, with_info=False):
-    folder = os.path.join(root, "2026", "11", "02")
+def rollout(root, percent, resets_at=ALLOWANCE_RESET, window=10080, sid=SID, with_info=False):
+    now = limits.inbox.now_utc()
+    folder = os.path.join(root, now.strftime("%Y"), now.strftime("%m"), now.strftime("%d"))
     os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, "rollout-2026-11-02T10-00-00-%s.jsonl" % sid)
+    path = os.path.join(folder, "rollout-%s-%s.jsonl" % (now.strftime("%Y-%m-%dT%H-%M-%S"), sid))
     payload = {"type": "token_count", "info": None,
                "rate_limits": {"limit_id": "synthetic", "primary": {"used_percent": percent, "window_minutes": window,
                                                                     "resets_at": resets_at},
@@ -808,7 +848,7 @@ def rollout(root, percent, resets_at=1793871854, window=10080, sid=SID, with_inf
     if with_info:
         payload["info"] = {"last_token_usage": {"total_tokens": 1000}}
     with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"timestamp": "2026-11-02T10:00:00Z", "type": "event_msg", "payload": payload}) + "\n")
+        handle.write(json.dumps({"timestamp": limits.inbox.iso_local(now), "type": "event_msg", "payload": payload}) + "\n")
     return path
 
 
@@ -845,8 +885,8 @@ class Allowance(WatchCase, TierLive):
         self.assertIn("sample-reviewer: no fallback defined", body)
         recorded = self.read_state()["codex_allowance"]
         self.assertEqual((recorded["used_percent"], recorded["resets_at"], recorded["window_minutes"]),
-                         (96.5, 1793871854, 10080))
-        self.assertEqual(recorded["warned_for"], 1793871854)
+                         (96.5, ALLOWANCE_RESET, 10080))
+        self.assertEqual(recorded["warned_for"], ALLOWANCE_RESET)
 
     def test_below_the_threshold_nothing_is_said_but_the_reading_is_kept(self):
         rollout(self.root, 94.9)
@@ -876,20 +916,21 @@ class Allowance(WatchCase, TierLive):
         return calls
 
     def test_one_warning_per_reset_window_and_a_new_window_warns_again(self):
-        calls = self.readings((97, 1793871854), (97, 1793871854), (12, 1794476654), (98, 1794476654))
+        calls = self.readings((97, ALLOWANCE_RESET), (97, ALLOWANCE_RESET),
+                             (12, NEXT_ALLOWANCE_RESET), (98, NEXT_ALLOWANCE_RESET))
         self.assertEqual(len(calls), 4)
         self.assertEqual(len(self.warnings()), 2)  # the first window once, the second window once
         self.assertRegex(self.warnings()[0][0], r"^Fleet: Codex at 97%")
         self.assertRegex(self.warnings()[1][0], r"^Fleet: Codex at 98%")
         recorded = self.read_state()["codex_allowance"]
-        self.assertEqual((recorded["used_percent"], recorded["warned_for"]), (98, 1794476654))
+        self.assertEqual((recorded["used_percent"], recorded["warned_for"]), (98, NEXT_ALLOWANCE_RESET))
 
     def test_a_drop_below_the_threshold_in_the_same_window_does_not_warn_twice(self):
-        self.readings((97, 1793871854), (60, 1793871854), (97, 1793871854))
+        self.readings((97, ALLOWANCE_RESET), (60, ALLOWANCE_RESET), (97, ALLOWANCE_RESET))
         self.assertEqual(len(self.warnings()), 1)
 
     def test_it_is_read_at_most_every_10_minutes_and_one_rollout_per_pass(self):
-        calls = self.readings((50, 1793871854), (51, 1793871854), (52, 1793871854))
+        calls = self.readings((50, ALLOWANCE_RESET), (51, ALLOWANCE_RESET), (52, ALLOWANCE_RESET))
         self.assertEqual(len(calls), 3)  # one rollout read per pass: the first Codex seat answers for the account
         gaps = [b - a for a, b in zip(calls, calls[1:])]
         self.assertTrue(all(watch.ALLOWANCE_READ_S <= g < watch.ALLOWANCE_READ_S + 2 * watch.CYCLE_S for g in gaps), gaps)
@@ -982,7 +1023,7 @@ class Fallback(TierLive):
         fake_herdr.put_agent(self.world, "w2:p2", "codex", "sample-dev", args=CODEX)
         self.put_state("sample-dev", kind="codex", args=CODEX)
         state = self.read_state()
-        state["codex_allowance"] = {"used_percent": 96.2, "resets_at": 1793871854, "window_minutes": 10080}
+        state["codex_allowance"] = {"used_percent": 96.2, "resets_at": ALLOWANCE_RESET, "window_minutes": 10080}
         self.write_state(state)
         self.write_fleet(TIERS.replace('prefer = ["claude", "kimi"]', 'prefer = ["codex", "claude"]')
                          .replace('extra_args = { kimi = ["--add-dir", "../shared"] }\n', ""))

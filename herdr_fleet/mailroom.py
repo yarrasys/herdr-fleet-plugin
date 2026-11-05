@@ -248,7 +248,7 @@ def lookup_caller(ctx: Ctx, as_name: Optional[str]) -> str:
     finds it (verified caller pane and ``agent get``); only a verified shell or outside
     Herdr uses ``owner``. Failed caller lookup requires explicit ``--as``. The state
     that ``agent get`` answered is recorded for a seat (design 20.5)."""
-    if not as_name and ctx.inside_herdr() and ctx.env.get("HERDR_PANE_ID"):
+    if not as_name and ctx.inside_herdr():
         resolve_caller(ctx)
     name, record_ = caller_record(ctx, as_name)
     if record_.get("agent_status"):
@@ -582,7 +582,9 @@ def _hook_seat(ctx: Ctx, data: Dict) -> Optional[str]:
     """The seat whose Claude Code runs this hook: the fleet is found from the hook's
     ``cwd`` (else the process cwd), the agent from ``HERDR_PANE_ID`` through ``agent get``.
     None when any of it is missing or the pane's agent is not a seat."""
-    pane = ctx.env.get("HERDR_PANE_ID")
+    if ctx.invocation.codex_thread:
+        return None  # a Codex tool must not run Claude's hook in the inherited daemon pane
+    pane = ctx.invocation.pane_id
     if not pane or not ctx.inside_herdr():
         return None
     hook_cwd = data.get("cwd")

@@ -27,7 +27,7 @@ from herdr_fleet import state as state_mod
 from herdr_fleet.bringup import (claim_seat, ensure_seat, follow_pane, label_for, label_of, require_caller_context,
                                 resolve_target, send_kickoffs, start_claimed, start_seat)
 from herdr_fleet.checks import drift_reasons, is_adopted
-from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, Report, UsageError
+from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, Report, UsageError, caller_panes
 from herdr_fleet.fleetfile import Fleet, FleetError, Seat, check_kinds
 from herdr_fleet.herdr import HerdrError, describe, has_agent, pane_move_argv, render_cmd, start_argv
 from herdr_fleet.messages import OWNER, drop_queued, interrupt_entry, record, resolve_sender, resolve_targets
@@ -105,6 +105,9 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
         raise UsageError("--me %s: not a seat in %s" % (me, fleet.path))
     if join and not me:
         raise UsageError("--join moves your own pane, so it needs --me NAME")
+    if (me or join) and ctx.invocation.codex_thread and not ctx.invocation.pane_id:
+        raise UsageError("%s; --me and --join need a known caller pane; run from the fleet's own pane"
+                         % ctx.invocation.caller_reason)
     refuse_unknown_kinds(ctx)
     require_caller_context(ctx)
     prune(ctx)
@@ -384,6 +387,16 @@ OWN_SEAT = ("it is the caller's own agent; restart it from another pane, or add 
             "this turn ends")  # design 32.5
 
 
+def _caller_refusal(ctx: Ctx, name: str, agent: Optional[Dict], known: str = OWN_SEAT) -> Optional[str]:
+    """The own-seat refusal, before any wait, state gate or action (38.2)."""
+    if not agent or agent.get("pane_id") not in caller_panes(ctx):
+        return None
+    inv = ctx.invocation
+    if inv.codex_thread and not inv.pane_id:
+        return "%s may be the caller's own agent (%s); run this from another pane" % (name, inv.caller_reason)
+    return known
+
+
 def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_ms: Optional[int] = None,
                reason: str = "restart", drop_inbox: bool = False, name_panes: bool = True) -> Report:
     """Design 4.3. ``name_panes=False`` leaves the pane names to the caller (``swap``
@@ -407,8 +420,9 @@ def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_
             result = ensure_seat(ctx, seat, target, live, report)
             (to_brief if result == "started" else to_queue if result == "blocked" else []).append(seat)
             continue
-        if agent.get("pane_id") == ctx.invocation.pane_id:
-            report.add(seat.name, "refused", OWN_SEAT, "partial")
+        refusal = _caller_refusal(ctx, seat.name, agent)
+        if refusal:
+            report.add(seat.name, "refused", refusal, "partial")
             continue
         agent = settle(ctx, seat, agent, wait_ms, report)
         if agent is None:
@@ -459,6 +473,11 @@ def op_swap(ctx: Ctx, names: Sequence[str], note: Optional[str] = None,
     returning: Dict[str, Dict] = {}  # seat -> its failover record, for the seats this swap returns to their primary
     for seat in seats:
         agent = live.get(seat.name)
+        if ctx.invocation.codex_thread and not ctx.invocation.pane_id:
+            refusal = _caller_refusal(ctx, seat.name, agent)
+            if refusal:
+                report.add(seat.name, "refused", refusal, "partial")
+                continue
         record = failover_of(ctx, seat)
         if record is not None:
             if not names:
@@ -559,9 +578,6 @@ def _swap_fallback(ctx: Ctx, names: Sequence[str], note: Optional[str], wait_ms:
     explicit = bool(names)
     if explicit:
         seats = select_seats(ctx.fleet, names, required=True)
-        for seat in seats:
-            if not seat.prefer:
-                raise UsageError("%s has no tier (it uses kind and args), so it has no fallback defined" % seat.name)
     else:
         seats = [s for s in ctx.fleet.seats if s.prefer and limits.holding(
             ctx.fleet.repo, s.name, str((live.get(s.name) or {}).get("agent") or s.kind)) is not None]
@@ -570,6 +586,13 @@ def _swap_fallback(ctx: Ctx, names: Sequence[str], note: Optional[str], wait_ms:
             return report
     plans = []
     for seat in seats:
+        if ctx.invocation.codex_thread and not ctx.invocation.pane_id:
+            refusal = _caller_refusal(ctx, seat.name, live.get(seat.name))
+            if refusal:
+                report.add(seat.name, "refused", refusal, "partial")
+                continue
+        if explicit and not seat.prefer:
+            raise UsageError("%s has no tier (it uses kind and args), so it has no fallback defined" % seat.name)
         plan = _fallback_plan(ctx, seat, live.get(seat.name), agents, explicit, report)
         if plan is not None:
             plans.append((seat,) + plan)
@@ -724,8 +747,9 @@ def op_down(ctx: Ctx, names: Sequence[str], wait_ms: Optional[int] = None, close
         if agent is None:
             report.add(seat.name, "down", "not running")
             continue
-        if agent.get("pane_id") == ctx.invocation.pane_id:
-            report.add(seat.name, "refused", "it is the caller's own agent; quit it yourself", "partial")
+        refusal = _caller_refusal(ctx, seat.name, agent, "it is the caller's own agent; quit it yourself")
+        if refusal:
+            report.add(seat.name, "refused", refusal, "partial")
             continue
         agent = settle(ctx, seat, agent, wait_ms, report)
         if agent is None:
@@ -910,10 +934,12 @@ def op_interrupt(ctx: Ctx, name: str, wait_ms: Optional[int] = None, as_name: Op
         if "not_found" in exc.code:
             return EXIT_PARTIAL, "nothing to interrupt: %s is absent" % name
         raise
-    status = str(agent.get("agent_status") or "unknown")
-    pane = str(agent.get("pane_id") or "")
-    if pane and pane == ctx.invocation.pane_id:
+    refusal = _caller_refusal(ctx, name, agent)
+    if refusal:
+        if ctx.invocation.codex_thread and not ctx.invocation.pane_id:
+            return EXIT_PARTIAL, "refused - " + refusal
         return EXIT_PARTIAL, "refused %s: it is the caller's own agent; interrupt it yourself" % name
+    status = str(agent.get("agent_status") or "unknown")
     if status != "working":
         why = " (a dialog is open)" if status == "blocked" else ""
         return EXIT_PARTIAL, "nothing to interrupt: %s is %s%s" % (name, status, why)

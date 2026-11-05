@@ -234,7 +234,9 @@ def zoom(herdr, env: Mapping[str, str], watch_pane: Optional[str]) -> Optional[s
     state file's watch entry. Never ``--current``: herdr resolves that to the pane the owner's
     UI has focused, not to the calling process (found live, 25.7). Returns the pane toggled,
     or None when none is known and nothing was run. HerdrError goes to the caller."""
-    pane = env.get("HERDR_PANE_ID") or watch_pane
+    thread = (env.get("CODEX_THREAD_ID") if not env.get("HERDR_PLUGIN_ACTION_ID")
+              and not env.get("HERDR_PLUGIN_ENTRYPOINT_ID") else None)
+    pane = watch_pane if thread else env.get("HERDR_PANE_ID") or watch_pane
     if not pane:
         return None
     herdr.pane_zoom_toggle(pane)

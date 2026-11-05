@@ -197,7 +197,7 @@ These are enforced in code and covered by tests:
 3. A prompt that returns `agent_prompt_stalled` or `timeout` is reported and never resent automatically (herdr documents that the text may have been delivered).
 4. Only panes recorded as `created_pane` are ever closed; only a workspace recorded as `created_workspace` is ever closed; both only on explicit flags, except that the handover helper closes its own recorded pane when it ends (32.5).
 5. An agent is started only in a pane the check in section 6 reports as at a shell prompt (herdr also enforces this with `agent_pane_busy`).
-6. The caller's own pane is never started into; `--me` only renames.
+6. The caller's own pane is never started into; `--me` only renames. Under Codex the caller's pane is the pane of its thread, and when herdr cannot place the thread, every pane that could be the caller's counts as its own (38.2).
 7. Never run bare `herdr`.
 8. `worktrees`, the `fleet file vs git` check and `--context` are read-only: no `git fetch`, no `git worktree prune`, no write under either provider's transcript root (`~/.claude` or `~/.codex` by default, extended by section 29), and no herdr command beyond `agent list`/`agent get`.
 9. `--context` extracts usage numbers and timestamps only; no transcript content is ever surfaced.
@@ -1056,7 +1056,7 @@ A seat that waits for an answer waits inside one tool call, at no token cost: `i
 
 ### 23.3 Who the sender is
 
-`caller_record` resolves the caller's pane in this order: a named agent in the pane, its herdr name (as today); an agent without a herdr name, the fleet's `[[contacts]]` resolved against that one pane (the same matching `contacts.resolve` uses, restricted to the caller's pane), its contact name; otherwise a usage error, `the agent in w1X:pY has no herdr name; pass --as NAME or run: herdr agent rename w1X:pY NAME`. `owner` is the sender only when the pane hosts no agent or the command runs outside herdr. This applies wherever the caller is resolved: `send`, `ack`, `inbox`, `log`, `go`.
+`caller_record` resolves the caller's pane in this order: a named agent in the pane, its herdr name (as today); an agent without a herdr name, the fleet's `[[contacts]]` resolved against that one pane (the same matching `contacts.resolve` uses, restricted to the caller's pane), its contact name; otherwise a usage error, `the agent in w1X:pY has no herdr name; pass --as NAME or run: herdr agent rename w1X:pY NAME`. `owner` is the sender only when the pane hosts no agent or the command runs outside herdr. This applies wherever the caller is resolved: `send`, `ack`, `inbox`, `log`, `go`. For a command run by Codex in CLI mode, the caller's pane is the pane of its thread, never `HERDR_PANE_ID` (38.2).
 
 ### 23.4 Debts anyone can close, and the two commands nobody knew
 
@@ -2254,5 +2254,93 @@ These checks ran live on the working tree (herdr 0.9.5). The scratch fleet had t
 - every candidate failing;
 - a slow start past its deadline under `--fallback`;
 - the hint for a contact or with `--fleet`.
+
+The fake covers each of these.
+
+## 38. The caller of a command run by Codex (0.19.3)
+
+A field report on 3 November 2026: a coordinator running Codex saw `HERDR_PANE_ID` name another seat's pane, a seat of its own fleet, so commands that find the caller by its pane could act as that seat. The coordinator had worked around it with `--as` on every send.
+
+### 38.1 The facts (designer, 5 November 2026)
+
+- Codex 0.166 can run a TUI against a shared background app-server: `codex resume` with `--remote ADDR`, or the daemon that herdr's restore of several resumed Codex seats came up with after a machine restart. Such a TUI's own process carries the right `HERDR_PANE_ID`. But Codex runs its tools in the app-server, and the app-server's environment is that of the process that started it: another pane, sometimes in another workspace, sometimes one that now hosts a Claude seat. On the owner's machine one daemon served six seats in three fleets, all of whose commands saw one pane of a fourth seat.
+- A TUI started fresh, or resumed without `--remote`, runs its own app-server (a `codex-code-mode-host` child), and its commands see its own pane.
+- Every command Codex runs carries `CODEX_THREAD_ID` (and `CODEX_SESSION_ID`, the same value): the thread's id, right in both modes. herdr's Codex integration reports that id as the agent's session, so `agent list` shows it as `agent_session` `{source: "herdr:codex", value: <id>}` on the right pane. For a TUI attached to the daemon after it started, herdr may have no session recorded at all (the integration's report is made with the daemon's pane and is dropped).
+- `pane current --current`, which `context.resolve_caller` uses to refresh a stale pane after a move, answers for the pane `HERDR_PANE_ID` names, so it repeats the wrong pane.
+
+The pane decides more than the sender. Invariant 6 (the caller's own pane is never started into), the refusal to restart, swap or quit the caller's own seat (32.5), `up --me`, `--join`, the workspace `up` uses when the fleet file names none, `inbox` and `ack` without `--as`, and the handover request all read it. From such a seat, `restart` of its own seat would be allowed and the restart of the seat whose pane it inherited refused.
+
+### 38.2 The rule
+
+In CLI mode (not a plugin action or pane: their environment is herdr's), when the environment has a non-empty `CODEX_THREAD_ID`, the caller's pane is found by its thread and never from `HERDR_PANE_ID`, `HERDR_WORKSPACE_ID` or `pane current`:
+1. The caller is the live agent whose `agent_session` has source `herdr:codex` and value `CODEX_THREAD_ID`, from one `agent list` (the one preflight already reads). Its `pane_id` and `workspace_id` become the invocation's.
+2. With exactly one such agent, everything that reads the caller's pane uses it, as today. When it differs from `HERDR_PANE_ID`, the identity reason says so: `named caller in w2:p4 (by its Codex thread; HERDR_PANE_ID w2:p1 is another pane)`.
+3. With none or several, the caller's pane is unknown (`inv.pane_id` and `workspace_id` None) and the reason is `a Codex command whose thread herdr does not know` (or `… that herdr records on several panes`). Then:
+   - commands that need the caller's identity fail closed as 31.2 says, with the `--as NAME` guidance and that reason;
+   - `up` without a `workspace` key in the fleet file stops with a usage error that names the reason and says to set `workspace` or run from the fleet's own pane;
+   - `--me` and `--join` stop the same way, and so do `tile` and every other command that needs the caller's workspace when the fleet file sets none (not with "this was not run from a herdr pane");
+   - `ack --older-than` fails closed too, but its error says to run it from the owner's shell, since bulk `ack` ignores `--as` (33.4);
+   - the own-seat guards cannot compare against an unknown pane, so they treat every live agent that **could be the caller** as the caller. With none or several matches, every live Codex agent could be the caller. A pane whose `herdr:codex` record names another thread is not ruled out. A TUI on the shared app-server that starts a new thread (`/new`, or a resume) reports it from the daemon's pane, so herdr may keep the pane's old record. A Codex seat herdr cannot place therefore cannot restart, swap, down or interrupt any Codex seat; it does those from another pane. `restart`, `swap` (with or without `--fallback`), `down` and `interrupt` refuse a seat that could be the caller, whatever its state and with `--wait` too: `refused - SEAT may be the caller's own agent (<reason>); run this from another pane`. `up` never starts into such a pane, which invariant 5 already ensures, since the pane hosts a live agent.
+   Nothing falls back to `HERDR_PANE_ID`.
+
+   Amended after review (#2811b9). The first text said "the own-pane guards hold no pane, which is safe: nothing compares equal". That was wrong for `interrupt`. A caller herdr cannot place is `working` while its command runs, which is the state `interrupt` requires. So `interrupt SELF --as SELF` pressed the interrupt keys into the caller's own pane. `restart SELF --wait MS` would also have quit the caller if the command outlived its turn. Round 2 (#0c6835, D1) dropped the first fix's exemption for a pane whose record names another thread, because that record may be stale.
+
+Known limit: the rule is only as current as herdr's records. A stale record can still match a thread that has since moved to another pane on the shared app-server. Then the command is taken for the seat whose pane holds the stale record.
+4. Without `CODEX_THREAD_ID`, nothing changes.
+
+`--as NAME` still settles the sender as before. It does not give the command a pane, so the guards follow item 3. `doctor` adds `info caller: by Codex thread …` when the rule applied.
+
+### 38.3 Code, invariants and tests
+
+`context.detect_invocation` notes the thread; `context.preflight`/`resolve_caller` applies the rule from the `agent list` it reads and skips `pane current` when the rule applied; `messages.caller_record` and `mailroom`'s caller lookups take the invocation's pane, no longer `env["HERDR_PANE_ID"]` directly, so they cannot bypass it. No new herdr command (one `agent list` the command already runs, or one more where none ran yet), no key, no prompt path. Invariant 6 and 23.3 gain a sentence each: under Codex the caller's pane is the pane of its thread. The board's `z` (`tui.py`) ignores `HERDR_PANE_ID` under the thread and zooms the recorded watch pane. Under a thread, the invariant 6 oracle in `tests/support.py` holds a set of panes: the matching one, or else every pane that could be the caller's (item 3). The harness fails any start, key or quit prompt that reaches one of them.
+
+Tests, fake herdr (agent records with `agent_session`, an environment with `CODEX_THREAD_ID` and a `HERDR_PANE_ID` naming another seat of the same fleet):
+- `send` without `--as` uses the thread's seat as the sender, the reason names both panes, and no `pane current` runs;
+- an unknown thread fails closed (usage error, the reason, nothing written);
+- the same for a thread on several panes;
+- `--as` still names the sender;
+- `restart` of the caller's own seat is refused, and `restart` of the seat whose pane `HERDR_PANE_ID` named goes ahead;
+- `up --me NAME` adopts the thread's pane;
+- `up` with no `workspace` key uses the thread's workspace, and an unknown thread stops it;
+- `inbox` and `ack` without `--as` act for the thread's seat;
+- a handover request is accepted for the thread's own seat;
+- a plugin action with `CODEX_THREAD_ID` in its environment ignores it;
+- with an unknown thread: `interrupt SELF --as SELF` on a working seat is refused and sends no key; `restart SELF --wait 1000` on an idle seat is refused; `restart`, `swap`, `swap --fallback` and `down` of a Codex seat without a session record are refused, and so is a Codex seat whose record names another thread; with several matches, every live Codex seat is refused; a Claude seat stays reachable in both cases;
+- `ack --older-than` and `tile` give item 3's wording;
+- no `CODEX_THREAD_ID` gives today's behaviour, and the existing tests stand.
+
+### 38.4 Version and documents
+
+0.19.3 in `herdr-plugin.toml` and `herdr_fleet/__init__.py`. AGENTS.md's architecture paragraph says where the caller's pane comes from under Codex. README's Messages section, where it says who the sender is, says the same, with the `--as` advice. `docs/testing.md` lists `tests/test_section38.py`.
+
+### 38.5 Amendments from the build
+
+- **Invariant and sender clarification.** The designer added section 38's caller-pane sentences to invariant 6 and section 23.3.
+- **Claude hooks under a Codex command.** `inbox --hook` returns silently without a Herdr lookup or mailbox access when the CLI Codex rule applies. A hook is Claude Code's path; resolving the inherited pane there could consume another seat's mail. Other hook invocations retain their existing path.
+- **Agent-list reuse.** `preflight` returns the list it read, and `send` uses it for recipient resolution as well as caller resolution. Pull inbox lookup reads one list only when the CLI Codex rule applies; explicit `inbox --as` remains offline. Doctor reuses its existing server-check list.
+- **Clock-relative test fixtures.** The Codex limit line is generated two days after its test clock in the provider's dated format, still exercising `parse_reset`; Claude's daily reset is six hours ahead. Allowance reset epochs, rollout timestamps and state-age fixtures follow the clock, and worktree age uses a commit two weeks earlier. Fixed dates remain for frozen-clock timer, TTL, stale-debt, calendar and parsing cases, and for non-expiring serialization or metadata fixtures; those do not expire against the wall clock.
+
+### 38.6 Verification (designer, 5 November 2026)
+
+These checks ran live on the working tree (herdr 0.9.5, Codex 0.166). The working-tree CLI was run with a simulated environment: `CODEX_THREAD_ID` set, and `HERDR_PANE_ID` naming another seat's pane, as a command run in the shared app-server inherits. Every command was read-only or a dry run, and neither message log changed. One scratch fleet had two seats in their own workspace: a Codex seat on the shared app-server with no herdr session record, and a Claude Haiku seat. The development fleet was used too.
+
+- **Session records.** Codex seats started fresh, or restored by herdr, carry an `agent_session` record with source `herdr:codex`. Only a TUI attached to the app-server afterwards has none.
+- **Known thread.** The thread was a real seat's recorded thread, and `HERDR_PANE_ID` named a second seat's pane.
+  - `doctor` printed `info caller: by Codex thread …: <thread's pane> (by its Codex thread; HERDR_PANE_ID <other pane> is another pane)`.
+  - `send --dry-run` named the thread's seat as the sender. 0.19.2, with the same environment, named the other seat.
+  - `inbox --drop --dry-run --as <other seat>` was refused. 0.19.2 allowed it.
+  - `restart <thread's seat> --dry-run` was refused as the caller's own agent. `restart <other seat> --dry-run` was refused only because that seat was working.
+- **Unknown thread.**
+  - `doctor` printed the 38.2 reason.
+  - `send`, `send --dry-run`, `inbox` and `ack` stopped with exit 2, the `--as` guidance and the reason, and wrote nothing.
+  - `up --me` stopped with the item 3 wording.
+  - After the fix rounds, `restart` and `swap` were refused with `may be the caller's own agent (…)` for the record-less Codex seat, which was blocked, so the refusal came before the state check. They were refused too for a Codex seat whose record names another thread. `restart` of the Claude seat went ahead (dry run). That seat's pane was the one `HERDR_PANE_ID` named, so 0.19.2 would have refused it as the caller's own.
+  - `send --as owner --dry-run` went ahead.
+- **A failover along the way.** Mid-release, the Kimi builder hit its 5-hour limit on its first turn of the brief. `swap NAME --fallback` moved it to Codex in one command, and Codex built the section.
+
+**Not verified live:**
+- `down` and `interrupt` of a possible caller: neither has a dry run, and a real run would quit the seat or press keys into it;
+- `--wait` and the no-names forms;
+- a command run from inside the app-server by a real seat: the scratch seat's command stopped at Codex's own sandbox prompt, which was not answered.
 
 The fake covers each of these.

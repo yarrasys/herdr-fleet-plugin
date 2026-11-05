@@ -6,6 +6,7 @@ tests also assert invariant 8: nothing fetches, prunes or writes."""
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import shutil
@@ -24,7 +25,8 @@ class Worktrees(GitCase):
                    ("wt-merged", "wt-new", "wt-detached", "wt-gone", "wt-locked")}
         self.git("worktree", "add", "-q", "-b", "slice/merged", self.wt["wt-merged"])
         self.git("worktree", "add", "-q", "-b", "slice/new", self.wt["wt-new"])
-        self.commit("work in progress", cwd=self.wt["wt-new"], date="2026-01-01T00:00:00+00:00")
+        old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
+        self.commit("work in progress", cwd=self.wt["wt-new"], date=old.isoformat())
         for name in ("a.txt", "b.txt"):
             with open(os.path.join(self.wt["wt-new"], name), "w") as handle:
                 handle.write("dirty\n")

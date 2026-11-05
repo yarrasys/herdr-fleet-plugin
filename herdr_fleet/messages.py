@@ -779,11 +779,12 @@ def caller_record(ctx: Ctx, as_name: Optional[str]) -> Tuple[str, Dict]:
         ctx.identity_reason = "owner outside Herdr"
         return OWNER, {}
     guidance = "cannot establish caller identity; pass --as NAME (or --as owner explicitly)"
-    if not ctx.env.get("HERDR_PANE_ID"):
+    inv = ctx.invocation
+    if not inv.codex_thread and not ctx.env.get("HERDR_PANE_ID"):
         raise UsageError(guidance + ": caller pane is missing (focused-pane context is not caller identity)")
-    pane = ctx.invocation.pane_id
+    pane = inv.pane_id
     if not pane:
-        raise UsageError(guidance + ": caller pane is missing")
+        raise UsageError(guidance + ": " + (inv.caller_reason or "caller pane is missing"))
     try:
         record = ctx.herdr.agent_get(pane)
     except HerdrError as exc:
@@ -793,6 +794,8 @@ def caller_record(ctx: Ctx, as_name: Optional[str]) -> Tuple[str, Dict]:
     name = record.get("name")
     if name:
         ctx.identity_reason = "named caller in %s" % pane
+        if inv.codex_thread:
+            ctx.identity_reason += " (%s)" % inv.caller_reason
         return str(name), record
     if not record.get("agent"):
         try:
@@ -923,8 +926,7 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
     owner_only = bool(names) and not all_seats and all(n == OWNER for n in names)
     agents: List[Dict] = []
     if not (owner_only and not ctx.inside_herdr()):  # a message to the owner may queue outside herdr
-        preflight(ctx)
-        agents = ctx.herdr.agent_list()
+        agents = preflight(ctx)
     sender = resolve_sender(ctx, as_name)
     if all_seats:
         live = {a.get("name") for a in agents}
@@ -1370,6 +1372,9 @@ def op_ack(ctx: Ctx, names: Sequence[str], all_owed: bool = False, as_name: Opti
     if bulk:  # design 33.4: the owner's only, found by the lookup whatever --as says
         if ctx.inside_herdr():
             preflight(ctx)
+        if ctx.invocation.codex_thread and not ctx.invocation.pane_id:
+            raise UsageError("%s; run ack --older-than from the owner's shell; bulk ack ignores --as"
+                             % ctx.invocation.caller_reason)
         if resolve_sender(ctx, None) != OWNER:
             raise UsageError("closing others' debts in bulk is the owner's; ack #id --reason TEXT closes one")
         caller = OWNER

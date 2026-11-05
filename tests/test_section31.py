@@ -14,7 +14,7 @@ from unittest import mock
 
 import fake_herdr
 from support import CALLER_PANE, LiveFleet
-from herdr_fleet import build_identity, crossfleet, gitinfo, inbox, mailroom, messages, watch
+from herdr_fleet import __version__, build_identity, crossfleet, gitinfo, inbox, mailroom, messages, watch
 from test_inbox import put, log_entries
 from test_section24 import BoardCase
 
@@ -615,7 +615,7 @@ class BuildIdentity(unittest.TestCase):
             second = build_identity.current()
             self.assertEqual(first, second)
             self.assertIsNone(first["commit"])
-            self.assertEqual(first["version"], "0.19.2")
+            self.assertEqual(first["version"], __version__)
             self.assertEqual(git.call_count, 1)
 
     def test_only_full_checkout_commit_is_retained_and_ancestor_git_is_not_invented(self):

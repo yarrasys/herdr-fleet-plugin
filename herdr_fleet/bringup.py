@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Sequence
 
-from herdr_fleet.context import Ctx, OpError, Report
+from herdr_fleet.context import Ctx, OpError, Report, UsageError, caller_panes
 from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, has_agent, render_cmd, start_argv, workspace_create_argv
 from herdr_fleet.contacts import contacts_block
@@ -42,6 +42,9 @@ def require_caller_context(ctx: Ctx) -> None:
     """A fleet without ``workspace`` lives beside the caller, so it needs one."""
     inv = ctx.invocation
     if not ctx.fleet.workspace and (not inv.workspace_id or not inv.pane_id):
+        if inv.codex_thread:
+            raise UsageError("%s; set workspace in the fleet file or run from the fleet's own pane"
+                             % inv.caller_reason)
         raise OpError("the fleet file sets no workspace, and this was not run from a herdr pane "
                       "(HERDR_WORKSPACE_ID and HERDR_PANE_ID are unset)")
 
@@ -143,7 +146,7 @@ def start_claimed(ctx: Ctx, seat: Seat, claim: Claim, placed: Placed, report: Re
         pane, created = placed[seat.name]
     else:
         return ""
-    if pane == ctx.invocation.pane_id:
+    if pane in caller_panes(ctx):
         report.add(seat.name, "refused", "will not start an agent in the caller's own pane %s" % pane, "fail")
         return ""
     return start_seat(ctx, seat, str(pane), created, report)

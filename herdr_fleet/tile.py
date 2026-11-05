@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from herdr_fleet import labels, watchpane
-from herdr_fleet.context import Ctx, OpError, Report
+from herdr_fleet.context import Ctx, OpError, Report, UsageError
 from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, pane_move_argv, pane_park_argv, render_cmd
 from herdr_fleet.layout import STRIP, band_plan, band_ratio, band_warning, describe_shape, grid_plan, placeholder
@@ -61,6 +61,9 @@ def fleet_workspace(ctx: Ctx) -> str:
     fleet, state, inv = ctx.fleet, ctx.state, ctx.invocation
     if not fleet.workspace:
         if not inv.workspace_id:
+            if inv.codex_thread:
+                raise UsageError("%s; set workspace in the fleet file or run from the fleet's own pane"
+                                 % inv.caller_reason)
             raise OpError("the fleet file sets no workspace, and this was not run from a herdr pane")
         return inv.workspace_id
     ids = [str(w.get("workspace_id")) for w in ctx.herdr.workspace_list() if w.get("label") == fleet.workspace]

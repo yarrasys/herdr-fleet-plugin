@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, TextIO, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Set, TextIO, Tuple
 
 from herdr_fleet import MIN_HERDR_VERSION, PLUGIN_ID
 from herdr_fleet.fleetfile import (Fleet, FleetError, apply_failover, find_fleet_file, load_fleet, load_toml,
@@ -42,6 +42,8 @@ class Invocation:
     workspace_id: Optional[str]
     mode: str                   # cli | action | pane
     context: Dict = field(default_factory=dict)
+    codex_thread: Optional[str] = None  # CLI tools may inherit a shared app-server's pane (38)
+    caller_reason: Optional[str] = None
 
 
 @dataclass
@@ -146,7 +148,11 @@ def detect_invocation(env: Mapping[str, str], herdr: Herdr, cwd: str) -> Invocat
     directory = cwd
     if mode == "action":  # actions run in the plugin root; discover from the focused pane
         directory = focused_cwd(herdr, context, pane) or directory
-    return Invocation(cwd=directory, pane_id=pane, workspace_id=workspace, mode=mode, context=context)
+    thread = env.get("CODEX_THREAD_ID") if mode == "cli" else None
+    if thread:
+        pane, workspace = None, None  # never expose the daemon's inherited pane, even before resolution
+    return Invocation(cwd=directory, pane_id=pane, workspace_id=workspace, mode=mode, context=context,
+                      codex_thread=thread)
 
 
 def pane_cwd(herdr: Herdr, pane: Optional[str]) -> Optional[str]:
@@ -178,6 +184,7 @@ class Ctx:
         self._fleet: Optional[Fleet] = None
         self._state: Optional[State] = None
         self._config: Optional[PluginConfig] = None
+        self._caller_agents: List[Dict] = []  # the thread lookup's snapshot, including ambiguous callers (38)
         self.limited_quit: set = set()  # design 35.6: seats whose limit a fresh read confirmed this command
         self.failed_start_notices: Optional[List[Tuple[str, str]]] = None  # 37.2: fallback collects these
         self.keys_allowed = True  # design 23.7: a popup (the `manage` menu) never presses a key
@@ -275,34 +282,69 @@ class Ctx:
             save_state(self._state)
 
 
-def preflight(ctx: Ctx, caller: bool = True) -> None:
+def preflight(ctx: Ctx, caller: bool = True) -> List[Dict]:
     """Common preconditions (design section 4): inside herdr, reachable, new enough.
     ``caller=False`` skips the caller lookup (``watch`` has no use for the caller's pane)."""
     if not ctx.inside_herdr():
         raise OpError("not running inside Herdr (HERDR_ENV=1 or HERDR_BIN_PATH is required)")
-    ctx.herdr.agent_list()
+    agents = ctx.herdr.agent_list()
     version = ctx.herdr.version()
     if version is None or version < MIN_HERDR_VERSION:
         found = ".".join(str(v) for v in version) if version else "unknown"
         raise OpError("herdr %s is too old; herdr-fleet needs %s or newer"
                       % (found, ".".join(str(v) for v in MIN_HERDR_VERSION)))
-    if caller and ctx.env.get("HERDR_PANE_ID"):
-        resolve_caller(ctx)
+    if caller:
+        resolve_caller(ctx, agents)
+    return agents
 
 
-def resolve_caller(ctx: Ctx) -> None:
-    """Use the caller's current pane id (and workspace) from ``pane current --current``,
-    so the caller-pane guards hold after ``--join`` or a hand move made the inherited
-    HERDR_PANE_ID stale. Any error keeps HERDR_PANE_ID."""
+def resolve_caller(ctx: Ctx, agents: Optional[List[Dict]] = None) -> None:
+    """Design 38: CLI Codex tools use their thread's live agent, never the daemon's
+    inherited pane. Other callers keep the current-pane lookup, including after a move.
+    Preflight supplies its agent list; pull inboxes read one here instead."""
+    inv = ctx.invocation
+    if inv.codex_thread:
+        inv.pane_id, inv.workspace_id = None, None
+        inv.caller_reason = "a Codex command whose thread herdr does not know"
+        records = agents if agents is not None else ctx.herdr.agent_list()
+        ctx._caller_agents = records
+        found = [a for a in records if isinstance(a.get("agent_session"), dict)
+                 and a["agent_session"].get("source") == "herdr:codex"
+                 and a["agent_session"].get("value") == inv.codex_thread]
+        if len(found) == 1:
+            inv.pane_id = found[0].get("pane_id") or None
+            inv.workspace_id = found[0].get("workspace_id") or None
+            if inv.pane_id:
+                inv.caller_reason = "by its Codex thread"
+                inherited = ctx.env.get("HERDR_PANE_ID")
+                if inherited and inherited != inv.pane_id:
+                    inv.caller_reason += "; HERDR_PANE_ID %s is another pane" % inherited
+        elif len(found) > 1:
+            inv.caller_reason = "a Codex command whose thread herdr records on several panes"
+        return
+    if not ctx.env.get("HERDR_PANE_ID"):
+        return
     try:
         info = ctx.herdr.pane_current()
     except HerdrError:
         return
     pane = info.get("pane_id")
     if pane:
-        inv = ctx.invocation
         inv.pane_id = str(pane)
         inv.workspace_id = str(info.get("workspace_id") or inv.workspace_id or "") or None
+
+
+def caller_panes(ctx: Ctx, agents: Optional[Sequence[Dict]] = None) -> Set[str]:
+    """Panes the own-seat guards must protect (38.2). An unresolved thread protects
+    every live Codex pane: even a session naming another thread may be stale.
+    Explicit sender overrides do not narrow this set. No Herdr command runs here."""
+    inv = ctx.invocation
+    if inv.pane_id:
+        return {inv.pane_id}
+    if not inv.codex_thread:
+        return set()
+    records = agents if agents is not None else ctx._caller_agents
+    return {str(a["pane_id"]) for a in records if a.get("agent") == "codex" and a.get("pane_id")}
 
 
 def load_config(env: Mapping[str, str], herdr: Herdr) -> PluginConfig:
