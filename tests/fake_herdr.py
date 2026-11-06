@@ -222,11 +222,12 @@ def put_agent(world: Dict, pane: str, kind: str, name: Optional[str] = None, sta
 
 # The prompt glyphs and placeholders as live screens show them (herdr 0.9.5, 21 Oct 2026):
 # Claude Code `❯` (older builds `>`), Codex `› Ask Codex to do anything`, Antigravity `>`.
-GLYPHS = {"claude": ("\u276f", ">"), "codex": ("\u203a",), "agy": (">",)}
+GLYPHS = {"claude": ("\u276f", ">"), "codex": ("\u203a",), "agy": (">",), "kimi": (">",)}
+BOXED = ("kimi",)
 PLACEHOLDERS = {"codex": "Ask Codex to do anything"}
 RULE = "\u2500" * 60
 STATUS = {"claude": "  ? for shortcuts", "codex": "  100% context left \u00b7 ? for shortcuts",
-          "agy": "  gemini-3-pro \u00b7 /help"}
+          "agy": "  gemini-3-pro \u00b7 /help", "kimi": "  agent (k3) \u00b7 idle"}
 DIALOG = ["\u256d" + "\u2500" * 40 + "\u256e",
           "\u2502 Bash command                           \u2502",
           "\u2502   rm -rf build                         \u2502",
@@ -238,10 +239,16 @@ DIALOG = ["\u256d" + "\u2500" * 40 + "\u256e",
 
 def prompt_screen(kind: str, typed: str = "") -> str:
     """A screen tail with the kind's prompt line holding ``typed`` (empty: the empty line,
-    with Codex's placeholder)."""
+    with Codex's placeholder). Kimi's prompt is its input box (39.2)."""
     glyph = GLYPHS.get(kind, (">",))[0]
     body = typed or PLACEHOLDERS.get(kind, "")
     line = (glyph + " " + body) if body else glyph
+    if kind in BOXED:
+        line = "\u2502 " + line + " "
+        line += " " * max(0, 58 - len(line)) + "\u2502"
+        return "\n".join(["\u23fa Done.", "", "\u256d" + "\u2500" * 58 + "\u256e", line,
+                          "\u2570" + "\u2500" * 58 + "\u256f", STATUS.get(kind, "  ready"),
+                          "  context: 12k/256k"]) + "\n"
     return "\n".join(["\u23fa Done.", "", RULE, line, RULE, STATUS.get(kind, "  ready")]) + "\n"
 
 
@@ -327,9 +334,24 @@ def type_in(world: Dict, pane: str, text: str) -> None:
     world.setdefault("screens", {})[pane] = prompt_screen(agent.get("agent", "claude"), text)
 
 
+KIMI_IDLE_MENU = "\n".join([
+    RULE,
+    "This session has been idle for 43m and is ~300k tokens.",
+    "\u2191\u2193 navigate \u00b7 Enter select \u00b7 Esc cancel",
+    "Cache expired \u2014 compacting preserves the conversation.",
+    "\u276f Compact and continue",
+    "  Start a new session",
+    "  Continue as-is",
+    "  Don't ask me again",
+    RULE,
+]) + "\n"
+
+
 def show_dialog(world: Dict, pane: str) -> None:
-    """A dialog is on screen (a permission question): no prompt line among the last lines."""
-    world.setdefault("screens", {})[pane] = "\n".join(["\u23fa Bash(rm -rf build)", ""] + DIALOG) + "\n"
+    """A dialog is on screen: Kimi's idle-cache menu, else a permission question."""
+    agent = world["panes"][pane].get("agent") or {}
+    world.setdefault("screens", {})[pane] = (KIMI_IDLE_MENU if agent.get("agent") == "kimi" else
+                                               "\n".join(["\u23fa Bash(rm -rf build)", ""] + DIALOG) + "\n")
 
 
 # Design 23 facts: Claude Code's confirmation after `/exit` with background work open, as a
@@ -456,15 +478,21 @@ def unfaint(line: str) -> str:
 
 
 def prompt_of(kind: str, text: str) -> Optional[str]:
-    """The text on the last prompt line of ``text`` for ``kind`` (this module's own glyph
-    table), or None when no line starts with the kind's glyph. Escapes are ignored, and for
-    a kind in FAINT so is every faint character (design 32.8)."""
+    """The fake's independent prompt-line judgment, including Kimi's required box."""
     found = None
     for line in text.splitlines()[-12:]:
         stripped = plain(line).strip()
+        if kind in BOXED:
+            if not stripped.startswith(("\u2502", "\u2503")):
+                continue
+            stripped = stripped[1:].lstrip()
         for glyph in GLYPHS.get(kind, ()):
             if stripped.startswith(glyph):
                 body = plain(unfaint(line)).strip() if kind in FAINT else stripped
+                if kind in FAINT and kind in BOXED:
+                    body = body[1:].lstrip() if body.startswith(("\u2502", "\u2503")) else body
+                body = (body[:-1] if kind in BOXED and body.endswith(("\u2502", "\u2503")) else
+                        body.strip("\u2502\u2503")).strip()
                 found = body[len(glyph):].strip() if body.startswith(glyph) else body
                 break
     return found
@@ -518,18 +546,26 @@ def owner_typing(world: Dict, pane: str) -> bool:
 
 
 def clear_prompt(world: Dict, pane: str) -> None:
-    """Ctrl-U: the scripted screen's last prompt line loses its text (the glyph stays)."""
+    """Ctrl-U: the scripted screen's last prompt line loses its text, box included."""
     screens = world.get("screens") or {}
     agent = world["panes"][pane].get("agent") or {}
-    glyphs = GLYPHS.get(agent.get("agent", ""), ())
+    kind = agent.get("agent", "")
+    glyphs = GLYPHS.get(kind, ())
     if pane not in screens or not glyphs:
         return
     lines = screens[pane].split("\n")
     for index in range(len(lines) - 1, -1, -1):
-        stripped = lines[index].strip()
+        raw = lines[index]
+        stripped = raw.strip()
+        boxed = kind in BOXED
+        if boxed:
+            if not stripped.startswith(("\u2502", "\u2503")):
+                continue
+            stripped = stripped[1:].lstrip()
         glyph = next((g for g in glyphs if stripped.startswith(g)), None)
         if glyph is not None:
-            lines[index] = lines[index][:len(lines[index]) - len(lines[index].lstrip())] + glyph
+            indent = raw[:len(raw) - len(raw.lstrip())]
+            lines[index] = (indent + raw.strip()[0] + " " + glyph + " \u2502" if boxed else indent + glyph)
             break
     screens[pane] = "\n".join(lines)
 

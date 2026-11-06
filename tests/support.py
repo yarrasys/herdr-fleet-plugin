@@ -597,7 +597,9 @@ class KeysCheck:
             case.assertEqual(self.enters[name], 1, "a second enter for %s in one command" % name)
             return
         case.assertEqual(what, "interrupt", "%s sent keys: %s" % (command[:1], argv))
-        if "ctrl+u" in sent:  # design 23.11: one, alone, right after a read that showed text in the input
+        if "ctrl+u" in sent:  # design 23.11 and 39.2: never to a boxed kind
+            case.assertNotIn(str(info.get("kind") or ""), fake_herdr.BOXED,
+                             "ctrl+u reached a boxed kind: %s" % argv)
             case.assertEqual(sent, ["ctrl+u"], "ctrl+u with other keys: %s" % argv)
             case.assertTrue(self.text.get(argv[2]), "ctrl+u without an agent read showing text in %s's input"
                             % argv[2])

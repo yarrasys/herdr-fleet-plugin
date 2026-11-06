@@ -434,7 +434,7 @@ class EffectivePair(TierLive):
         self.assertRegex(out, r"quit sample-orchestrator/codex: /quit \(codex\)")
         self.assertRegex(out, r"quit sample-orchestrator/kimi: /exit \(kimi\)")
         self.assertRegex(out, r"quit sample-reviewer: /quit \(codex\)")
-        self.assertRegex(out, r"presence: no prompt glyph for kind kimi")
+        self.assertNotIn("presence: no prompt glyph for kind kimi", out)
 
 
 SCAN = int(watch.LIMIT_SCAN_S / watch.CYCLE_S) + 3   # watcher passes until its first look at the quiet seats
@@ -645,6 +645,13 @@ class Watcher(WatchCase, TierLive):
     def test_a_limit_after_a_release_is_a_new_episode_and_notifies_again(self):
         self.hold_ends()
         self.run_cli("deliver", "sample-dev")  # released; delivered; the limit line is still on the screen
+        entries = messages.read(self.repo)
+        for entry in entries:  # the prompt is old enough for the quiet-seat read (39.3)
+            if entry.get("to") == "sample-dev":
+                entry["time"] = limits.inbox.iso_local(limits.inbox.now_utc() - datetime.timedelta(minutes=10))
+        with open(messages.log_path(self.repo), "w", encoding="utf-8") as handle:
+            for entry in entries:
+                handle.write(json.dumps(entry) + "\n")
         fake_herdr.show_limit(self.world, "w2:p2", CLAUDE_LIMIT)
         self.status_of("w2:p2", "working")
         self.quiet("sample-dev", state="working")
@@ -1023,7 +1030,8 @@ class Fallback(TierLive):
         fake_herdr.put_agent(self.world, "w2:p2", "codex", "sample-dev", args=CODEX)
         self.put_state("sample-dev", kind="codex", args=CODEX)
         state = self.read_state()
-        state["codex_allowance"] = {"used_percent": 96.2, "resets_at": ALLOWANCE_RESET, "window_minutes": 10080}
+        state["codex_allowance"] = {"used_percent": 96.2, "resets_at": ALLOWANCE_RESET, "window_minutes": 10080,
+                                    "read_at": limits.inbox.iso_local(limits.inbox.now_utc())}
         self.write_state(state)
         self.write_fleet(TIERS.replace('prefer = ["claude", "kimi"]', 'prefer = ["codex", "claude"]')
                          .replace('extra_args = { kimi = ["--add-dir", "../shared"] }\n', ""))

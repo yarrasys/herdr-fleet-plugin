@@ -21,7 +21,7 @@ import os
 import shlex
 from typing import Callable, Dict, List, Optional, Sequence, Set, TextIO, Tuple
 
-from herdr_fleet import PLUGIN_ID, inbox, labels, limits, presence, watchpane
+from herdr_fleet import PLUGIN_ID, context_size, inbox, labels, limits, presence, watchpane
 from herdr_fleet import messages as messages_mod
 from herdr_fleet import state as state_mod
 from herdr_fleet.bringup import (claim_seat, ensure_seat, follow_pane, label_for, label_of, require_caller_context,
@@ -537,22 +537,48 @@ def _warn_still_limited(ctx: Ctx, seat: Seat, report: Report) -> None:
                                                            if when else "", seat.name))
 
 
+CODEX_ALLOWANCE_FRESH_S = 600.0  # the watcher's ALLOWANCE_READ_S (39.4)
+
+
+def fallback_allowance(ctx: Ctx) -> Optional[Dict]:
+    """The fresh state reading, else the newest account-wide rollout reading; never written here."""
+    recorded = ctx.state.data.get("codex_allowance")
+    if isinstance(recorded, dict) and recorded.get("used_percent") is not None:
+        read_at = inbox.parse_time(recorded.get("read_at"))
+        if read_at is not None:
+            age = (inbox.now_utc() - read_at).total_seconds()
+            if 0 <= age <= CODEX_ALLOWANCE_FRESH_S:
+                return dict(recorded)
+    return context_size.latest_allowance(ctx.env)
+
+
+def allowance_high(ctx: Ctx, reading: Optional[Dict]) -> bool:
+    """At or above the fleet's threshold before this reading's reset (39.4)."""
+    if not isinstance(reading, dict):
+        return False
+    used = reading.get("used_percent")
+    reset = limits.epoch_time(reading.get("resets_at"))
+    return (isinstance(used, (int, float)) and not isinstance(used, bool)
+            and used >= ctx.fleet.failover_at_percent and reset is not None and reset > inbox.now_utc())
+
+
+def allowance_words(reading: Dict) -> str:
+    minutes = reading.get("window_minutes")
+    window = {10080: "weekly", 300: "5-hour"}.get(minutes, "%d-minute" % minutes if minutes else "account")
+    return "codex at %d%% of the %s allowance until %s" % (
+        int(reading["used_percent"]), window, limits.reset_label(limits.epoch_time(reading.get("resets_at"))))
+
+
 def fallback_note(ctx: Ctx, seat: Seat, old: str, new: str, record: Optional[Dict], extra: Optional[str],
-                  failures: Sequence[Tuple[str, str]] = ()) -> str:
-    """The note that starts the failed-over session's kickoff (35.3): who it replaces and why, the
-    last request delivered to the seat, any earlier kinds that did not start (37.2), and a reminder
-    about the working tree; then ``--note``."""
-    if record and record.get("kind") == old and record.get("line"):
+                  failures: Sequence[Tuple[str, str]] = (), allowance: Optional[Dict] = None) -> str:
+    """The note that starts the failed-over session's kickoff (35.3, 39.5)."""
+    if limits.counts(record) and record.get("kind") == old and record.get("line"):
         why = '%s hit its usage limit ("%s")' % (old, record["line"])
+    elif old == "codex" and allowance_high(ctx, allowance):
+        why = "codex is at %d%% of its allowance (resets %s)" % (
+            int(allowance["used_percent"]), limits.reset_label(limits.epoch_time(allowance.get("resets_at"))))
     else:
-        allowance = (ctx.state.data.get("codex_allowance") or {}) if old == "codex" else {}
-        if allowance.get("used_percent") is not None:
-            why = "codex is at %d%% of its allowance%s" % (int(allowance["used_percent"]),
-                                                             " (resets %s)" % limits.reset_label(
-                                                                 limits.epoch_time(allowance.get("resets_at")))
-                                                             if allowance.get("resets_at") else "")
-        else:
-            why = "the owner asked for the fallback of %s with `swap %s --fallback`" % (old, seat.name)
+        why = "the owner asked for the fallback of %s with `swap %s --fallback`" % (old, seat.name)
     lines = ["Failover: %s was running %s; this session runs %s because %s." % (seat.name, old, new, why)]
     last = messages_mod.last_request(ctx.fleet.repo, seat.name)
     if last:
@@ -566,10 +592,7 @@ def fallback_note(ctx: Ctx, seat: Seat, old: str, new: str, record: Optional[Dic
 
 
 def _swap_fallback(ctx: Ctx, names: Sequence[str], note: Optional[str], wait_ms: Optional[int]) -> Report:
-    """Design 35.3, 35.6 and 37.2: ``swap [NAME...] --fallback``. Each named tier seat, one at a time,
-    tries its free ``prefer`` kinds in order until one starts; a failed start is reported and the next
-    kind follows in the same pane. A started seat is briefed with the failover note and records
-    ``failover``. With no names, every tier seat the state marks limited is covered."""
+    """Design 35.3, 35.6, 37.2 and 39.4: try each candidate until one starts."""
     report = Report("swap")
     refuse_unknown_kinds(ctx)
     prune(ctx)
@@ -596,16 +619,15 @@ def _swap_fallback(ctx: Ctx, names: Sequence[str], note: Optional[str], wait_ms:
         plan = _fallback_plan(ctx, seat, live.get(seat.name), agents, explicit, report)
         if plan is not None:
             plans.append((seat,) + plan)
-    for seat, old, choices, record in plans:
-        _fallback_one(ctx, seat, old, choices, record, note, wait_ms, report)
+    for seat, old, choices, record, allowance in plans:
+        _fallback_one(ctx, seat, old, choices, record, note, wait_ms, report, allowance)
     labels.apply(ctx, None, report)
     return report
 
 
 def _fallback_plan(ctx: Ctx, seat: Seat, agent: Optional[Dict], agents: Dict[str, Dict], explicit: bool,
-                   report: Report) -> Optional[Tuple[str, List[str], Optional[Dict]]]:
-    """The kind a tier seat runs and every candidate in order (35.3, 37.2), or the usage error (an
-    explicit name) or report line (the all-seats form) saying why not."""
+                   report: Report) -> Optional[Tuple[str, List[str], Optional[Dict], Optional[Dict]]]:
+    """The kind a tier seat runs and every candidate in order (35.3, 37.2, 39.4)."""
 
     def refuse(text: str) -> None:
         if explicit:
@@ -627,7 +649,10 @@ def _fallback_plan(ctx: Ctx, seat: Seat, agent: Optional[Dict], agents: Dict[str
                    "%s%s" % (k, _reset_words(agents, k)) for k in others))
         refuse("%s: no fallback available: %s" % (seat.name, why))
         return None
-    return running, choices, agents.get(seat.name, {}).get("limited")
+    allowance = fallback_allowance(ctx) if "codex" in choices or running == "codex" else None
+    if "codex" in choices and allowance_high(ctx, allowance):
+        choices = [kind for kind in choices if kind != "codex"] + ["codex"]
+    return running, choices, agents.get(seat.name, {}).get("limited"), allowance
 
 
 def _start_failed_at_shell(ctx: Ctx, seat: Seat, attempt: Report) -> bool:
@@ -658,15 +683,23 @@ def _start_cause(detail: str) -> str:
 
 
 def _fallback_one(ctx: Ctx, seat: Seat, old: str, choices: Sequence[str], record: Optional[Dict],
-                  note: Optional[str], wait_ms: Optional[int], report: Report) -> None:
+                  note: Optional[str], wait_ms: Optional[int], report: Report,
+                  allowance: Optional[Dict] = None) -> None:
     before = (ctx.state.entry(seat.name) or {}).get("started_at")
     previous = seat.kind
     failures: List[Tuple[str, str]] = []
     for index, new in enumerate(choices):
-        full_note = fallback_note(ctx, seat, old, new, record, note, failures)
+        full_note = fallback_note(ctx, seat, old, new, record, note, failures, allowance)
         seat.use(new)  # every reader of the seat sees this candidate from here on (35.1)
         if index == 0:
-            report.add(seat.name, "fallback", "%s -> %s%s" % (old, new, " (limit recorded)" if limits.counts(record) else ""))
+            reasons = []
+            if limits.counts(record):
+                reasons.append("limit recorded")
+            if "codex" in choices and allowance_high(ctx, allowance):
+                reason = allowance_words(allowance)
+                reasons.append(reason if new == "codex" else reason + ", tried last")
+            suffix = " (%s)" % "; ".join(reasons) if reasons else ""
+            report.add(seat.name, "fallback", "%s -> %s%s" % (old, new, suffix))
         collecting = ctx.failed_start_notices
         ctx.failed_start_notices = []
         try:
@@ -682,7 +715,7 @@ def _fallback_one(ctx: Ctx, seat: Seat, old: str, choices: Sequence[str], record
             report.extend(attempt)
             for title, detail in notices:
                 ctx.notify(title, detail, "request")
-            why = (record or {}).get("line") if (record or {}).get("kind") == old else None
+            why = ((record or {}).get("line") if limits.counts(record) and record.get("kind") == old else None)
             ctx.state.update(seat.name, failover={"from": old, "to": new, "at": now_iso(),
                                                   "reason": str(why or "swap --fallback")[:200]})
             ctx.save()
@@ -995,13 +1028,12 @@ def _input_line(ctx: Ctx, name: str, kind: str) -> Optional[str]:
 
 
 def _clear_input(ctx: Ctx, name: str, kind: str) -> Optional[str]:
-    """Design 23.11: after an interrupt Claude Code may put the interrupted prompt back into
-    the input line, where the next paste would join it. Read the line; when it holds text,
-    press ``ctrl+u`` once (the only place that key is sent) and read again. Returns None
-    (nothing to clear, or a kind whose line cannot be read), ``cleared``, ``held`` (text is
-    still there after the key) or ``untouched`` (the key itself failed)."""
+    """Design 23.11 and 39.2: clear restored text only for non-boxed kinds verified live.
+    A boxed kind with restored text returns ``held`` without pressing Ctrl-U."""
     if not presence.checkable(kind) or not presence.holds_text(_input_line(ctx, name, kind), kind):
         return None
+    if presence.boxed_kind(kind):
+        return "held"
     try:
         ctx.herdr.agent_send_keys(name, ["ctrl+u"])
     except HerdrError:

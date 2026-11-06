@@ -10,7 +10,8 @@ type/source tags. No prompt, tool content, path or session id is returned or log
 Nothing under either provider's source root is written. Design 35.2 adds one more
 reading of the same Codex rollout, ``seat_allowance``: the latest ``rate_limits``
 record's ``primary.used_percent``, ``window_minutes`` and ``resets_at`` (numbers only),
-for the watcher's early warning; ``status`` shows it as one line.
+for the watcher's early warning; ``status`` shows it as one line. Design 39.4's
+``latest_allowance`` reads the newest rollout in the newest two date directories for fallback.
 """
 
 from __future__ import annotations
@@ -318,6 +319,19 @@ def context_label(info: Optional[Mapping], now: Optional[datetime.datetime] = No
         return label
     now = now or datetime.datetime.now(datetime.timezone.utc)
     return "%s (%s)" % (label, age_label((now - when).total_seconds()))
+
+
+def latest_allowance(env: Mapping[str, str]) -> Optional[Dict]:
+    """Design 39.4: the account reading in the newest rollout of the newest two date dirs."""
+    root = sessions_dir(env)
+    if "\0" in root:
+        return None
+    pattern = os.path.join(glob.escape(os.path.abspath(root)), "[0-9]" * 4, "[0-9]" * 2, "[0-9]" * 2)
+    days = sorted((path for path in glob.glob(pattern) if os.path.isdir(path)), reverse=True)[:2]
+    if not days:
+        return None
+    path = _newest([os.path.join(glob.escape(day), "rollout-*.jsonl") for day in days])
+    return last_codex_allowance(path) if path else None
 
 
 def seat_allowance(agent: Optional[Mapping], env: Mapping[str, str]) -> Optional[Dict]:

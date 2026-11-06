@@ -16,7 +16,7 @@ import difflib
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import List, Mapping, Optional, Sequence, Tuple
 
 GIT_TIMEOUT = 2.0
 DEFAULT_CANDIDATES = ("origin/main", "origin/master")
@@ -44,6 +44,14 @@ def run_git(cwd: str, args: Sequence[str], env: Optional[Mapping[str, str]] = No
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     return GitResult(proc.returncode, proc.stdout)
+
+
+def worktree_paths(cwd: str, env: Optional[Mapping[str, str]] = None) -> Optional[List[str]]:
+    """Every worktree path from ``git worktree list --porcelain``; None on error."""
+    result = run_git(cwd, ["worktree", "list", "--porcelain"], env)
+    if result is None or result.code != 0:
+        return None
+    return [line[len("worktree "):] for line in result.out.splitlines() if line.startswith("worktree ")]
 
 
 def current_branch(cwd: str, env: Optional[Mapping[str, str]] = None) -> str:

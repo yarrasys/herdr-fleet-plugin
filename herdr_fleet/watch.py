@@ -90,9 +90,10 @@ DELIVERY_GRACE_S = 60.0     # on exit, how long a delivery in flight may take to
 EXIT_GRACE_S = 1.0          # on exit, how long waiters blocked in `agent wait` are given
 BLOCKED_SCAN_S = 30.0       # with notify_blocked_after: how often `agent list` is read for blocked seats
 HOLD_RECHECK_S = 3.0        # design 21.2: while the owner types in a seat's pane, look again this often
+DIALOG_NOTIFY_S = 300.0     # design 39.2: one notification per dialog/menu hold this old
 EXPIRE_SWEEP_S = 300.0      # design 33.1: how often the watcher expires what is due in every mailbox
 LIMIT_SCAN_S = 300.0        # design 35.6: the seats' screens are looked at for a limit this often ...
-LIMIT_QUIET_S = 300.0       # ... each seat whose state has not changed for this long, once per unchanged state
+LIMIT_QUIET_S = 300.0       # ... state and last logged prompt both this old, once per pair (39.3)
 ALLOWANCE_READ_S = 600.0    # design 35.2: Codex's allowance is read from a rollout this often ...
 ALLOWANCE_FIRST_S = 60.0    # ... the first time this long after the watcher starts, so a quiet watcher stays quiet
 LOG_NAME = "watch.log"      # design 24.1: in board mode the lines go here (and to the footer)
@@ -418,7 +419,10 @@ class Watcher:
         self.events: "queue.Queue[str]" = queue.Queue()  # the threads post here; the main loop drains it
         self.holds: Dict[str, str] = {}          # mailbox -> the presence guard's detail, while held
         self.limit_holds: Dict[str, str] = {}    # design 35.2: mailbox -> why a limit holds it (shown as a hold)
-        self.limit_read: Dict[str, str] = {}      # seat -> the `since` of the state whose screen was read for a limit
+        self.limit_read: Dict[str, Tuple[str, str]] = {}  # seat -> (state since, last prompt) read for a limit
+        self.last_prompt: Dict[str, str] = {}     # 39.3: seat -> newest logged prompt's timestamp
+        self.prompt_log_offset = 0
+        self.prompt_log_signature: Optional[Tuple[int, int, int]] = None  # size, mtime, inode
         self.limit_said: Set[str] = set()        # "name kind at" of limit episodes and resets already notified
         self.next_limit_scan = ctx.clock.monotonic() + LIMIT_SCAN_S  # when a stuck-working seat is next looked at
         self.next_allowance = ctx.clock.monotonic() + ALLOWANCE_FIRST_S  # when Codex's allowance is next read
@@ -737,29 +741,69 @@ class Watcher:
         self.say(title)
         self.ctx.notify(title, "%s, %s limit hit at %s" % (seat.name, kind, limits.since_label(record)), "request")
 
+    def refresh_last_prompts(self) -> None:
+        """Design 39.3: advance through the append-only message log only when it changed.
+        Keep just the newest timestamp of text sent to each seat, never message content."""
+        path = os.path.join(self.repo, ".herdr", "messages.jsonl")
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return
+        signature = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+        if signature == self.prompt_log_signature:
+            return
+        if (stat.st_size < self.prompt_log_offset
+                or (self.prompt_log_signature is not None and self.prompt_log_signature[2] != stat.st_ino)):
+            self.prompt_log_offset = 0
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(self.prompt_log_offset)
+                data = handle.read()
+        except OSError:
+            return
+        self.prompt_log_signature = signature
+        complete = data.rfind(b"\n") + 1
+        self.prompt_log_offset += complete
+        for raw in data[:complete].splitlines():
+            try:
+                entry = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind")
+            prompted = (kind in ("delivered", "kickoff")
+                        or (kind == "send" and entry.get("delivery") in ("sent", "unconfirmed")))
+            name, when = entry.get("to"), entry.get("time")
+            if prompted and isinstance(name, str) and isinstance(when, str):
+                self.last_prompt[name] = when
+
     def scan_limits(self, live: Dict[str, Dict]) -> None:
-        """Design 35.6: every seat whose kind has limit patterns and whose state has not changed for
-        LIMIT_QUIET_S, whatever its queue, has its last twelve lines read once (``agent read``; the
-        plain ``pane read`` only when herdr answers ``agent_not_idle`` for a working seat) and
-        searched for the provider's limit line above its input. Each seat is read once per unchanged
-        state (``limit_read``), so it is read again only after its state changes. The lines are
-        kept nowhere. A seat already held is not read; blocked and unknown seats never are."""
+        """Design 35.6 and 39.3: read a quiet seat once per (state since, last prompt) pair.
+        Both must be LIMIT_QUIET_S old. The last twelve lines are searched for the provider's
+        limit line and kept nowhere. A seat already held is not read; blocked and unknown seats
+        never are."""
+        self.refresh_last_prompts()
         states = {n: str(a.get("agent_status") or "unknown") for n, a in live.items()}
         names = [s.name for s in self.ctx.fleet.seats if s.name in live]
         try:
             records = seen.observe(self.ctx, {n: states[n] for n in names})
         except Exception:  # noqa: BLE001 - a state file problem never stops the watcher
             return
+        now = inbox.now_utc()
         for name in names:
             agent = live[name]
             kind = str(agent.get("agent") or "")
             record = records.get(name) or {}
             age = seen.age_of(record, states[name])
+            prompted = inbox.parse_time(self.last_prompt.get(name))
+            prompt_age = (now - prompted).total_seconds() if prompted is not None else None
+            key = (str(record.get("since") or ""), self.last_prompt.get(name, ""))
             if (states[name] not in ("idle", "done", "working") or not limits.has_patterns(kind) or age is None
-                    or age < LIMIT_QUIET_S or self.limit_read.get(name) == record.get("since")
-                    or limits.holding(self.repo, name, kind) is not None):
+                    or age < LIMIT_QUIET_S or (prompt_age is not None and prompt_age < LIMIT_QUIET_S)
+                    or self.limit_read.get(name) == key or limits.holding(self.repo, name, kind) is not None):
                 continue
-            self.limit_read[name] = str(record.get("since"))
+            self.limit_read[name] = key
             try:
                 try:
                     screen = self.ctx.herdr.agent_read(name, LIMIT_SCREEN_LINES)
@@ -909,15 +953,36 @@ class Watcher:
         for idle or done again."""
         with self.cond:
             self.holds[name] = drop.detail
+        notified = False
+        dialog_since = self.ctx.clock.monotonic() if presence.is_dialog(drop.detail) else None
+        delay = self.blocked_after if self.blocked_after is not None else DIALOG_NOTIFY_S
         try:
             for line in timers.waiting_lines(drop.waiting, {}, [name]):
                 self.say(line)
             self.say("%s %s; %s, holding %d" % (name, drop.state or "idle", drop.detail, len(drop.waiting)))
             while not self.stopping:
                 self.ctx.clock.sleep(HOLD_RECHECK_S)
-                if self.stopping or not self.queued(name):  # stopped, or read or delivered meanwhile
+                waiting = self.queued(name)
+                if self.stopping or not waiting:  # stopped, or read or delivered meanwhile
                     return False
-                if presence.typing_at(self.ctx.herdr, drop.agent):
+                now = self.ctx.clock.monotonic()
+                if presence.is_dialog(drop.detail):
+                    if dialog_since is None:
+                        dialog_since = now
+                else:
+                    dialog_since = None
+                if not notified and dialog_since is not None and now - dialog_since >= delay:
+                    notified = True
+                    pane = str(drop.agent.get("pane_id") or "")
+                    title = "%s has a dialog or menu open (%s): %d queued wait" % (name, pane, len(waiting))
+                    self.say(title, error=True)
+                    self.ctx.notify(title, "answer or close it there; herdr-fleet sends it nothing until its input is back",
+                                    "request")
+                detail = presence.typing_at(self.ctx.herdr, drop.agent)
+                if detail:
+                    drop.detail = detail
+                    with self.cond:
+                        self.holds[name] = detail
                     continue
                 state = agent_state(self.ctx, target)
                 self.observe(name, state)

@@ -19,7 +19,7 @@ from herdr_fleet import PLUGIN_ROOT, __version__, labels
 from herdr_fleet.checks import collect_status, render_status, run_doctor
 from herdr_fleet.context import (EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, Ctx, OpError, Report,
                                  UsageError, preflight)
-from herdr_fleet.fleetfile import FleetError, find_fleet_file, load_fleet
+from herdr_fleet.fleetfile import FleetError, load_fleet
 from herdr_fleet.herdr import Herdr, HerdrError, Runner, describe, find_binary
 from herdr_fleet.menu import run_menu, wait_for_enter
 from herdr_fleet.ops import (PEEK_LINES, PEEK_SOURCES, op_down, op_go, op_install_cli, op_interrupt, op_kickoff,
@@ -417,7 +417,7 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
         from herdr_fleet.timers import inspect
         # Inspection is offline even when action-related environment variables leaked
         # into the shell. Fleet discovery here must never consult a focused pane.
-        ctx._fleet = load_fleet(find_fleet_file(ctx.cwd, ctx.file, ctx.env))
+        ctx._fleet = load_fleet(ctx.find_fleet(ctx.cwd))
         for warning in ctx._fleet.warnings:
             ctx.warn(warning)
         return inspect(ctx, args.names, args.next, args.dry_run, args.json)

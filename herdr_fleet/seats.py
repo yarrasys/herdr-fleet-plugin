@@ -101,14 +101,16 @@ LIMIT_SCREEN_LINES = 12                              # 35.2: `agent read NAME --
 LIMIT_BULLETS = ("\u23fa", "\u25cf", "\u2022")        # an assistant message starts with one of these
 
 # Design 21.2: the first non-blank character of each kind's prompt line, as `pane read`
-# prints it (Claude Code `❯`, older builds `>`; Codex `›`; Antigravity `>`), and the
+# prints it (Claude Code `❯`, older builds `>`; Codex `›`; Antigravity and Kimi `>`), and the
 # placeholder text an empty prompt line shows. A kind with no entry is not held while
 # the owner types (doctor says so).
 PROMPT_GLYPHS: Dict[str, Tuple[str, ...]] = {
     "claude": ("\u276f", ">"),
     "codex": ("\u203a",),
     "agy": (">",),
+    "kimi": (">",),
 }
+PROMPT_BOXED: Tuple[str, ...] = ("kimi",)  # 39.2: the glyph must follow a box vertical
 PROMPT_PLACEHOLDERS: Dict[str, Tuple[str, ...]] = {
     "codex": ("Ask Codex to do anything",),
 }

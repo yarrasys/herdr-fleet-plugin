@@ -184,6 +184,8 @@ class Ctx:
         self._fleet: Optional[Fleet] = None
         self._state: Optional[State] = None
         self._config: Optional[PluginConfig] = None
+        self.linked_worktree = False       # discovery switched to the main checkout (39.1)
+        self._worktree_noted: Set[str] = set()
         self._caller_agents: List[Dict] = []  # the thread lookup's snapshot, including ambiguous callers (38)
         self.limited_quit: set = set()  # design 35.6: seats whose limit a fresh read confirmed this command
         self.failed_start_notices: Optional[List[Tuple[str, str]]] = None  # 37.2: fallback collects these
@@ -248,10 +250,23 @@ class Ctx:
         self.apply_failover()
         return fleet
 
+    def find_fleet(self, start: str) -> str:
+        """Discover from ``start`` and note a linked-worktree switch once per command."""
+        switched: List[Tuple[str, str]] = []
+        path = find_fleet_file(start, self.file, self.env, switched)
+        for worktree, main in switched:
+            self.linked_worktree = True
+            if worktree not in self._worktree_noted:
+                self._worktree_noted.add(worktree)
+                self.warn("%s is a linked worktree; using the main checkout's fleet %s "
+                          "(--fleet %s selects the worktree's own)"
+                          % (os.path.dirname(os.path.dirname(worktree)), main, worktree))
+        return path
+
     def _find_fleet(self) -> str:
         inv = self.invocation
         try:
-            return find_fleet_file(inv.cwd, self.file, self.env)
+            return self.find_fleet(inv.cwd)
         except FleetError:
             # A plugin pane opened without --cwd starts in the plugin root:
             # fall back to the focused pane's directory.
@@ -259,7 +274,7 @@ class Ctx:
                         if inv.mode == "pane" else None)
             if not fallback or fallback == inv.cwd:
                 raise
-            return find_fleet_file(fallback, self.file, self.env)
+            return self.find_fleet(fallback)
 
     @property
     def state(self) -> State:

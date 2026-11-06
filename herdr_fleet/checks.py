@@ -15,6 +15,7 @@ only read (``gitinfo``), and ``status --context`` only reads transcripts
 from __future__ import annotations
 
 import datetime
+import glob
 import os
 import shlex
 import sys
@@ -446,6 +447,34 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
 Check = Tuple[str, str, str]  # (ok|warn|fail|skip|info, check name, detail)
 
 
+def stranded_mail(repo: str, env: Optional[Mapping[str, str]] = None) -> List[Check]:
+    """Design 39.1: queued files in linked worktrees no watcher delivers from."""
+    paths = gitinfo.worktree_paths(repo, env)
+    if not paths:
+        return []
+    found: List[Check] = []
+    for worktree in paths:
+        if os.path.realpath(worktree) == os.path.realpath(repo):
+            continue
+        herdr = os.path.join(worktree, ".herdr")
+        if os.path.exists(os.path.join(herdr, "fleet.state.json")):
+            continue
+        counts: Dict[str, int] = {}
+        pattern = os.path.join(glob.escape(herdr), "inbox", "*", "new", "*.md")
+        for path in glob.glob(pattern):
+            if os.path.isfile(path):
+                name = os.path.basename(os.path.dirname(os.path.dirname(path)))
+                counts[name] = counts.get(name, 0) + 1
+        if not counts:
+            continue
+        total = sum(counts.values())
+        names = ", ".join("%s %d" % (name, counts[name]) for name in sorted(counts))
+        found.append(("warn", "stranded mail", "%d queued in %s (%s); nothing delivers them: "
+                      "herdr-fleet inbox --fleet %s --as NAME --read"
+                      % (total, worktree, names, os.path.join(herdr, "fleet.toml"))))
+    return found
+
+
 def run_doctor(ctx: Ctx) -> List[Check]:
     """Every doctor check, in order. Never changes anything."""
     checks: List[Check] = []
@@ -463,6 +492,7 @@ def run_doctor(ctx: Ctx) -> List[Check]:
     for warning in fleet.warnings:
         add(("warn", "fleet file", warning))
     add(fleet_vs_git(fleet.path, fleet.repo, ctx.env))
+    checks.extend(stranded_mail(fleet.repo, ctx.env))
     _check_kinds(ctx, fleet, add)
     _check_files(fleet, add)
     for row in integration_rows(ctx.herdr, fleet.kinds()):

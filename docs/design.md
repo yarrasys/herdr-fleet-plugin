@@ -18,7 +18,7 @@ Plugin id `yarrasys.fleet`. Repository name `herdr-fleet` (two unrelated GitHub 
 
 ## 2. The fleet file
 
-Path: `<repo>/.herdr/fleet.toml`, committed. Discovery walks up from the invoking directory until a directory contains `.herdr/fleet.toml`; that directory is the repo root. `--file PATH` or `HERDR_FLEET_FILE` overrides discovery, and then the repo root is the directory holding the `.herdr` directory (or the file's directory when the file is elsewhere).
+Path: `<repo>/.herdr/fleet.toml`, committed. Discovery walks up from the invoking directory until a directory contains `.herdr/fleet.toml`; that directory is the repo root. `--file PATH` or `HERDR_FLEET_FILE` overrides discovery, and then the repo root is the directory holding the `.herdr` directory (or the file's directory when the file is elsewhere). In a linked Git worktree, discovery uses the main checkout's fleet file (39.1).
 
 Invoking directory: for the CLI, the current directory. For a manifest action or pane, the `cwd` of the focused pane from `herdr pane get $HERDR_PANE_ID` (the action runs with the plugin root as its own cwd, which is useless for discovery). When `HERDR_PANE_ID` is unset, read `focused_pane` from `HERDR_PLUGIN_CONTEXT_JSON`.
 
@@ -199,7 +199,7 @@ These are enforced in code and covered by tests:
 5. An agent is started only in a pane the check in section 6 reports as at a shell prompt (herdr also enforces this with `agent_pane_busy`).
 6. The caller's own pane is never started into; `--me` only renames. Under Codex the caller's pane is the pane of its thread, and when herdr cannot place the thread, every pane that could be the caller's counts as its own (38.2).
 7. Never run bare `herdr`.
-8. `worktrees`, the `fleet file vs git` check and `--context` are read-only: no `git fetch`, no `git worktree prune`, no write under either provider's transcript root (`~/.claude` or `~/.codex` by default, extended by section 29), and no herdr command beyond `agent list`/`agent get`.
+8. `worktrees`, the `fleet file vs git` check and `--context` are read-only: no `git fetch`, no `git worktree prune`, no write under either provider's transcript root (`~/.claude` or `~/.codex` by default, extended by section 29), and no herdr command beyond `agent list`/`agent get`. The same holds for `doctor`'s `stranded mail` check and for `swap --fallback`'s read of the Codex rollout numbers (39.1, 39.4).
 9. `--context` extracts usage numbers and timestamps only; no transcript content is ever surfaced.
 10. `ack` and `--fyi` only write the message log; `ack` sends nothing.
 11. Queued messages are delivered only to `idle` or `done` seats, only through `safe_prompt`, and only by a plugin command that a person, an agent's own tool call, or a watcher invoked. Nothing the plugin spawns runs in the background: `watch` is a foreground process in a pane the owner can see and close, never a detached one. The owner starts it, or `up` does, in a visible plugin pane recorded in the state file and closed by `down --close-panes` (amended by 19.2). (Since 0.10.0 the only exceptions are `send --now` and `deliver NAME --now`, which type a message ahead to a `working` seat with the queue in front, always through `safe_prompt`; the 18.3, 18.11 and 20.8 typed-ahead deliveries were withdrawn by section 21.1.) Since 0.17.0 a seat's own `restart NAME --handover` or `swap NAME --handover` opens one visible helper tab that waits for that seat's turn to end and then runs that restart or swap, and nothing else (32.5); a kickoff that could not be sent waits in the mailbox and is delivered like a `queue` message (32.6). Since 0.18.0 a queued message leaves `new/` undelivered only through its own ttl (18.4), the fleet's `fyi_ttl` for an FYI without one (33.1, also in the watcher's sweep), `--drop-inbox` (18.5), `inbox --drop` (33.3), a newer kickoff replacing a queued one (32.6), a timer retiring its own message (30), or the refusal of the `send --now` that wrote it; each is logged, and none of them prompts or presses anything. Since 0.19.0 there is one more exception, and it is the only one: `swap`, `restart`, `down` and `swap --fallback` may send the kind's quit command to a seat the state marks limited even when herdr reports it `working`, but only when a fresh read still shows the provider's limit line above its input and the input line is empty, only for that seat, and still through `safe_prompt` and the presence guard (35.6).
@@ -213,7 +213,7 @@ These are enforced in code and covered by tests:
 19. Before any text is sent to a seat, the plugin reads the target pane's prompt line, whatever the focus; if it holds text or is not on screen, nothing is sent (section 21.2, amended by 23.11: focus only words the reason). The check reads only the last lines of that pane to find the prompt line, keeps nothing, and decides nothing else from them.
 20. The plugin changes a pane's display name only for a pane that hosts one of the fleet's seats, and only to that seat's name or `label` (section 22.1); `pane rename` and `agent focus` are the only display commands it runs, neither reaches the agent, and `agent focus` is run only by `go` and the popup.
 21. Keys reach an agent only through `herdr agent send-keys`, only from the two paths of 23.7, only the keys those paths name (`enter` on the exit confirmation; the kind's interrupt keys; and, from `interrupt` alone, one `ctrl+u` to clear a prompt the interrupt put back, 23.11), only to a seat of this fleet that the plugin has just read the screen of, and never from the watcher, a popup, a dry run or any automatic path. `pane send-keys`, `pane send-text` and `pane run` stay refused.
-22. The watcher's board (sections 24 and 25) reads only what 24.2, 25.2 and 32.4 list; from a screen it shows a blocked seat's dialog lines, and a seat's last lines only on the owner's `p` key; it prompts nothing, sends no key, delivers only as the watcher may, and runs `agent focus` and `pane zoom` (on its own pane) only on a key or click of the owner. Since 0.19.0, for 35.6 alone, the watcher reads `agent read NAME --lines 12` of a seat that is idle, done or working, whose kind has limit patterns and whose state has not changed for 5 minutes, at most every 5 minutes and once per unchanged state (falling back to `pane read` only on `agent_not_idle`), searches the lines for a provider's limit message and keeps them nowhere, and reads the numbers of a Codex rollout's `rate_limits` record; it never reads a blocked or unknown seat for this.
+22. The watcher's board (sections 24 and 25) reads only what 24.2, 25.2 and 32.4 list; from a screen it shows a blocked seat's dialog lines, and a seat's last lines only on the owner's `p` key; it prompts nothing, sends no key, delivers only as the watcher may, and runs `agent focus` and `pane zoom` (on its own pane) only on a key or click of the owner. Since 0.19.0, for 35.6 alone, the watcher reads `agent read NAME --lines 12` of a seat that is idle, done or working, whose kind has limit patterns and whose state has not changed for 5 minutes, at most every 5 minutes, once per unchanged state and once more after each prompt the message log records for that seat (39.3) (falling back to `pane read` only on `agent_not_idle`), searches the lines for a provider's limit message and keeps them nowhere, and reads the numbers of a Codex rollout's `rate_limits` record; it never reads a blocked or unknown seat for this.
 
 Output: plugin commands print to stdout, which herdr shows nowhere, so when invoked as an action (`--notify` flag set by the manifest) the result summary also goes to `herdr notification show "<title>" --body "<text>" --sound done|request`. Blocked-at-startup seats always notify with `--sound request`.
 
@@ -2344,3 +2344,173 @@ These checks ran live on the working tree (herdr 0.9.5, Codex 0.166). The workin
 - a command run from inside the app-server by a real seat: the scratch seat's command stopped at Codex's own sandbox prompt, which was not answered.
 
 The fake covers each of these.
+
+## 39. Mail that reaches the live fleet, Kimi's input box, and a truer failover (0.19.4)
+
+Five gaps seen between 5 and 7 November 2026, each from a live fleet: a report sent from a Git worktree that never arrived, a brief typed into a Kimi menu, a Kimi limit the watcher missed, a failover onto a nearly used-up Codex, and a failover note that quoted an old limit.
+
+### 39.1 A linked worktree uses the main checkout's fleet
+
+**The fact.** A field report on 7 November: a builder ran `herdr-fleet send <coordinator>` from a linked Git worktree under `/tmp`. The repository commits `.herdr/fleet.toml`, so the worktree has its own copy, and discovery (section 2) stopped there. The worktree's directory became the fleet's root, the coordinator was working, and the message was queued in the worktree's `.herdr/inbox/`, where no watcher looks. It waited there four days, until the system's `/tmp` cleanup deleted the worktree. A scan of the owner's fleets found one more message stranded in another fleet's worktree since 24 October. Cross-fleet routing (section 31) has the same gap: `crossfleet.fleet_root` walks up from a destination agent's directory, so an agent working in a worktree is routed to that worktree's copy.
+
+**The rule.** Discovery that walks up (not `--fleet`, `--file` or `HERDR_FLEET_FILE`, which are used as given) checks the directory `D` where it found `.herdr/fleet.toml`:
+1. `D/.git` is a file `gitdir: X` (a linked worktree; `X` relative to `D` unless absolute), and `X/commondir` names the shared Git directory `C` (relative to `X` unless absolute). Two small file reads, no `git` command.
+2. When `C`'s last component is `.git`, the main checkout `M` is its parent. If `M` is not `D`, `M/.herdr/fleet.toml` is a file, and `D/.herdr/fleet.state.json` does not exist, the fleet is `M`'s, and its root is `M`. A state file means a fleet was brought up in the worktree itself (20.5: nothing else creates one), and that fleet keeps its own.
+3. Anything else keeps today's answer: no `.git` file, no `commondir` (a submodule), a common directory not named `.git` (a bare repository such as `proj.git`; a bare repository cloned into a directory literally named `.git` does switch, to the fleet file beside it, if there is one), a pointer that does not resolve, or no fleet file in the main checkout.
+
+Each command that switched says so once on stderr: `herdr-fleet: <D> is a linked worktree; using the main checkout's fleet <M>/.herdr/fleet.toml (--fleet <D>/.herdr/fleet.toml selects the worktree's own)`. `inbox --hook` stays silent, as on any error. `send`'s `selected fleet: … (discovered)` reads `(discovered from a linked worktree)`.
+
+The same rule runs where the plugin walks up on someone else's behalf:
+- `crossfleet.fleet_root`, so a destination agent working in a worktree of its fleet's repository is routed to that fleet's mailbox; an agent of this fleet working in its own worktree is then the same root, so it stays local;
+- `messages.fleet_flag` (33.5), so a printed `herdr-fleet inbox` command run from a worktree needs no `--fleet`;
+- the hook's fleet lookup (`mailroom._hook_seat`).
+
+**Mail already stranded.** `doctor` lists the repository's linked worktrees (`git worktree list`, read-only as invariant 8 says). For each worktree whose `.herdr/` has no state file but has queued messages (`inbox/*/new/*.md`), it warns: `warn stranded mail: 2 queued in <worktree> (sample-dev 1, sample-reviewer 1); nothing delivers them: herdr-fleet inbox --fleet <worktree>/.herdr/fleet.toml --as NAME --read`. It moves nothing.
+
+Section 2's discovery paragraph gains: "In a linked Git worktree, discovery uses the main checkout's fleet file (39.1)."
+
+### 39.2 Kimi's input box is checked
+
+**The facts.**
+- Kimi Code draws its input as a box: `╭───╮`, then `│ > ` with the cursor (a reverse-video blank) and blanks to a closing `│`, then `╰───╯`, then its mode and model line and `context: …`. Read live on 7 November. With text typed, the text follows `> `. No placeholder was seen in an empty box.
+- After a long idle, Kimi replaces the box with a menu (5 November): a rule, `This session has been idle for 43m and is ~300k tokens.`, `↑↓ navigate · Enter select · Esc cancel`, `Cache expired — …`, then `❯ Compact and continue`, `Start a new session`, `Continue as-is` and `Don't ask me again`, then a rule. herdr reports the seat `idle` the whole time. A brief sent then was typed into the menu, and the seat sat there for half an hour until the owner chose an option.
+- Kimi has had no entry in `seats.PROMPT_GLYPHS` since 0.18.0, so the presence guard (21.2) passed every Kimi seat unread (35.5 item 15).
+
+**The rule.**
+1. `seats.PROMPT_GLYPHS["kimi"] = (">",)`, and the new `seats.PROMPT_BOXED = ("kimi",)`: for a boxed kind, a line counts as the prompt line only when its first non-blank character is a box vertical (`│` or `┃`) followed, after blanks, by the glyph. So a quoted `> ` line in Kimi's answer is not mistaken for its input, and the menu's `❯` lines are not either.
+2. An empty box passes. Text in the box holds, as for any kind: `owner typing in <pane>` or `text in its input …`. No box on screen holds as a dialog or menu: `a dialog or a menu is on screen in <pane>; answer or close it there`. Kimi becomes `checkable`, and `doctor` stops listing it as unchecked.
+3. Everything that already runs the guard now covers Kimi: `send`, `deliver`, the watcher, the kickoff, and every quit. A plain `send` to an idle Kimi seat with the menu up queues the message with that detail (21.2). The limited quit (35.5 item 15) keeps its `limits.input_empty` read, and `safe_prompt`'s own guard now agrees with it rather than passing blind. One thing stays out: `interrupt`'s one Ctrl-U after its keys (23.11) was verified on Claude Code alone. A boxed kind gets no Ctrl-U until Kimi's interrupt is checked live. When the interrupted prompt comes back into a Kimi box, `interrupt` ends as it does today for text it cannot clear: `its input still holds text; press Ctrl-U there before sending it anything`. (Amended after review #42d9ce, F1: the first build pressed Ctrl-U for any kind the guard can check, which now includes Kimi.)
+4. **A held dialog is notified.** When the watcher has held a seat's mail for a dialog or menu (`presence.is_dialog`) for 5 minutes (`DIALOG_NOTIFY_S`, or the fleet's `[watch] notify_blocked_after` when set), it raises one notification per hold: title `NAME has a dialog or menu open (<pane>): N queued wait`, body `answer or close it there; herdr-fleet sends it nothing until its input is back`. This applies to every kind. A hold for typed text is not notified, since the owner is at that pane.
+
+No new key path and no new prompt path: the guard only reads, as before.
+
+### 39.3 The limit check follows deliveries
+
+**The fact.** On 5 November a Kimi builder took a brief by a plain `send` while `idle`. Its turn ended at once with Kimi's 429 error, and it was `idle` again before the watcher next looked. `state_seen` still read `idle` with the old `since`, a state the watcher had already read once (35.5 item 13), so it never read the screen again. The designer found the limit by hand.
+
+**The rule.** The quiet-seat check (35.6 item 2) keys each read on the state's `since` and on the seat's **last prompt**: the time of the newest log entry that put text into the seat. Those are a `send` typed at once (`sent` or `unconfirmed`), a `delivered` entry, or a `kickoff` entry. A seat is read when:
+- its state is idle, done or working, its kind has patterns, and it is not held;
+- its state is at least `LIMIT_QUIET_S` old, and so is its last prompt;
+- the pair (`since`, last prompt) differs from the pair of its last read.
+
+So a seat is read once per unchanged state, and once more after each prompt the log records, 5 to 10 minutes after it. The watcher reads the log only when its size or modification time has changed, and only from where it left off. Blocked and unknown seats are never read.
+
+**Known limit.** A turn the owner starts by typing into the pane is not in the log. If it hits a limit and ends between two of the watcher's looks, it is still missed.
+
+Invariant 22's sentence becomes "… at most every 5 minutes, once per unchanged state and once more after each prompt the message log records for that seat …".
+
+### 39.4 `--fallback` puts a nearly used-up Codex last
+
+**The fact.** On 5 November, `swap NAME --fallback` moved the Kimi builder to Codex when the account's Codex allowance was at 97% of its week, with the reset an hour away. The fleet ran no Codex seat, so its recorded reading was days old, and `limits.fallback_candidates` does not look at the allowance anyway. The build fitted in what was left only by luck.
+
+**The rule.**
+1. When `codex` is among a seat's candidates, `--fallback` takes the account's reading. That is the state's `codex_allowance` when it was read within `ALLOWANCE_READ_S` (10 minutes). Otherwise it is the latest rollout's `rate_limits`, from the new `context_size.latest_allowance(env)`: the most recently modified `rollout-*.jsonl` in the newest two date directories of the Codex sessions root, read backwards and bounded as 29.2 reads, numbers only.
+2. No reading, or a reading whose `resets_at` has passed, counts as unknown and changes nothing.
+3. At or above `failover_at_percent` before its reset, `codex` moves to the end of the candidates. It is never dropped: a nearly used-up Codex is still a fallback when nothing else starts.
+4. The step says so in both cases:
+   - `fallback - kimi -> claude (limit recorded; codex at 97% of the weekly allowance until Thu 20:44, tried last)`;
+   - when Codex is still the one taken, `fallback - kimi -> codex (codex at 97% of the weekly allowance until Thu 20:44)`.
+5. `--fallback` writes no reading to the state file; that record stays the watcher's. A dry run reads it too, since the read is read-only.
+
+Invariant 8 gains `--fallback`'s read of the Codex rollout numbers, under the same terms as `--context`.
+
+### 39.5 The failover note quotes only a limit that still counts
+
+**The fact.** On 5 November, the failover note and the state's `failover.reason` quoted the seat's 2 November Kimi record, whose reset had passed three days earlier. The 5 November limit itself was never recorded (39.3).
+
+**The rule.**
+- `fallback_note` and `failover.reason` use the `limited` record only while it counts (`limits.counts`) and is of the kind being left. Otherwise the note gives the owner's request (`the owner asked for the fallback of kimi with swap NAME --fallback`), and `failover.reason` is `swap --fallback`.
+- When the kind being left is Codex, the note cites the allowance only for a reading at or above `failover_at_percent` before its reset (39.4's reading).
+- The step's `(limit recorded)` already uses `counts` and is unchanged.
+
+### 39.6 Code, invariants and tests
+
+Code:
+- `fleetfile`: the linked-worktree check, pure file reads, which `find_fleet_file`'s walk and `crossfleet.fleet_root` share; the stderr note goes through `Ctx`.
+- `checks`: `stranded mail` in `doctor`.
+- `seats` and `presence`: the boxed prompt line.
+- `watch`: the dialog-hold notification, and the limit read keyed on the last prompt.
+- `context_size`: `latest_allowance`.
+- `ops`: candidate order, the step line, `fallback_note` and `failover.reason`.
+
+Invariants:
+- 22 and 8 as above.
+- 19 is unchanged; it now covers Kimi.
+- No new herdr command, key or prompt.
+
+`tests/support.py`: the invariant 19 oracle (`owner_typing`) learns Kimi's box, so a prompt to a Kimi pane with text in its box, or with no box on screen, fails the test. `fake_herdr` draws Kimi's box (empty, with `typed`) and its idle-cache menu (`show_dialog`).
+
+Tests go in `tests/test_section39.py`. Their fixtures are relative to the test clock (38.5).
+- Worktrees, against real repositories (`git init`, `git worktree add`):
+  - discovery from a linked worktree takes the main checkout's fleet and prints the note once;
+  - `--fleet`, `--file` and `HERDR_FLEET_FILE` keep the worktree's;
+  - a worktree with its own state file keeps its own;
+  - so do a main checkout without a fleet file, a `.git` file without `commondir`, and a pointer that does not resolve;
+  - `send` from a worktree queues into the main checkout's mailbox;
+  - a cross-fleet destination agent whose directory is a worktree of its fleet routes to that fleet;
+  - `fleet_flag` from a worktree adds no `--fleet`;
+  - `inbox --hook` from a worktree is silent;
+  - `doctor`'s `stranded mail` appears for queued files, and not for an empty or brought-up worktree.
+- Kimi:
+  - an empty box passes;
+  - text in the box holds;
+  - a quoted `> ` line above an empty box passes;
+  - the menu holds as a dialog;
+  - a plain `send` to an idle Kimi seat with the menu up queues;
+  - the watcher holds, notifies once after 5 minutes, and delivers when the box is back;
+  - existing Kimi scenarios that assumed an unchecked kind draw the box.
+- The limit read:
+  - a short turn (state unchanged, a `delivered`, `sent` or `kickoff` entry after the last read) is read once after `LIMIT_QUIET_S`;
+  - no second read without a new prompt;
+  - the log is not reread when unchanged.
+- Fallback:
+  - Codex demoted at or above the threshold, from a fresh state reading and from a rollout fixture when the state's is stale;
+  - unchanged below the threshold, after the reset, and with no reading;
+  - Codex as the only candidate is still taken, with the line;
+  - a dry run writes nothing.
+- The note:
+  - a passed or released record is not quoted, and `failover.reason` is `swap --fallback`;
+  - a counting record is quoted;
+  - a Codex reading below the threshold is not cited.
+
+### 39.7 Version and documents
+
+0.19.4 in `herdr-plugin.toml` and `herdr_fleet/__init__.py`. README:
+- the fleet-file discovery paragraph gives the worktree rule and its note;
+- the presence guard lists Kimi's box;
+- `--fallback` says how Codex's allowance orders the candidates.
+
+AGENTS.md's architecture paragraph says the same in its own places: discovery, `seats.PROMPT_GLYPHS`, the quiet-seat read and `_swap_fallback`. `docs/testing.md` lists `tests/test_section39.py` and the fake's Kimi screens.
+
+### 39.8 Amendments from the build
+
+- **Fresh state readings.** The state's `codex_allowance` is fresh only when its `read_at` is no more than `ALLOWANCE_READ_S` old; a record without a usable `read_at` falls back to `context_size.latest_allowance`.
+- **Leaving Codex.** `--fallback` takes the 39.4 reading when the kind being left is Codex as well as when Codex is a candidate, so 39.5 can cite a current above-threshold reading. It is still never written to the state file by this command.
+- **Review round 1.** F1 takes option (a): `_clear_input` reads a boxed kind's restored text and returns `held` without Ctrl-U; `KeysCheck` rejects that key for a boxed kind. `timers` uses `Ctx.find_fleet`, which notes the switch without invoking the caller lookup. The prompt-log signature includes the inode and a changed inode resets the offset to zero. N1 needs no code change: the existing last-component `.git` test matches the amended rule. The no-`commondir` fixture now uses an existing Git directory, typed-text holds are tested not to notify, and the real Git fixtures use an isolated environment.
+
+### 39.9 Verification (designer, 7 November 2026)
+
+These checks ran live on the working tree (herdr 0.9.5) after review round 1, and again where round 2 touched them. Every command was read-only or a dry run, except one real delivery to a Kimi seat. No owner fleet's files changed.
+
+- **Worktree discovery.** The scratch repository committed `.herdr/fleet.toml` and had one linked worktree, both reached through the symlinked `/tmp`.
+  - Run from the worktree, `status` and `send --dry-run --as owner` printed the 39.1 note once, used the main checkout's fleet, and named its mailbox.
+  - `send` said `(discovered from a linked worktree)`.
+  - `status --fleet <worktree>/.herdr/fleet.toml` kept the worktree's own fleet.
+  - A message file placed in the worktree's mailbox made `doctor`, run from the main checkout, print `warn stranded mail: 1 queued in <worktree> (sample-dev 1); …`.
+- **Kimi's box.** The guard ran read-only against a live Kimi Code seat (K3.1 Pro), using `--format ansi`, the seat's real empty box with its reverse-video cursor.
+  - `prompt_line` gave the empty string and `typing` gave None: mail may go.
+  - The idle-cache menu of 39.2, as text, gave no prompt line: it holds as a dialog.
+  - A quoted `> ` line above an empty box passed.
+  - A real `send` through the working-tree CLI to the idle Kimi seat was delivered at once, and the seat took the turn.
+- **The Codex allowance.** `context_size.latest_allowance` read the account's live reading from the newest rollout: 4% of the weekly window.
+  - On a scratch fleet with `failover_at_percent = 3` and `prefer = ["kimi", "codex", "claude"]`, `swap sample-dev --fallback --dry-run` printed `fallback - kimi -> claude (codex at 4% of the weekly allowance until Thu 20:44, tried last)`. It created no state file.
+  - On the development fleet, below its threshold, `swap NAME --fallback --dry-run` chose Codex with no note and left the state file byte-identical.
+
+**Not verified live**, each covered by the fake:
+- text typed into a Kimi box;
+- Kimi's idle-cache menu on a running seat, since it appears only after a long idle, and the dialog-hold notification;
+- Kimi's shell mode (review N3), which holds as a dialog if its line is not `│ >`;
+- the watcher's read after a logged prompt (39.3), since it needs a live limit;
+- `interrupt` of a Kimi seat.
+
+Open for 23.11, not 39: `interrupt`'s Ctrl-U still reaches Codex and Antigravity seats, as it has since 0.12.0. Its facts were taken on Claude Code.

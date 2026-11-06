@@ -823,7 +823,9 @@ def resolve_sender(ctx: Ctx, as_name: Optional[str]) -> str:
 
 
 def selection_label(ctx: Ctx) -> str:
-    return "%s (%s)" % (ctx.fleet.path, "explicit" if ctx.file or ctx.env.get("HERDR_FLEET_FILE") else "discovered")
+    how = "explicit" if ctx.file or ctx.env.get("HERDR_FLEET_FILE") else (
+        "discovered from a linked worktree" if ctx.linked_worktree else "discovered")
+    return "%s (%s)" % (ctx.fleet.path, how)
 
 
 def reply_reference(ctx: Ctx, reference: str) -> str:

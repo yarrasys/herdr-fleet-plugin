@@ -18,7 +18,7 @@ import os
 from typing import Dict, Mapping, Optional, Sequence
 
 from herdr_fleet import inbox
-from herdr_fleet.fleetfile import FLEET_DIR, FLEET_NAME
+from herdr_fleet.fleetfile import FLEET_DIR, FLEET_NAME, linked_worktree_fleet, repo_root_for
 from herdr_fleet.inbox import CUR, Message
 
 
@@ -28,8 +28,10 @@ def fleet_root(start: object) -> Optional[str]:
         return None
     folder = os.path.realpath(start)
     while True:
-        if os.path.isfile(os.path.join(folder, FLEET_DIR, FLEET_NAME)):
-            return folder
+        candidate = os.path.join(folder, FLEET_DIR, FLEET_NAME)
+        if os.path.isfile(candidate):
+            main = linked_worktree_fleet(candidate)
+            return repo_root_for(main) if main is not None else folder
         parent = os.path.dirname(folder)
         if parent == folder:
             return None

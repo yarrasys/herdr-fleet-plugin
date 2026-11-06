@@ -82,7 +82,7 @@ class PromptLine(unittest.TestCase):
         self.assertIsNone(presence.prompt_line("", "codex"))
 
     def test_glyph_tables(self):
-        self.assertEqual(PROMPT_GLYPHS, {"claude": ("❯", ">"), "codex": ("›",), "agy": (">",)})
+        self.assertEqual(PROMPT_GLYPHS, {"claude": ("❯", ">"), "codex": ("›",), "agy": (">",), "kimi": (">",)})
         self.assertEqual(PROMPT_PLACEHOLDERS, {"codex": ("Ask Codex to do anything",)})
         self.assertFalse(presence.checkable("pi"))
         self.assertIsNone(presence.prompt_line("> typed\n", "pi"))

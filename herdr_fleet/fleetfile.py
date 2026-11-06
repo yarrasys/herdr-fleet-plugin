@@ -190,9 +190,56 @@ def repo_root_for(path: str) -> str:
     return folder
 
 
+def linked_worktree_fleet(path: str) -> Optional[str]:
+    """The main checkout's fleet for a linked worktree's ``path`` (39.1), else None.
+
+    Only ``.git`` and the worktree Git directory's ``commondir`` are read. A state
+    file in the worktree means its own fleet was brought up there and stays selected.
+    """
+    found = os.path.abspath(path)
+    worktree = repo_root_for(found)
+    pointer = os.path.join(worktree, ".git")
+    if not os.path.isfile(pointer):
+        return None
+    try:
+        with open(pointer, "r", encoding="utf-8") as handle:
+            line = handle.read(4096).splitlines()[0]
+        if not line.startswith("gitdir:"):
+            return None
+        gitdir = line[len("gitdir:"):].strip()
+        if not gitdir:
+            return None
+        if not os.path.isabs(gitdir):
+            gitdir = os.path.join(worktree, gitdir)
+        gitdir = os.path.realpath(gitdir)
+        with open(os.path.join(gitdir, "commondir"), "r", encoding="utf-8") as handle:
+            common = handle.read(4096).splitlines()[0].strip()
+    except (OSError, IndexError, UnicodeError):
+        return None
+    if not common:
+        return None
+    if not os.path.isabs(common):
+        common = os.path.join(gitdir, common)
+    common = os.path.realpath(common)
+    if os.path.basename(common) != ".git":
+        return None
+    main = os.path.dirname(common)
+    candidate = os.path.join(main, FLEET_DIR, FLEET_NAME)
+    if (os.path.realpath(main) == os.path.realpath(worktree) or not os.path.isfile(candidate)
+            or os.path.exists(os.path.join(worktree, FLEET_DIR, "fleet.state.json"))):
+        return None
+    return candidate
+
+
 def find_fleet_file(start: str, explicit: Optional[str] = None,
-                    env: Optional[Mapping[str, str]] = None) -> str:
-    """Locate the fleet file; raise FleetError when there is none."""
+                    env: Optional[Mapping[str, str]] = None,
+                    switched: Optional[List[Tuple[str, str]]] = None) -> str:
+    """Locate the fleet file; raise FleetError when there is none.
+
+    Walk-up discovery selects the main checkout of a linked worktree under 39.1;
+    explicit paths and ``HERDR_FLEET_FILE`` are used as given. ``switched`` receives
+    ``(worktree fleet, main fleet)`` so the command context can note the switch.
+    """
     env = env if env is not None else os.environ
     chosen = explicit or env.get("HERDR_FLEET_FILE")
     if chosen:
@@ -204,6 +251,11 @@ def find_fleet_file(start: str, explicit: Optional[str] = None,
     while True:
         candidate = os.path.join(folder, FLEET_DIR, FLEET_NAME)
         if os.path.isfile(candidate):
+            main = linked_worktree_fleet(candidate)
+            if main is not None:
+                if switched is not None:
+                    switched.append((candidate, main))
+                return main
             return candidate
         parent = os.path.dirname(folder)
         if parent == folder:

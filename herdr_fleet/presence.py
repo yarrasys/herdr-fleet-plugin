@@ -133,28 +133,42 @@ def drop_faint(line: str) -> str:
     return "".join(out)
 
 
+def boxed_kind(kind: str) -> bool:
+    from herdr_fleet.seats import PROMPT_BOXED
+    return (kind or "") in PROMPT_BOXED
+
+
 def prompt_line(text: str, kind: str) -> Optional[str]:
     """The text on the agent's prompt line, stripped, or None when no line of ``text``
-    starts (after blanks) with one of the kind's prompt glyphs. The last such line wins:
-    the input box sits below the conversation. ``text`` may carry escape sequences (the
-    guard reads ``--format ansi``, design 32.8): the line is found without them, and for a
-    kind that draws a faint suggestion every faint character is dropped from it."""
+    starts (after blanks) with one of the kind's prompt glyphs. A boxed kind also requires
+    its box vertical before the glyph (39.2). The last such line wins: the input box sits
+    below the conversation. ``text`` may carry escape sequences (the guard reads
+    ``--format ansi``, design 32.8): the line is found without them, and for a kind that
+    draws a faint suggestion every faint character is dropped from it."""
     glyphs = glyphs_for(kind)
     found: Optional[Tuple[str, str]] = None
     for line in (text or "").splitlines():
-        body = _body(strip_escapes(line))  # older Claude Code builds box the line: `│ > │`
+        body = _body(strip_escapes(line), kind)
         glyph = next((g for g in glyphs if body.startswith(g)), None)
         if glyph is not None:
             found = (line, glyph)
     if found is None:
         return None
     line, glyph = found
-    body = _body(strip_escapes(drop_faint(line) if faint_kind(kind) else line))
+    body = _body(strip_escapes(drop_faint(line) if faint_kind(kind) else line), kind)
     return body[len(glyph):].strip() if body.startswith(glyph) else body
 
 
-def _body(line: str) -> str:
-    return line.strip().strip(BORDERS).strip()
+def _body(line: str, kind: str) -> str:
+    body = line.strip()
+    if boxed_kind(kind):
+        if not body.startswith(tuple(BORDERS)):
+            return ""
+        body = body[1:].lstrip()
+        if body.endswith(tuple(BORDERS)):
+            body = body[:-1]
+        return body.strip()
+    return body.strip(BORDERS).strip()
 
 
 def read_screen(herdr: Herdr, pane_id: str) -> str:
