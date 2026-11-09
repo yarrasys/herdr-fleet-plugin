@@ -472,21 +472,35 @@ def locked(repo: str, name: str) -> Iterator[None]:
             os.close(fd)
 
 
-def resolve(repo: str, ref: str) -> Message:
+def resolve(repo: str, ref: str, mailbox: Optional[str] = None) -> Message:
     """The message a command-line id names: a full id, or its hex part with or without
     ``#``. Unknown and ambiguous references are usage errors (the latter lists the ids)."""
     ref = ref.strip()
     short = SHORT_RE.match(ref)
+    scope = inbox_dir(repo) if mailbox is None else os.path.dirname(box_dir(repo, mailbox, NEW))
     if ID_RE.match(ref):
-        matches = [m for m in all_messages(repo) if m.id == ref]
+        match = lambda message: message.id == ref
     elif short:
-        matches = [m for m in all_messages(repo) if m.short == short.group(1)]
+        match = lambda message: message.short == short.group(1)
     else:
-        raise UsageError("not a message id: %r (use the full id or #<6 hex>)" % ref)
+        raise UsageError("not a message id in %s: %r (use the full id or #<6 hex>)" % (scope, ref))
+
+    def scan() -> List[Message]:
+        candidates = (all_messages(repo) if mailbox is None else
+                      [m for box in (NEW, CUR) for m in read_box(repo, mailbox, box)])
+        return [m for m in candidates if match(m)]
+
+    matches = scan()
+    if (mailbox is not None and len(matches) > 1 and len({m.id for m in matches}) == 1
+            and {m.box for m in matches} == {NEW, CUR}):
+        # A move after the new/ scan can make the same file appear in both
+        # observations. Retry the file-only scan once; real duplicate files
+        # remain ambiguous, as do different full ids sharing one short id.
+        matches = scan()
     if not matches:
-        raise UsageError("no message %s in %s" % ("#" + short.group(1) if short else ref, inbox_dir(repo)))
+        raise UsageError("no message %s in %s" % ("#" + short.group(1) if short else ref, scope))
     if len(matches) > 1:
-        raise UsageError("%s matches several messages: %s" % (ref, ", ".join(
+        raise UsageError("%s matches several messages in %s: %s" % (ref, scope, ", ".join(
             "%s (%s/%s)" % (m.id, m.to, m.box) for m in matches)))
     return matches[0]
 
@@ -503,12 +517,9 @@ def size_of(text: str) -> int:
 
 
 def direct_text(message: Message) -> str:
-    """A message delivered on its own: ``[from X #3f2a9c] body``, or the body as written
-    when it already starts with ``[from`` (design 16.1)."""
+    """An ordinary direct message always carries its authoritative sender/id (40.2)."""
     if message.timer:
         return item_header(message) + " " + message.body
-    if message.body.lstrip().startswith("[from"):
-        return message.body
     return "[from %s #%s] %s" % (message.sender, message.short, message.body)
 
 

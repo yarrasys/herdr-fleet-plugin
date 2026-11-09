@@ -203,7 +203,7 @@ class SeatPages(PageCase):
         labels = [line[:10].strip() for line in body if line[:10].strip()]
         self.assertEqual(labels, ["doing", "queue", "debts", "recent"])
         self.assertEqual(body[0], "doing     vitest run")
-        self.assertRegex(body[1], r'^queue     #%s %s from sample-orchestrator \[on refusal\]  "Review parser tests"$'
+        self.assertRegex(body[1], r'^queue     #%s %s from sample-orchestrator \[plain send\]  "Review parser tests"$'
                          % (inbox.short_of(self.first), HHMM))
         self.assertRegex(body[2], r'^          #%s %s from sample-orchestrator \[queued\]  "then report test results"$'
                          % (inbox.short_of(self.second), HHMM))
@@ -407,7 +407,7 @@ class Bodies(PageCase):
         title = "#%s" % inbox.short_of(ident)
         draws = [self.screen.text(i) for i in range(len(self.screen.draws)) if self.titles()[i].startswith(title)]
         self.assertRegex(draws[0][0], r"^#%s \u00b7 %s \u00b7 sample-orchestrator \u2192 sample-dev \u00b7 queued "
-                         r"\(on refusal\) \u00b7 \d+ B$" % (inbox.short_of(ident), HHMM))
+                         r"\[plain send\] \u00b7 \d+ B$" % (inbox.short_of(ident), HHMM))
         firsts = [d[1] for d in draws]
         self.assertEqual(firsts[0], "line 01 of the review")
         self.assertIn("line 03 of the review", firsts)   # two lines down

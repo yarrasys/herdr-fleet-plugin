@@ -166,6 +166,7 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
         queued_kickoff = messages.queued_kickoff(fleet.repo, item["name"])
         if queued_kickoff is not None:  # design 32.6
             item["kickoff_queued"] = queued_kickoff.short
+    log_entries = _log_entries(ctx)
     data = {
         "fleet_file": fleet.path,
         "repo": fleet.repo,
@@ -175,8 +176,11 @@ def collect_status(ctx: Ctx, integrations: bool = True, context: bool = False) -
         "seats": seats,
         "contacts": [{"name": r.contact.name, "pane_id": r.pane, "state": r.state, "note": r.contact.note,
                       "problem": r.problem()} for r in contact_mod.resolve_all(fleet, agents)],
-        "owed": stale_marked(messages.owed(_log_entries(ctx)), now),
+        "owed": stale_marked(messages.owed(log_entries), now),
+        "expired_fyi": messages.expired_fyi(log_entries, now),
     }
+    if data["expired_fyi"]:
+        data["expired_fyi_command"] = "herdr-fleet log%s --expired-fyi" % messages.fleet_flag(ctx)
     data.update(queued_summary(fleet, now))
     if state.handover:  # design 32.5 (prune_state above dropped one whose pane is gone)
         data["handover"] = dict(state.handover)
@@ -414,6 +418,9 @@ def render_status(data: Dict, home: Optional[str] = None, worktrees_hint: bool =
             lines.append("  %s  %s  %s%s" % (c["name"], where, c["state"],
                                               "  (%s)" % c["note"] if c["note"] else ""))
     owed = data.get("owed", [])
+    if data.get("expired_fyi"):
+        lines.append("expired fyi: %d messages in the last 7d; some may since have been redelivered; see %s" % (
+            len(data["expired_fyi"]), data["expired_fyi_command"]))
     lines.extend(messages.owed_lines([o for o in owed if not o.get("stale")], hint=True))  # 23.4: how to settle it
     stale = stale_line(owed)  # design 33.4: the old ones in one line
     if stale:

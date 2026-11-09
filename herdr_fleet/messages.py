@@ -156,7 +156,9 @@ def disposal_entry(kind: str, message: Message, via: str) -> Dict:
     """``expired`` (via ``ttl``) or ``dropped`` (via ``drop-inbox``): moved to ``cur/`` undelivered."""
     return {"time": now_iso(), "from": PLUGIN_SENDER, "to": message.to, "kind": kind, "id": message.id,
             "via": via, "bytes": 0, "first_line": first_line(message.body), "delivery": "none",
-            **timer_metadata(message), **route_metadata(message)}
+            **timer_metadata(message), **route_metadata(message),
+            **({"sender": message.sender, "fyi": True}
+               if kind == "expired" and message.fyi and not message.timer and not message.is_kickoff else {})}
 
 
 def ack_entry(caller: str, seat: str, time: Optional[str] = None, ident: Optional[str] = None,
@@ -966,7 +968,11 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
             lines, code = _send_one(ctx, target, message, mode, when_ready_ms, log_file, observed)
         for line in lines:
             owner = target.destination.path if target.destination else ctx.fleet.path
-            route = ("; %s -> %s; origin %s" % (target.requested, target.name, ctx.fleet.path)) if target.destination else ""
+            route = ""
+            if target.destination:
+                if target.requested != target.name:
+                    route = "; alias %s -> %s" % (target.requested, target.name)
+                route += "; origin %s" % ctx.fleet.path
             reason = "; source-owned: %s" % target.route_reason if target.route_reason else ""
             fyi_pull = "; available to pull inbox immediately; native delivery remains deferred" if message.fyi and code == EXIT_OK and (ctx.dry_run or message.box == NEW) else ""
             ctx.say(line + "; mailbox: %s :: %s%s%s%s" % (owner, target.name, route, reason, fyi_pull))
@@ -1227,7 +1233,7 @@ def _queued(ctx: Ctx, target: Target, message: Message, state: Optional[str],
                                                          _lands(state, message, mode))
         if flush and refusal_waiting(ctx, target.name, exclude=(message.id,)):
             hold = dry_hold(ctx, target.herdr)
-            line += "; " + (HOLD % hold if hold else "would deliver what was queued on refusal")
+            line += "; " + (HOLD % hold if hold else "would deliver queued [plain send] messages")
         return [line], EXIT_OK
     lines: List[str] = []
     code = EXIT_OK
@@ -1246,7 +1252,7 @@ def refusal_line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
     shown = drop.state or state
     count = len(drop.carried)
     if drop.status == "sent":
-        return "delivered %d queued on refusal to %s (%s), %s" % (count, name, place(shown),
+        return "delivered %d queued [plain send] to %s (%s), %s" % (count, name, place(shown),
                                                                  size_label(drop.size)), EXIT_OK
     if drop.status == "unconfirmed":
         return ("unconfirmed %s: %s; %d logged as delivered (unconfirmed), not resent"
@@ -1546,12 +1552,59 @@ def _close_older(ctx: Ctx, entries: Sequence[Dict], caller: str, limit: datetime
 # -- log command --------------------------------------------------------------------------------
 
 
+def expired_fyi(entries: Sequence[Dict], now: Optional[datetime.datetime] = None) -> List[Dict]:
+    """Metadata-only seven-day expiry history, independent of later delivery/debt (40.5)."""
+    now = now or inbox.now_utc()
+    oldest = now - datetime.timedelta(days=7)
+    sends = {e["id"]: e for e in entries if e.get("kind", "send") == "send"
+             and isinstance(e.get("id"), str) and inbox.ID_RE.fullmatch(e["id"])}
+    found: Dict[str, Tuple[datetime.datetime, Dict]] = {}
+    for entry in entries:
+        ident = entry.get("id")
+        if entry.get("kind") != "expired" or not isinstance(ident, str) or not inbox.ID_RE.fullmatch(ident):
+            continue
+        sent = sends.get(ident, {})
+        if (entry.get("timer") or sent.get("timer") or entry.get("queued_by") == "kickoff"
+                or sent.get("queued_by") == "kickoff"):
+            continue
+        # The original send is authoritative when present; new expiry metadata
+        # supports logs whose send record has been removed.
+        metadata = sent if sent else entry
+        sender = metadata.get("from") if sent else entry.get("sender")
+        if metadata.get("fyi") is not True or not isinstance(sender, str) or not sender:
+            continue
+        when = inbox.parse_time(entry.get("time")) if isinstance(entry.get("time"), str) else None
+        if when is None or not oldest <= when <= now or entry.get("via") not in ("ttl", "fyi_ttl"):
+            continue
+        recipient = entry.get("to")
+        if not isinstance(recipient, str) or not recipient:
+            continue
+        if ident not in found or when > found[ident][0]:
+            found[ident] = (when, {"id": ident, "sender": sender, "to": recipient,
+                                  "at": entry["time"], "via": entry["via"]})
+    return [item for _, item in sorted(found.values(), key=lambda pair: (pair[0], pair[1]["id"]))]
+
+
 def op_log(ctx: Ctx, seat: Optional[str] = None, last: int = 50, as_json: bool = False,
-           owed_only: bool = False) -> int:
+           owed_only: bool = False, expired_fyi_only: bool = False) -> int:
+    if owed_only and expired_fyi_only:
+        raise UsageError("--expired-fyi cannot be combined with --owed")
     warnings: List[str] = []
     entries = read(ctx.fleet.repo, warnings)
     for warning in warnings:
         ctx.warn(warning)
+    if expired_fyi_only:
+        history = expired_fyi(entries)
+        if seat:
+            history = [e for e in history if seat in (e["sender"], e["to"])]
+        history = history[-last:] if last > 0 else history
+        if as_json:
+            ctx.say(json.dumps(history, indent=2, ensure_ascii=False))
+        else:
+            for item in history:
+                ctx.say("%s  %s → %s  expired fyi #%s (%s)" % (
+                    item["at"], item["sender"], item["to"], inbox.short_of(item["id"]), item["via"]))
+        return EXIT_OK
     if owed_only:
         items = owed(entries)
         if as_json:

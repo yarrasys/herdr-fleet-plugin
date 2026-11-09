@@ -105,7 +105,8 @@ class Send(LiveFleet):
 
     def test_existing_prefix_is_kept(self):
         self.run_cli("send", "sample-dev", "[from the owner] please stop")
-        self.assertEqual(self.prompts_to("sample-dev"), ["[from the owner] please stop"])
+        self.assertRegex(self.prompts_to("sample-dev")[0],
+                         r"^\[from caller #[0-9a-f]{6}\] \[from the owner\] please stop$")
 
     def test_file(self):
         brief = self.write_file("brief-3.md", "\n\nRound 3 brief\n" + "x" * 3000 + "\n")

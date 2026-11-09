@@ -1,15 +1,18 @@
-"""State note sections (design 16.5): ``state show``, ``state set KEY``, ``state keys``.
+"""State note sections (design 16.5 and 40.3): show, keys, get, set and append.
 
 The state note (``state_note`` in the fleet file) is Markdown. A section is a
 ``## KEY`` heading and everything up to the next level-1 or level-2 heading.
 ``set`` replaces one section's text and stamps its heading
 ``## KEY (updated 2026-10-20 00:31 UTC)``, appending the section at the end
-when it is absent. Text outside sections is preserved; writes are atomic.
+when it is absent. ``get`` requires a unique heading; ``append`` retains the old
+body. Both writers read and replace under a strict parent-directory flock.
+Text outside sections is preserved; writes are atomic.
 """
 
 from __future__ import annotations
 
 import datetime
+import fcntl
 import os
 import re
 import tempfile
@@ -46,10 +49,13 @@ def keys(text: str) -> List[str]:
 
 def set_section(text: str, key: str, body: str, now: Optional[datetime.datetime] = None) -> str:
     """Replace (or append) section ``key`` with ``body`` under a stamped heading."""
+    return _replace_section(text, key, body.strip("\n"), now)
+
+
+def _replace_section(text: str, key: str, body: str, now: Optional[datetime.datetime] = None) -> str:
     now = now or datetime.datetime.now(datetime.timezone.utc)
     stamp = now.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     block = ["## %s (updated %s)\n" % (key, stamp)]
-    body = body.strip("\n")
     if body:
         block.append(body + "\n")
     block.append("\n")
@@ -101,17 +107,24 @@ def _write(path: str, text: str) -> None:
 def op_state(ctx: Ctx, action: str, key: Optional[str] = None, text: Optional[str] = None,
              text_file: Optional[str] = None) -> int:
     path = _note_path(ctx)
-    current = _read(path)
-    if action == "show":
-        ctx.say(current.rstrip("\n") if current.strip() else "(%s is empty)" % path)
+    if action in ("show", "keys"):
+        current = _read(path)
+        if action == "show":
+            ctx.say(current.rstrip("\n") if current.strip() else "(%s is empty)" % path)
+        else:
+            for name in keys(current):
+                ctx.say(name)
         return EXIT_OK
-    if action == "keys":
-        for name in keys(current):
-            ctx.say(name)
+    if not key or not key.strip() or len(key.splitlines()) != 1 or "\r" in key or "\n" in key:
+        raise UsageError("state %s needs a nonempty one-line KEY" % action)
+    if action == "get":
+        body = section_body(_read(path), key)
+        if body is None:
+            raise UsageError("no section ## %s in %s; use state keys to list sections" % (key, path))
+        if body.rstrip("\n"):
+            ctx.say(body.rstrip("\n"))
         return EXIT_OK
-    if not key or "\n" in key:
-        raise UsageError("state set needs a one-line KEY")
-    if text_file:
+    if text_file is not None:
         if text is not None:
             raise UsageError("give TEXT or --file, not both")
         try:
@@ -120,7 +133,39 @@ def op_state(ctx: Ctx, action: str, key: Optional[str] = None, text: Optional[st
         except (OSError, UnicodeDecodeError) as exc:
             raise UsageError("cannot read --file %s: %s" % (text_file, exc))
     if text is None:
-        raise UsageError("state set KEY needs TEXT or --file PATH")
-    _write(path, set_section(current, key, text))
+        raise UsageError("state %s KEY needs TEXT or --file PATH" % action)
+    if action == "append" and not text.strip():
+        raise UsageError("state append needs non-whitespace TEXT or --file contents")
+    # A directory descriptor survives replacement of the note; every process locks
+    # the same inode. Lock failures propagate visibly, without the state helper's fallback.
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    fd = os.open(folder, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            current = _read(path)
+            if action == "append":
+                old = section_body(current, key) or ""
+                body = "\n".join(part for part in (old.rstrip("\n"), text.strip("\n")) if part)
+                updated = _replace_section(current, key, body)
+            else:
+                updated = set_section(current, key, text)
+            _write(path, updated)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
     ctx.say("updated ## %s in %s" % (key, path))
     return EXIT_OK
+
+
+def section_body(text: str, key: str) -> Optional[str]:
+    """A unique section body, None if absent; never silently choose a duplicate."""
+    found = [(start, end) for name, start, end in sections(text) if name == key]
+    if len(found) > 1:
+        raise UsageError("duplicate sections ## %s; give each section a unique heading" % key)
+    if not found:
+        return None
+    start, end = found[0]
+    return "".join(text.splitlines(True)[start + 1:end])

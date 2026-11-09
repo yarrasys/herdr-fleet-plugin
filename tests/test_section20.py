@@ -201,7 +201,7 @@ class WhereItSits(LiveFleet):
         with open(urgent.path) as handle:
             self.assertIn("\npriority: 1\n", handle.read())
         lines = policy_output(self.run_cli("inbox", "--as", "sample-dev")[1]).splitlines()
-        self.assertRegex(lines[0], r"^1\. %s  %s  sample-reviewer  \[urgent\]  \[on refusal\]  c$" % (SHORT, HHMM))
+        self.assertRegex(lines[0], r"^1\. %s  %s  sample-reviewer  \[urgent\]  \[plain send\]  c$" % (SHORT, HHMM))
         self.assertRegex(lines[1], r"^2\. .*  a$")
         self.assertRegex(lines[2], r"^3\. .*  b$")
         self.status_of("w2:p2", "idle")
@@ -455,7 +455,7 @@ class FlushDrains(LiveFleet):
         self.assertEqual(code, 0, out)
         lines = policy_output(out).splitlines()
         self.assertRegex(lines[0], r"^queued in herdr-fleet for sample-dev \(idle\) %s, position 1 of 1$" % SHORT)
-        self.assertRegex(lines[1], r"^delivered 2 queued on refusal to sample-dev \(idle\), \d+ B$")
+        self.assertRegex(lines[1], r"^delivered 2 queued \[plain send\] to sample-dev \(idle\), \d+ B$")
         (prompt,) = self.prompts_to("sample-dev")  # the refusal message takes its mailbox along (20.9)
         self.assertLess(prompt.index("first"), prompt.index("second"))
         self.assertNotIn("third", prompt)

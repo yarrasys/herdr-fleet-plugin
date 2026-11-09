@@ -874,7 +874,7 @@ LABEL_W = 10                          # the section label column of a seat page
 RECENT = 20                           # design 25.2: the seat's last twenty log entries
 SCREEN_LINES = 12                     # design 25.2: `p` reads the seat's last twelve screen lines
 FLEET_LOG_LINES = 200                 # the fleet page's log tail
-STATES = {"refusal": "queued (on refusal)", "queue": "queued", "fyi": "queued (fyi)"}
+STATES = {"refusal": "queued [plain send]", "queue": "queued", "fyi": "queued (fyi)"}
 
 Action = Tuple  # ("open", kind, name), ("replace", name), ("back",), ("go", name), ("ack", Ref),
 #                 ("deliver_all",), ("deliver", name), ("screen", name), ("body", Ref), ("notice", text)
@@ -889,7 +889,7 @@ class Ref:
     to: str = ""
     time: str = ""
     first_line: str = ""
-    state: str = ""         # queued (on refusal), sent, delivered, expired, ...
+    state: str = ""         # queued [plain send], sent, delivered, expired, ...
     message: bool = True    # False for a log entry that is no message (a kickoff, an ack, an interrupt)
     debt: bool = False      # ``to`` owes ``sender`` a reply to it
     age: Optional[float] = None  # a debt's age

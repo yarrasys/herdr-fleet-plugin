@@ -130,10 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
                                    "(the watcher, `deliver`, a later send or the next kickoff). Only --now types "
                                    "into a working seat's own input. Nothing is sent while the owner is typing in "
                                    "the seat's pane: it stays queued (--now: refused). FYIs normally stay queued; "
-                                   "explicit delivery or a pending refusal request can deliver them immediately. "
+                                   "explicit delivery or a pending [plain send] request can deliver them immediately. "
                                    "owner gets a herdr notification. Here --file is the text; pick a fleet "
                                    "file with --fleet PATH. New cross-fleet sends use a uniquely named destination seat's "
-                                   "existing fleet mailbox; output names sender, selected fleet and holding mailbox.")
+                                   "existing fleet mailbox; output names sender, selected fleet and holding mailbox, "
+                                   "with alias ALIAS -> CANONICAL only for differing names. Ordinary direct messages "
+                                   "always get their actual sender/id envelope; let the tool supply it.")
     p.add_argument("words", nargs="*", metavar="TARGET... [TEXT]",
                    help="seat, contact, owner or live agent names, then the text; with --file every item is a "
                         "target, and with --all a single item is the text. Options may go anywhere.")
@@ -177,15 +179,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="say what would be delivered and send nothing")
 
     p = sub.add_parser("inbox", parents=[fleet],
-                       help="your own queued messages: --read, --wait, --count, --history, --drop",
+                       help="your mailbox: --show ID, --read [ID], --wait, --count, --history, --drop",
                        description="Your mailbox (.herdr/inbox/<you>): by default list what is queued. Runs no "
                                    "herdr command except finding who you are, and none with --as. Human output names the "
                                    "selected identity/fleet; JSON/count diagnostics go to stderr. Failed caller "
-                                   "lookup inside Herdr needs explicit --as NAME.")
+                                   "lookup inside Herdr needs explicit --as NAME. --show inspects one stored message; "
+                                   "--read ID reads one queued message, --read without ID reads the queue. Reading "
+                                   "records delivery; a reply or herdr-fleet ack settles a request.")
     p.add_argument("--as", dest="as_name", metavar="NAME",
                    help="whose mailbox (default: your pane's agent, or the contact it matches; owner outside Herdr or from a verified shell; lookup failures need --as NAME)")
     action = p.add_mutually_exclusive_group()
-    action.add_argument("--read", action="store_true", help="print every queued message in full and mark it read")
+    action.add_argument("--read", nargs="?", const=True, metavar="ID",
+                        help="read one queued ID, or every queued message without ID; reading records delivery, "
+                             "not acknowledgement (a reply or herdr-fleet ack settles a request)")
+    action.add_argument("--show", metavar="ID", help="inspect one new/cur message without marking it read")
     action.add_argument("--count", action="store_true", help="print the number of queued messages only")
     action.add_argument("--history", metavar="NAME",
                         help="every delivered message between you and NAME, oldest first")
@@ -201,7 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", metavar="MS", type=int,
                    help="with --wait: give up after MS milliseconds (`nothing arrived in 10m`, exit 3)")
     p.add_argument("--full", action="store_true",
-                   help="with --read or --history: print long messages in full (default: up to inbox_print_max "
+                   help="with --show, --read or --history: print long messages in full (default: up to inbox_print_max "
                         "bytes, then the first lines and the file's path)")
     p.add_argument("--fyi", dest="fyi_only", action="store_true", help="with --drop: only FYIs")
     p.add_argument("--older-than", dest="older_than", metavar="DURATION",
@@ -265,6 +272,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--last", metavar="N", type=int, default=50, help="the last N entries (default 50)")
     p.add_argument("--json", action="store_true", help="print JSON")
     p.add_argument("--owed", action="store_true", help="only the messages still awaiting a reply")
+    p.add_argument("--expired-fyi", action="store_true",
+                   help="metadata of FYI expiries in the last seven days; later redelivery does not erase history")
 
     p = sub.add_parser("state", help="show or update sections of the state note (state_note)",
                        description="Pick a fleet file with --fleet PATH after the action (state set --fleet ...).")
@@ -272,10 +281,14 @@ def build_parser() -> argparse.ArgumentParser:
     state_sub.required = True
     state_sub.add_parser("show", parents=[fleet], help="print the state note")
     state_sub.add_parser("keys", parents=[fleet], help="list the sections")
-    q = state_sub.add_parser("set", parents=[fleet], help="replace the section ## KEY (created if absent)")
+    q = state_sub.add_parser("get", parents=[fleet], help="print only KEY's body; missing/duplicate sections are errors")
     q.add_argument("key", metavar="KEY")
-    q.add_argument("text", nargs="?", metavar="TEXT")
-    q.add_argument("--file", dest="text_file", metavar="PATH", help="read the section text from this file")
+    for action, help_text in (("set", "replace ## KEY (created if absent); use append to retain its body"),
+                              ("append", "append to ## KEY (created if absent), retaining its body")):
+        q = state_sub.add_parser(action, parents=[fleet], help=help_text, description=help_text)
+        q.add_argument("key", metavar="KEY")
+        q.add_argument("text", nargs="?", metavar="TEXT")
+        q.add_argument("--file", dest="text_file", metavar="PATH", help="read the section text from this UTF-8 file")
 
     p = sub.add_parser("worktrees", parents=[fleet], help="list the repository's Git worktrees (read-only)",
                        description="One row per `git worktree list` entry: path, branch, age of the last commit, "
@@ -371,7 +384,10 @@ def parse(parser: argparse.ArgumentParser, argv: List[str]) -> argparse.Namespac
     dest = LIST_POSITIONALS.get(args.command)
     if not unknown and dest:
         setattr(args, dest, list(getattr(args, dest) or []) + words)
-    elif not unknown and args.command == "state" and getattr(args, "text", "") is None and len(words) == 1:
+    elif not unknown and args.command == "inbox" and args.read is True and len(words) == 1:
+        args.read = words[0]
+    elif (not unknown and args.command == "state" and args.state_action in ("set", "append")
+          and getattr(args, "text", "") is None and len(words) == 1):
         args.text = words[0]
     else:
         parser.error("unrecognized arguments: %s" % " ".join(unknown or extras))
@@ -411,8 +427,22 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
         return 130
 
 
+def _file_operation(args: argparse.Namespace) -> bool:
+    """Section 40's file operations never notify, including on errors. An implicit
+    inbox identity may still need its existing read-only caller lookup."""
+    return ((args.command == "state" and args.state_action in ("get", "set", "append"))
+            or (args.command == "log" and args.expired_fyi)
+            or (args.command == "inbox" and (args.show is not None or isinstance(args.read, str))))
+
+
 def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     command = args.command
+    if _file_operation(args) and (command != "inbox" or args.as_name):
+        # File-only commands cannot resolve a leaked plugin-action context by
+        # asking Herdr for its focused pane. Explicit fleet paths still win.
+        ctx._fleet = load_fleet(ctx.find_fleet(ctx.cwd))
+        for warning in ctx._fleet.warnings:
+            ctx.warn(warning)
     if command == "timers":
         from herdr_fleet.timers import inspect
         # Inspection is offline even when action-related environment variables leaked
@@ -424,7 +454,7 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     if command == "init":  # pure file writing: no preflight, no herdr command
         return _init(ctx, args)
     if command == "log":  # reads .herdr/messages.jsonl only
-        return op_log(ctx, args.seat, args.last, args.json, args.owed)
+        return op_log(ctx, args.seat, args.last, args.json, args.owed, args.expired_fyi)
     if command == "state":  # reads and writes the state note only
         return op_state(ctx, args.state_action, getattr(args, "key", None), getattr(args, "text", None),
                         getattr(args, "text_file", None))
@@ -439,8 +469,9 @@ def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
                 raise UsageError("--hook takes neither --as, --json, --full, --wait nor --drop's options: the seat "
                                  "is the hook's own pane")
             return op_inbox_hook(ctx, args.hook, stdin)
-        return op_inbox(ctx, args.as_name, args.read, args.count, args.history, args.redeliver, args.json,
-                        args.full, args.wait, args.timeout, args.drop, args.fyi_only, args.older_than)
+        return op_inbox(ctx, args.as_name, args.read is not None, args.count, args.history, args.redeliver, args.json,
+                        args.full, args.wait, args.timeout, args.drop, args.fyi_only, args.older_than,
+                        show=args.show, read_id=args.read if isinstance(args.read, str) else None)
     if command == "hooks":  # edits .claude/settings.local.json only; no herdr command
         return op_hooks(ctx, args.remove)
     if command == "watch":  # the caller's pane plays no part: no caller lookup
@@ -571,14 +602,16 @@ def _doctor(ctx: Ctx) -> int:
 def _fail(ctx: Ctx, args: argparse.Namespace, stdin: TextIO, code: int, kind: str, lines: List[str]) -> int:
     """Report an expected failure. Manifest actions show nothing on screen, so
     ``ui`` (always), ``--notify`` and any action invocation also notify; ``ui``
-    exits 2 because its failures are discovery or precondition problems."""
+    exits 2 because its failures are discovery or precondition problems. Section
+    40's file operations retain stderr/exit codes without a Herdr notification."""
     for line in lines:
         ctx.stderr.write("herdr-fleet: %s: %s\n" % (kind, line))
     if args.command == "ui":
         code = EXIT_USAGE
     # the watch and handover panes show no error (32.5)
     pane = args.command in ("watch", "handover") and ctx.env.get("HERDR_PLUGIN_ENTRYPOINT_ID")
-    if args.command != "timers" and (ctx.notify_enabled or args.command == "ui" or ctx.env.get("HERDR_PLUGIN_ACTION_ID") or pane):
+    if (args.command != "timers" and not _file_operation(args)
+            and (ctx.notify_enabled or args.command == "ui" or ctx.env.get("HERDR_PLUGIN_ACTION_ID") or pane)):
         what = args.entrypoint if args.command == "ui" else args.command
         ctx.notify("Fleet %s failed" % what, "\n".join(lines), "request")
     if getattr(args, "hold", False) or args.command in ("menu", "handover"):  # the pane stays readable

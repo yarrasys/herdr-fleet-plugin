@@ -20,11 +20,13 @@
   ``additionalContext`` and moves it to ``cur/``, ``prompt`` only counts. Every
   error path prints nothing and exits 0 (invariant 14).
 
-Both expire what is due before anything else (past its ttl, or an FYI past the
+Bulk operations expire what is due before anything else (past its ttl, or an FYI past the
 fleet's ``fyi_ttl``; logged ``expired``) and log one ``delivered`` entry per message
 they hand over. ``inbox --drop`` (design 33.3) moves queued messages to ``cur/``
 undelivered, logged ``dropped``; ``sweep_expired`` is the watcher's expiry sweep (33.1),
-which waits for no lock and runs no herdr command.
+which waits for no lock and runs no herdr command. Section 40 adds mailbox-scoped
+``--show ID`` (pure inspection) and ``--read ID`` (only that message is settled
+or expired, after resolution is revalidated under the mailbox lock).
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageErro
 from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
 from herdr_fleet.messages import (HOLD, OWNER, Drop, agent_state, caller_record, compose_prompt, drop_messages,
-                                  dry_hold, expire_due, first_line, fleet_flag, notify_owner, place, prompt_mailbox,
+                                  disposal_entry, dry_hold, expire_due, first_line, fleet_flag, notify_owner, place, prompt_mailbox,
                                   queued_in, read, record, selection_label, settle, since_label)
 from herdr_fleet.seats import SEND_ALLOWED, SETTLED, state_words
 from herdr_fleet.state import now_iso
@@ -243,7 +245,7 @@ def _line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
 # -- inbox -----------------------------------------------------------------------------------------
 
 
-def lookup_caller(ctx: Ctx, as_name: Optional[str]) -> str:
+def lookup_caller(ctx: Ctx, as_name: Optional[str], observe: bool = True) -> str:
     """``--as`` (no herdr command at all), else the agent in the caller's pane as ``send``
     finds it (verified caller pane and ``agent get``); only a verified shell or outside
     Herdr uses ``owner``. Failed caller lookup requires explicit ``--as``. The state
@@ -251,12 +253,12 @@ def lookup_caller(ctx: Ctx, as_name: Optional[str]) -> str:
     if not as_name and ctx.inside_herdr():
         resolve_caller(ctx)
     name, record_ = caller_record(ctx, as_name)
-    if record_.get("agent_status"):
+    if observe and record_.get("agent_status"):
         seen.observe(ctx, {name: str(record_["agent_status"])})
     return name
 
 
-REASON_TAGS = {"refusal": "[on refusal]", "queue": "[queued]", "fyi": "[fyi]",  # design 20.8
+REASON_TAGS = {"refusal": "[plain send]", "queue": "[queued]", "fyi": "[fyi]",  # design 40.4
                "kickoff": "[kickoff]"}                                            # design 32.6
 
 
@@ -274,13 +276,16 @@ WAIT_POLL_S = 1.0  # design 23.2: `inbox --wait` looks at the mailbox directory 
 def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, count: bool = False,
              history: Optional[str] = None, redeliver: Optional[str] = None, as_json: bool = False,
              full: bool = False, wait: bool = False, timeout_ms: Optional[int] = None, drop: bool = False,
-             fyi_only: bool = False, older_than: Optional[str] = None) -> int:
+             fyi_only: bool = False, older_than: Optional[str] = None,
+             show: Optional[str] = None, read_id: Optional[str] = None) -> int:
     """Design 18.5 item 4 and 20.1, 20.3, 20.4, 23.2: the caller's own mailbox. ``wait``
     blocks until the mailbox holds a message that is not due (FYIs count), then reads it
     as ``--read`` does; with ``timeout_ms`` it gives up after that long (exit 3). ``drop``
     (33.3) moves queued messages to ``cur/`` undelivered, narrowed by ``fyi_only`` and
     ``older_than``; with ``--dry-run`` it only lists them."""
     repo = ctx.fleet.repo
+    if wait and (show is not None or read_id is not None):
+        raise UsageError("--wait cannot be combined with --show or --read ID")
     if (fyi_only or older_than is not None or ctx.dry_run) and not drop:
         raise UsageError("--fyi, --older-than and --dry-run go with --drop")
     if drop and (wait or as_json or full):
@@ -298,16 +303,19 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
     if history is not None and not NAME_RE.match(history):
         raise UsageError("--history %r is not a name" % history)
     read_all = read_all or wait
-    if full and not (read_all or history is not None):
-        raise UsageError("--full goes with --read or --history")
+    if full and not (read_all or history is not None or show is not None):
+        raise UsageError("--full goes with --show, --read or --history")
     limit = None if full else ctx.fleet.inbox_print_max
-    caller = lookup_caller(ctx, as_name)
+    caller = lookup_caller(ctx, as_name, observe=show is None and read_id is None)
     identity = "inbox: %s; selected fleet: %s; %s" % (
         caller, selection_label(ctx), getattr(ctx, "identity_reason", "explicit --as"))
     if as_json or count:
         ctx.warn(identity)
     else:
         ctx.say(identity)
+    if show is not None or read_id is not None:
+        return _selected(ctx, caller, show if show is not None else str(read_id),
+                         show is not None, as_json, limit)
     if redeliver:
         return _redeliver(ctx, redeliver, as_json)
     if drop:
@@ -350,6 +358,51 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
         for index, message in enumerate(messages, 1):
             ctx.say("%d. #%s  %s  %s  %s%s" % (index, message.short, since_label(message.time), message.sender,
                                               tags(message), first_line(message.body)))
+    return EXIT_OK
+
+
+def _selected(ctx: Ctx, name: str, ref: str, inspect: bool,
+              as_json: bool, limit: Optional[int]) -> int:
+    """Resolve before any write, then revalidate under the delivery engine's mailbox lock."""
+    repo = ctx.fleet.repo
+    message = inbox.resolve(repo, ref, mailbox=name)
+    diagnostic = ctx.warn if as_json else ctx.say
+
+    def validate() -> None:
+        if message.to != name or os.path.basename(message.path) != message.id + ".md":
+            raise UsageError("invalid message header in mailbox %s: recipient and id must match its stored path"
+                             % name)
+
+    def already_read() -> int:
+        line = "#%s already in cur/; use inbox --show %s to inspect it" % (message.short, ref)
+        diagnostic(line)
+        return EXIT_PARTIAL
+
+    if not inspect:
+        validate()
+        if message.box == CUR:
+            return already_read()
+        with inbox.locked(repo, name):
+            message = inbox.resolve(repo, ref, mailbox=name)
+            validate()
+            if message.box == CUR:
+                return already_read()
+            reason = inbox.due_by(message, inbox.now_utc(), ctx.fleet.fyi_ttl)
+            if reason:
+                inbox.move(repo, message, CUR)
+                record(ctx, disposal_entry("expired", message, reason))
+                line = "#%s expired (%s); use inbox --show %s to inspect it" % (message.short, reason, ref)
+                diagnostic(line)
+                return EXIT_PARTIAL
+            settle(ctx, [message], "inbox", "sent")
+    if as_json:
+        item = _as_dict(message, body=True)
+        ctx.say(json.dumps(dict(item, box=message.box) if inspect else [dict(item, position=1)],
+                           indent=2, ensure_ascii=False))
+    else:
+        if inspect:
+            ctx.say("%s/: inspection does not mark it read (stored history is not proof of delivery)" % message.box)
+        ctx.say(inbox.render_for_print([message], limit))
     return EXIT_OK
 
 

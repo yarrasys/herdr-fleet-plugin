@@ -867,7 +867,7 @@ class Help(unittest.TestCase):
 
     def test_inbox_names_its_flags(self):
         line, _ = self.help_of("inbox")
-        self.assertEqual(line, "your own queued messages: --read, --wait, --count, --history, --drop")  # 33.3
+        self.assertEqual(line, "your mailbox: --show ID, --read [ID], --wait, --count, --history, --drop")  # 40.1
 
     def test_peek_names_source(self):
         _, text = self.help_of("peek")
