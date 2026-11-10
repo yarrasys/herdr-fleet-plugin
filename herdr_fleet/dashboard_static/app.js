@@ -406,6 +406,8 @@
       !!(state.intent && (state.intent.pending || (state.intent.result && state.intent.result.certainty === "confirmed")));
     $("new-attempt").disabled = !!(state.intent && state.intent.pending);
     $("send").textContent = demoHold ? "Record sample reply · Demo" : "Send owner message";
+    $("send-hint").textContent = "Ctrl+Enter (Windows/Linux) or Command+Enter (Mac) " +
+      (data.demo ? "records a sample reply only; nothing is sent live." : "sends.");
     $("read-question").disabled = data.demo || !state.question;
     $("compose-target").textContent = (state.reply ? "Reply #" + state.reply.slice(-6) + " → " : "To ") + (target ? target.name : "no selected seat") +
       (demoHold ? " · DEMO: recorded in this browser only. Nothing is sent, and the authored run continues as scripted."
@@ -781,6 +783,12 @@
   $("clear-reply").addEventListener("click", function () { chooseReply(state.reply ? null : savedReply()); render(); });
   $("read-with-reply").addEventListener("change", function () { saveDraft(); });
   $("draft").addEventListener("input", saveDraft);
+  $("draft").addEventListener("keydown", function (event) {
+    if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey ||
+        event.repeat || event.isComposing || event.keyCode === 229 || $("send").disabled) return;
+    event.preventDefault();
+    $("send").click();
+  });
   $("send").addEventListener("click", send);
   $("new-attempt").addEventListener("click", function () {
     if (state.intent && state.intent.pending) return;

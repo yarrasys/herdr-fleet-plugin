@@ -67,7 +67,7 @@
         <p id="compose-target">Choose a registered seat. Sends use ordinary guarded delivery.</p>
         <label for="draft">Message</label><textarea id="draft" rows="2" maxlength="32768" placeholder="Plain text for the selected seat"></textarea>
         <label id="read-with-reply-label" hidden><input id="read-with-reply" type="checkbox"> Explicitly read this owner message before replying</label>
-        <div class="toolbar"><button class="solid" id="send">Send owner message</button><button id="new-attempt" hidden>Prepare new attempt</button><span id="send-hint" class="send-hint" hidden>Ctrl or ⌘ + Enter sends</span></div>
+        <div class="toolbar"><button class="solid" id="send" aria-keyshortcuts="Meta+Enter Control+Enter">Send owner message</button><button id="new-attempt" hidden>Prepare new attempt</button><span id="send-hint" class="send-hint">Ctrl+Enter (Windows/Linux) or Command+Enter (Mac) sends.</span></div>
         <p id="action-result" class="action-result" role="status" aria-live="polite">A confirmed delivery is not acceptance of work.</p>
       </div>
     </section>

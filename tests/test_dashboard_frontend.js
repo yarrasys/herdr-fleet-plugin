@@ -17,6 +17,7 @@ function fixture() {
       this.clientHeight=360; this.scrollTop=0;
     }
     addEventListener(name, fn) { this.listeners[name]=fn; }
+    click() { if(!this.disabled && this.listeners.click)return this.listeners.click({target:this}); }
     setAttribute(name,value) { this.attrs[name]=String(value); }
     getAttribute(name) { return this.attrs[name]; }
     append(...items) { this.children.push(...items); }
@@ -75,6 +76,76 @@ function fixture() {
 const confirmed={status:'delivered',certainty:'confirmed',id:'20261101T100000Z-aabbcc'};
 const uncertain={status:'unconfirmed',certainty:'unconfirmed',id:'20261101T100001Z-ddeeff'};
 const flush=async()=>{for(let i=0;i<24;i++)await Promise.resolve();};
+
+for(const modifier of ['metaKey','ctrlKey']) {
+ test('composer '+modifier+' Enter clicks Send once and uses its existing pending intent',async()=>{
+  const f=fixture();f.text('Synthetic keyboard message');await f.app.refresh();
+  let prevented=0;
+  const event={key:'Enter',[modifier]:true,preventDefault(){prevented++;}};
+  f.$('draft').listeners.keydown?.(event);await flush();
+  assert.equal(f.requests.filter(r=>r.url==='/api/action').length,1,modifier+' sends through the actual button');
+  assert.equal(prevented,1,'shortcut suppresses the textarea newline');
+  f.$('draft').listeners.keydown?.(event);
+  f.$('draft').listeners.keydown?.({...event,repeat:true});await flush();
+  assert.equal(f.requests.filter(r=>r.url==='/api/action').length,1,'pending and repeated shortcuts cannot duplicate');
+  f.deferred.shift()(confirmed);await flush();
+  assert.equal(f.$('draft').value,'');
+ });
+}
+
+test('composer ignores multiline editing, extra modifiers, repeats and composition without preventing defaults',async()=>{
+ const f=fixture();f.text('First line\nSecond line');await f.app.refresh();
+ const ignored=[{}, {shiftKey:true}, {ctrlKey:true,shiftKey:true}, {metaKey:true,shiftKey:true},
+  {ctrlKey:true,altKey:true}, {metaKey:true,altKey:true}, {metaKey:true,repeat:true},
+  {ctrlKey:true,isComposing:true}, {metaKey:true,keyCode:229}, {ctrlKey:true,key:'Escape'}];
+ for(const keys of ignored) {
+  let prevented=false;
+  f.$('draft').listeners.keydown({key:'Enter',...keys,preventDefault(){prevented=true;}});
+  assert.equal(prevented,false,JSON.stringify(keys));
+ }
+ await flush();assert.equal(f.requests.filter(r=>r.url==='/api/action').length,0);
+ assert.equal(f.$('draft').value,'First line\nSecond line');assert.equal(f.app.state.intent,null);
+});
+
+test('composer shortcut cannot activate disabled Send or send empty text, and has no global scope',async()=>{
+ const f=fixture();f.text('Retained disabled draft');await f.app.refresh();
+ f.$('send').disabled=true;
+ let prevented=false;
+ const event={key:'Enter',ctrlKey:true,preventDefault(){prevented=true;}};
+ f.$('draft').listeners.keydown(event);await flush();
+ assert.equal(prevented,false);assert.equal(f.requests.filter(r=>r.url==='/api/action').length,0);
+ assert.equal(f.$('draft').value,'Retained disabled draft');
+ f.$('send').disabled=false;
+ f.listeners.keydown?.({...event,target:f.$('terminal-screen')});
+ f.documentListeners.keydown?.({...event,target:f.$('other-input')});await flush();
+ assert.equal(f.requests.filter(r=>r.url==='/api/action').length,0,'shortcut outside textarea sends nothing');
+ f.text(' \n ');f.$('draft').listeners.keydown(event);await flush();
+ assert.equal(f.requests.filter(r=>r.url==='/api/action').length,0,'empty Send validation is reused');
+ assert.equal(f.app.state.intent,null);assert.equal(f.$('draft').value,' \n ');
+});
+
+test('composer shortcut hint names both platforms and Demo keyboard reply stays local',async()=>{
+ const html=fs.readFileSync(path.join(__dirname,'../herdr_fleet/dashboard_static/index.html'),'utf8');
+ assert.match(html,/<button[^>]*id="send"[^>]*aria-keyshortcuts="Meta\+Enter Control\+Enter"/);
+ const hint=html.match(/<span[^>]*id="send-hint"[^>]*>[^<]*<\/span>/)[0];
+ assert.doesNotMatch(hint,/\bhidden\b/);assert.match(hint,/Ctrl\+Enter \(Windows\/Linux\)/);
+ assert.match(hint,/Command\+Enter \(Mac\)/);
+ const f=fixture(),original=f.context.fetch;
+ await f.app.refresh();assert.match(f.$('send-hint').textContent,/sends/);
+ f.data.demo=true;f.data.hold=true;f.data.stages=['Sample'];f.data.stage=0;
+ f.select('team','sample-dev','20261101T100010Z-667788');f.text('Local keyboard Demo reply');await f.app.refresh();
+ f.context.fetch=async(url,options)=>{
+  if(url==='/api/demo/reply'){f.requests.push({url,body:JSON.parse(options.body)});return {ok:true,json:async()=>({demo:true})};}
+  return original(url,options);
+ };
+ assert.match(f.$('send-hint').textContent,/records a sample reply/);
+ assert.match(f.$('send-hint').textContent,/Ctrl\+Enter \(Windows\/Linux\)/);
+ assert.match(f.$('send-hint').textContent,/Command\+Enter \(Mac\)/);
+ f.$('draft').listeners.keydown({key:'Enter',metaKey:true,preventDefault(){}});await flush();
+ assert.equal(f.requests.filter(r=>r.url==='/api/action').length,0);
+ assert.deepEqual(f.requests.find(r=>r.url==='/api/demo/reply').body,{});
+ assert.ok(f.models.at(-1).messages.some(m=>m.status==='local'&&m.body==='Local keyboard Demo reply'));
+});
 
 test('fast confirmed response and pending double clicks create one submission and clear only the successful draft',async()=>{
   const f=fixture();f.text('Synthetic same draft');
