@@ -32,7 +32,7 @@ STATE_NAME = "fleet.state.json"
 FIELD_OWNED = ("state_seen", "limited", "limited_also")  # written field-only under the lock; save_state keeps the disk's value
 TOP_OWNED = ("codex_allowance",)  # the same, for top-level keys (design 35.2)
 IGNORED = (STATE_NAME, "messages.jsonl", "inbox/", "watch.lock", "watch.log", "timers.state.json", "timers.lock",
-           "handover/")
+           "handover/", "dashboard-intents.json")
 VERSION = 1
 
 

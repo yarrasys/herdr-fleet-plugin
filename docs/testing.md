@@ -303,3 +303,23 @@ From the selected scratch namespace, try `send --reply-to` with an absent synthe
 Start the explicit checkout watcher in its own scratch shell, inspect `status --json` for `cli`, `watcher.launch` and `watcher.comparison`, and compare with the actual launch command. A known different build must be stale; an older lock or unavailable Git must remain unknown. Stop only that watcher with Ctrl-C before relaunching selected code; keep coding-agent sessions running. A fleet-file reload cannot replace Python code.
 
 Generate a launcher only into a separate temporary directory with `install-cli --dir DIR`. Test it with an isolated fake registry command before any real installation. Simulate denied access, invalid JSON and a missing installation, and verify nonzero exit plus stderr provenance for normal calls, empty successful hook results, and no execution of a development marker file. Check a valid exact enabled registration and an explicit override. Refreshing the actual user launcher after release is an explicit deployment step; merely updating plugin files does not replace an older generated launcher. Remove only scratch resources after recording results, using the guarded cleanup above. Report actual observations and any untested paths; these instructions alone provide no live evidence.
+
+## Browser dashboard (design 41)
+
+`tests/test_section41.py` covers pure multi-fleet observation, stale/error recovery, bounded history, opt-in numbers-only context, authenticated HTTP authority, owner routing/read evidence, durable intent concurrency and uncertainty, and fake terminal frames/child cleanup. The safety oracle marks dashboard observation separately from an explicit owner send/read or selected observe stream. Observation allows only read-only discovery; the only new execution is fixed `terminal session observe TARGET --cols N --rows N` with closed stdin. Controller/attach/input paths remain forbidden. Socket tests use temporary loopback servers and fake Herdr/processes; never substitute a live runner.
+
+Run focused checks on both parsing paths, then both complete suites and compileall:
+
+```bash
+python3.9 -m unittest discover -s tests -p test_section41.py -v
+python3.12 -m unittest discover -s tests -p test_section41.py -v
+node --check herdr_fleet/dashboard_static/app.js
+node --test tests/test_dashboard_frontend.js
+git diff --check
+```
+
+For browser checks, launch the checkout's `dashboard --demo` in isolation. Verify a conspicuous Demo label, the authored hold/reply/replay sequence, no requests to live action endpoints, no external network requests or script/CSP errors, inert message text, mobile overflow, keyboard tabs, motion/reduced-motion, expandable terminal, 92-pixel fleet rail and retained drafts/selection. Inspect that trusted xterm-generated styles carry the response nonce; no blanket inline style/script permission is allowed. Test pasting the launch fragment into an already open bare page, concurrent first-launch tabs and independent launches on two ports. Do not record capability URLs/cookies/CSRF in screenshots, logs or tracked artifacts. A fake live HTTP fixture must additionally prove Live has no Demo stages, actual fake ANSI frames render, explicit owner sends use the existing engine, wrong origins/targets create no effects, target changes clear old screen provenance, and disconnect/rebinding/session expiry/shutdown release observers. Report the actual browser/version and which paths were exercised.
+
+Vendored bundles have upstream registry integrity and packaged SHA-256 values in `dashboard_static/vendor/manifest.json`; verify both MIT licence files, all packaged hashes and the documented four-site stylesheet-nonce patch. Python 3.8 grammar checks supplement rather than substitute for a runtime run. Designer/owner acceptance uses only a disposable cheap scratch fleet: read-only observation and real ANSI Watch, one deliberate owner send/reply with receipt/hold checks, invalid-origin/input rejection and clean shutdown. Production fleets/jobs, installation and rollout are excluded from automated or builder validation.
+
+`tests/test_dashboard_frontend.js` executes the packaged application script in a deterministic Node DOM/network fixture. Its deferred-response cases cover duplicate clicks, explicit new attempts, draft edits and target/fleet/reply switches in both response orders, retained uncertain intents, late obsolete Watch errors, same-page capability recovery and overlapping reauthentication. These are development checks, not a Node requirement for users; browser rendering remains a separate gate.

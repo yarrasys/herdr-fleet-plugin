@@ -24,11 +24,15 @@ import re
 import shlex
 import shutil
 import subprocess
+import os
+import selectors
+import time
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 Runner = Callable[[List[str]], Tuple[int, str, str]]
 
 FORBIDDEN = (
+    ("agent", "attach"),
     ("agent", "send-keys"),
     ("pane", "send-keys"),
     ("pane", "send-text"),
@@ -61,6 +65,16 @@ def subprocess_runner(argv: List[str]) -> Tuple[int, str, str]:
         universal_newlines=True,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def dashboard_runner(argv: List[str]) -> Tuple[int, str, str]:
+    """Dashboard-owned ordinary reads/actions have a finite native-command lifetime."""
+    try:
+        proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, timeout=5)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        raise HerdrError("timeout", "Herdr request timed out; action delivery may be unconfirmed")
 
 
 def find_binary(env: Dict[str, str]) -> str:
@@ -107,9 +121,10 @@ def has_agent(pane: Dict) -> bool:
 class Herdr:
     """Thin typed wrapper over the herdr CLI. See the module docstring."""
 
-    def __init__(self, binary: str, runner: Optional[Runner] = None):
+    def __init__(self, binary: str, runner: Optional[Runner] = None, stream_runner=None):
         self.binary = binary
         self.runner = runner or subprocess_runner
+        self.stream_runner = stream_runner or subprocess.Popen
         self.start_timeout = True  # False once herdr rejected `agent start --timeout` (design 32.1, review 6)
 
     # -- transport -------------------------------------------------------
@@ -118,6 +133,8 @@ class Herdr:
         argv = [str(a) for a in argv]
         if not argv:
             raise HerdrError("forbidden_command", "refusing to run bare herdr (it attaches the TUI)")
+        if argv[0] == "terminal":
+            raise HerdrError("forbidden_command", "terminal access is only through validated read-only observe", argv)
         if tuple(argv[:2]) in FORBIDDEN and not (keys and tuple(argv[:2]) == SEND_KEYS):
             raise HerdrError(
                 "forbidden_command",
@@ -157,6 +174,24 @@ class Herdr:
         return out
 
     # -- discovery -------------------------------------------------------
+
+    def bounded_dashboard_client(self):
+        return Herdr(self.binary, dashboard_runner if self.runner is subprocess_runner else self.runner,
+                     self.stream_runner)
+
+    def terminal_observe(self, target: str, cols: int, rows: int):
+        """The sole streaming path; fixed observe argv and closed stdin (41.6)."""
+        if (not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", target)
+                or type(cols) is not int or type(rows) is not int
+                or not 20 <= cols <= 300 or not 5 <= rows <= 120):
+            raise HerdrError("forbidden_command", "invalid observer target or viewport")
+        argv = [self.binary, "terminal", "session", "observe", target, "--cols", str(cols), "--rows", str(rows)]
+        try:
+            process = self.stream_runner(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, bufsize=0)
+        except OSError:
+            raise HerdrError("observe_unavailable", "Watch unavailable: could not start the observer")
+        return ObserveStream(process)
 
     def version(self) -> Optional[Tuple[int, int, int]]:
         return parse_version(self.text("--version"))
@@ -419,6 +454,59 @@ class Herdr:
         is the snapshot afterwards). herdr adds ``amount`` to that split's first-child
         ratio for right and down, subtracts it for left and up (design 19.4)."""
         return dict(self.run(*pane_resize_argv(pane_id, direction, amount)).get("resize") or {})
+
+
+class ObserveStream:
+    """Bounded byte transport. Closing always stops and reaps the owned child."""
+
+    def __init__(self, process):
+        self.process = process
+        self.closed = False
+
+    def lines(self, stop, max_record: int = 262144, on_tick=None):
+        selector = selectors.DefaultSelector()
+        pending = b""
+        try:
+            selector.register(self.process.stdout, selectors.EVENT_READ)
+            while not stop.is_set() and not self.closed:
+                if on_tick is not None and not on_tick():
+                    return
+                if not selector.select(0.25):
+                    continue
+                chunk = os.read(self.process.stdout.fileno(), 16384)
+                if not chunk:
+                    if pending:
+                        raise HerdrError("bad_frame", "Watch ended with an incomplete frame")
+                    return
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    if len(line) > max_record:
+                        raise HerdrError("bad_frame", "Watch record exceeds the size limit")
+                    if line:
+                        yield line
+                if len(pending) > max_record:
+                    raise HerdrError("bad_frame", "Watch record exceeds the size limit")
+        finally:
+            selector.close()
+            self.close()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        process = self.process
+        try:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1.0)
+        finally:
+            if process.stdout:
+                process.stdout.close()
 
 
 def render_cmd(argv: Sequence[str]) -> str:

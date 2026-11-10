@@ -331,10 +331,14 @@ class FleetCase(unittest.TestCase):
         helper: Optional[Dict] = None          # design 32.5: the handover helper's seat and pane
         codex_thread = None
         protected = set()
+        dashboard_action = None
+        dashboard_target = None
         for call in entries:
             if "command" in call:
                 keys.finish()
                 command = call["command"]
+                dashboard_action = call.get("dashboard_action")
+                dashboard_target = call.get("dashboard_target")
                 keys = KeysCheck(self, command)
                 previous = None
                 previous_exit, previous_info = 0, {}
@@ -358,6 +362,24 @@ class FleetCase(unittest.TestCase):
                     self.assertNotIn(info.get("pane"), protected,
                                      "key or quit prompt reached a possible caller's pane: %s" % argv)
             self.assertTrue(argv, "bare herdr was run")
+            if command[:1] == ["dashboard"]:
+                if dashboard_action == "read":
+                    self.fail("selected owner reading ran Herdr: %s" % argv)
+                if dashboard_action == "send":
+                    allowed = (["agent", "list"], ["agent", "get"], ["pane", "read"], ["pane", "get"],
+                               ["pane", "current"], ["workspace", "list"], ["pane", "process-info"])
+                    if argv[:2] == ["agent", "prompt"]:
+                        self.assertEqual(argv[2], dashboard_target, "dashboard prompted an unapproved target")
+                    else:
+                        self.assertTrue(argv == ["--version"] or argv[:2] in allowed, argv)
+                elif argv[:3] == ["terminal", "session", "observe"]:
+                    self.assertEqual(dashboard_action, "watch", "observer was not explicitly selected")
+                    self.assertEqual(argv[3], dashboard_target)
+                    self.assertEqual(argv[4::2], ["--cols", "--rows"])
+                    self.assertEqual(len(argv), 8)
+                else:
+                    self.assertIn(argv, (["--version"], ["agent", "list"]),
+                                  "dashboard observation issued a non-read-only command")
             if command[:1] == ["timers"]:
                 self.assertNotIn("--dry-run", command, "offline timers called Herdr")
                 self.assertEqual(argv, ["agent", "list"], "timer inspection may only list agents")

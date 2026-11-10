@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="fleet-style-nonce" content="__FLEET_STYLE_NONCE__">
+<title>Signal Box · owner session required</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/dashboard.css">
+<script defer src="/vendor/xterm.js"></script>
+<script defer src="/vendor/addon-fit.js"></script>
+<script defer src="/app.js"></script>
+</head>
+<body>
+<div id="app" class="app">
+  <aside class="fleet-column" aria-label="Registered fleets">
+    <header class="box-head">
+      <div class="box-top"><span class="eyebrow">Local fleet console</span><button id="collapse" aria-controls="fleets" aria-expanded="true">Collapse fleets</button></div>
+      <h1>Signal Box</h1>
+      <p id="mode" class="mode">Owner session required</p>
+      <div class="tally"><strong id="attention-count">—</strong><span class="tally-label">owner<br>questions</span></div>
+    </header>
+    <nav id="fleets" aria-label="Choose a fleet"></nav>
+    <details class="legend"><summary>State signals</summary><ul class="legend-list"><li><span class="lamp working"></span>Working</li><li><span class="lamp idle"></span>Idle</li><li><span class="lamp question"></span>Owner question</li><li><span class="lamp blocked"></span>Native dialog</li><li><span class="lamp done"></span>Done</li><li><span class="lamp absent"></span>Absent or unknown</li></ul><p>A message crossing the line is a logged send. A ring is an observed state change or delivery. Delivery and agent state are separate. Idle does not mean work was accepted.</p></details>
+  </aside>
+  <main class="pane" id="main">
+    <p id="persistent-mode" class="persistent-mode">Owner session required</p>
+    <header class="pane-head">
+      <div><p class="eyebrow">Fleet observation · Watch only</p><h2 id="fleet-title">Connect your console</h2></div>
+      <div class="toolbar"><button id="motion" role="switch" aria-checked="true">Motion <span id="motion-state" class="switch-state" aria-hidden="true">on</span></button><button id="demo-answer" class="attention" hidden>Answer Demo question</button><button id="replay" hidden>Replay Demo</button></div>
+    </header>
+    <div class="readouts"><span id="freshness">Use the full launch address printed by the foreground process.</span><span id="watcher">Watcher unknown</span></div>
+    <p id="notice" role="status" aria-live="polite">The launch capability establishes this browser's owner session.</p>
+    <section class="questions panel" aria-labelledby="questions-title">
+      <h3 id="questions-title" class="eyebrow panel-heading">Owner questions</h3>
+      <div id="questions"><p class="empty">No observation yet.</p></div>
+      <div id="owner-detail" hidden>
+        <div class="detail-heading"><strong id="question-sender"></strong><button id="close-question">Close question</button></div>
+        <pre id="question-body" class="message-body"></pre>
+        <div class="toolbar"><button id="read-question">Read selected message</button><button id="reply-question">Reply to sender</button><span>Reading records delivery; replying settles a request.</span></div>
+      </div>
+    </section>
+    <ol id="demo-stages" class="demo-stages" hidden aria-label="Synthetic authored Demo stages"></ol>
+    <section aria-label="Agent seats" class="seat-line" id="seat-line"><div class="seats-wrap"><div id="travel" class="travel" aria-hidden="true"></div><div id="seats" class="seats"></div></div></section>
+    <section class="workspace panel" id="workspace">
+      <header class="workspace-head"><div class="tabs" role="tablist" aria-label="Fleet views">
+        <button id="tab-terminal" role="tab" aria-selected="true" aria-controls="terminal-panel">Terminal</button>
+        <button id="tab-log" role="tab" aria-selected="false" aria-controls="log-panel">Fleet log<span id="log-count" class="tab-count" hidden></span></button>
+        <button id="tab-messages" role="tab" aria-selected="false" aria-controls="messages-panel">Messages</button>
+      </div><span id="target-label">Choose a seat</span></header>
+      <div id="terminal-panel" role="tabpanel" aria-labelledby="tab-terminal">
+        <div class="terminal-tools"><div class="toolbar"><button id="watch">Watch terminal</button><button id="disconnect">Disconnect</button><button id="refit">Refit Watch</button><button id="copy">Copy screen</button></div><span class="expand-group"><span id="esc-hint" class="esc-hint" hidden>Esc restores</span><button id="expand" aria-expanded="false" aria-controls="terminal-screen">Expand terminal</button></span></div>
+        <p id="terminal-status" class="terminal-status" role="status">Read-only observation. Handle native dialogs in Herdr.</p>
+        <div id="terminal-screen" class="terminal-screen" tabindex="-1" aria-label="Read-only ANSI terminal"></div>
+        <div id="grip" class="height-grip" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="Terminal height" aria-valuemin="200" aria-valuemax="900" aria-valuenow="360"></div>
+        <p class="terminal-foot">WATCH ONLY · No input, controller, focus or agent-pane resize. Stream closure does not establish agent exit.</p>
+      </div>
+      <div id="log-panel" role="tabpanel" aria-labelledby="tab-log" hidden><div class="toolbar"><button id="refresh-log">Refresh log</button><button id="watch-log">Watcher log</button></div><pre id="log-output"></pre></div>
+      <div id="messages-panel" role="tabpanel" aria-labelledby="tab-messages" hidden><div class="toolbar"><button id="owner-history">Owner mailbox</button><button id="seat-history">Selected seat history</button><button id="refresh-messages">Refresh messages</button></div><div id="message-output"></div></div>
+    </section>
+    <section class="composer panel" aria-labelledby="composer-title">
+      <div class="detail-heading"><h3 id="composer-title" class="eyebrow">Owner message</h3><button id="clear-reply" hidden>New message</button></div>
+      <p id="compose-target">Choose a registered seat. Sends use ordinary guarded delivery.</p>
+      <label for="draft">Message</label><textarea id="draft" rows="3" maxlength="32768" placeholder="Plain text for the selected seat"></textarea>
+      <label id="read-with-reply-label" hidden><input id="read-with-reply" type="checkbox"> Explicitly read this owner message before replying</label>
+      <div class="toolbar"><button class="solid" id="send">Send owner message</button><button id="new-attempt" hidden>Prepare new attempt</button><span id="action-result" role="status" aria-live="polite">A confirmed delivery is not acceptance of work.</span></div>
+    </section>
+    <footer>LOCAL OWNER SESSION · Data stays on this foreground service · Ctrl-C in its shell closes the dashboard.</footer>
+  </main>
+</div>
+</body>
+</html>

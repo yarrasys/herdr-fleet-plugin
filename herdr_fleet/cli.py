@@ -67,6 +67,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     sub.required = True
 
+    p = sub.add_parser("dashboard", help="foreground local owner dashboard and read-only ANSI Watch",
+                       description="Start a loopback-only authenticated owner dashboard. Watch observes terminals; "
+                                   "it cannot type, attach, focus or manage agents. Ctrl-C closes all observers.")
+    p.add_argument("--fleet", dest="fleets", action="append", metavar="PATH",
+                   help="register a fleet file (repeatable; otherwise discover from cwd/environment)")
+    p.add_argument("--all-fleets", action="store_true",
+                   help="also discover conventional fleets from live agents in this Herdr session")
+    p.add_argument("--port", type=int, default=0, help="loopback port, default 0 chooses an available port")
+    p.add_argument("--open", dest="open_browser", action="store_true", help="open this launch capability in your browser")
+    p.add_argument("--context", action="store_true", help="opt into numbers-only provider context readings")
+    p.add_argument("--demo", action="store_true", help="synthetic demonstration; no Herdr, fleet files or live actions")
+
     p = sub.add_parser("up", parents=[common],
                        help="start every seat that is not running, brief it, and start the watcher below the seats")
     p.add_argument("names", nargs="*", metavar="NAME", help="only these seats (default: all)")
@@ -430,13 +442,16 @@ def main(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] 
 def _file_operation(args: argparse.Namespace) -> bool:
     """Section 40's file operations never notify, including on errors. An implicit
     inbox identity may still need its existing read-only caller lookup."""
-    return ((args.command == "state" and args.state_action in ("get", "set", "append"))
+    return (args.command == "dashboard" or (args.command == "state" and args.state_action in ("get", "set", "append"))
             or (args.command == "log" and args.expired_fyi)
             or (args.command == "inbox" and (args.show is not None or isinstance(args.read, str))))
 
 
 def _dispatch(ctx: Ctx, args: argparse.Namespace, stdin: TextIO) -> int:
     command = args.command
+    if command == "dashboard":
+        from herdr_fleet.dashboard import serve
+        return serve(ctx, args)
     if _file_operation(args) and (command != "inbox" or args.as_name):
         # File-only commands cannot resolve a leaked plugin-action context by
         # asking Herdr for its focused pane. Explicit fleet paths still win.

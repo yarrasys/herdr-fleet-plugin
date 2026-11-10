@@ -916,7 +916,8 @@ def _fyi_hint(ctx: Ctx, target: Target, message: Message, request: Optional[Dict
 def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_name: Optional[str] = None,
             when_ready_ms: Optional[int] = None, all_seats: bool = False, fyi: bool = False,
             queue: bool = False, now: bool = False, reply_to: Optional[str] = None,
-            ttl: Optional[str] = None, urgent: bool = False) -> int:
+            ttl: Optional[str] = None, urgent: bool = False,
+            on_result: Optional[Callable[[Dict], None]] = None) -> int:
     """Design 18.3, 20.3, 23.1 and 37.3. The inbox note first, then one line per target, with a note
     after a queued FYI that answers an idle or done target's open request. Exit 0 when every message
     was sent or queued, 1 on a failed write, a herdr failure, an unconfirmed prompt or ``--now`` refusal."""
@@ -966,6 +967,13 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
             lines, code = _send_routed(ctx, target, message, mode, when_ready_ms, log_file, observed, taken)
         else:
             lines, code = _send_one(ctx, target, message, mode, when_ready_ms, log_file, observed)
+        if on_result is not None:
+            try:
+                on_result(send_result(ctx, target, message, code))
+            except Exception:
+                # A consumer failed after possible delivery. Never retry this send.
+                ctx.warn("send result consumer failed; delivery may have occurred, do not retry automatically")
+                code = EXIT_FAIL
         for line in lines:
             owner = target.destination.path if target.destination else ctx.fleet.path
             route = ""
@@ -985,6 +993,62 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
     if EXIT_FAIL in codes:
         return EXIT_FAIL
     return EXIT_PARTIAL if EXIT_PARTIAL in codes else EXIT_OK
+
+
+def send_result(ctx: Ctx, target: Target, message: Message, code: int) -> Dict:
+    """Optional 41.5 metadata result, based on receipts, never a new/cur location.
+
+    Only callback users make this bounded read; ordinary CLI paths are unchanged.
+    Missing/partial receipt evidence is deliberately uncertain.
+    """
+    source = os.path.realpath(ctx.fleet.repo)
+    destination = os.path.realpath(target.destination.repo) if target.destination else source
+    status = "unconfirmed"
+    evidence = []
+    for root in dict.fromkeys((source, destination)):
+        try:
+            with open(log_path(root), "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - 1048576))
+                raw = handle.read(1048576)
+            if size > 1048576:
+                raw = raw.partition(b"\n")[2]
+            for line in raw.split(b"\n")[:-1]:
+                try:
+                    entry = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(entry, dict) or entry.get("id") != message.id:
+                    continue
+                when = inbox.parse_time(entry.get("time")) if isinstance(entry.get("time"), str) else None
+                if when is None:
+                    continue
+                candidate = None
+                if entry.get("kind") == "send":
+                    delivery = entry.get("delivery")
+                    if delivery in ("sent", "queued", "unconfirmed", "refused"):
+                        candidate = "delivered" if delivery == "sent" else delivery
+                elif entry.get("kind") == "delivered":
+                    candidate = "unconfirmed" if entry.get("delivery") == "unconfirmed" else "delivered"
+                elif entry.get("kind") in ("expired", "dropped"):
+                    candidate = entry["kind"]
+                if candidate:
+                    evidence.append((when, candidate))
+        except OSError:
+            pass
+    # Queue receipts are enqueue evidence, never authority to erase later or
+    # uncertain terminal evidence from the other root. Equal-time uncertainty
+    # wins conservatively; a strictly later confirmed terminal receipt may resolve it.
+    terminal = [e for e in evidence if e[1] != "queued"]
+    choices = terminal or evidence
+    if choices:
+        priority = {"queued": 0, "delivered": 1, "refused": 2, "expired": 3, "dropped": 3, "unconfirmed": 4}
+        status = max(choices, key=lambda e: (e[0], priority[e[1]]))[1]
+    if code != EXIT_OK and status == "queued":
+        status = "unconfirmed"
+    return {"id": message.id or None, "source": source, "destination": destination, "recipient": target.name,
+            "status": status, "certainty": "unconfirmed" if status == "unconfirmed" else "confirmed", "code": code}
 
 
 def fleet_flag(ctx: Ctx) -> str:
