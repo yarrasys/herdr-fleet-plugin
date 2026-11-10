@@ -170,9 +170,14 @@ def reserved(roots):
 
 
 def receipt_matches(actual: Message, expected: Message) -> bool:
+    if actual.dashboard_chat is not None or expected.dashboard_chat is not None:
+        from herdr_fleet.dashboard_provenance import valid_shape
+        if not valid_shape(actual.dashboard_chat) or not valid_shape(expected.dashboard_chat):
+            return False
     return all(getattr(actual, key) == getattr(expected, key) for key in (
         "id", "sender", "to", "time", "fyi", "reply_to", "ttl", "queued_by", "priority",
-        "origin_fleet", "destination_fleet", "requested_to", "route_bytes", "origin_send_order", "destination_send_order"))
+        "origin_fleet", "destination_fleet", "requested_to", "route_bytes", "origin_send_order", "destination_send_order",
+        "dashboard_chat"))
 
 
 def counterpart(repo: str, message: Message):

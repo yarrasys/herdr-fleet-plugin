@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.required = True
 
     p = sub.add_parser("dashboard", help="foreground local owner dashboard and read-only ANSI Watch",
-                       description="Start a loopback-only authenticated owner dashboard. Watch observes terminals; "
+                       description="Start a loopback-only authenticated owner dashboard with continuous selected-agent conversations, automatic receipt updates and explicit agent replies. Watch observes terminals; "
                                    "it cannot type, attach, focus or manage agents. Ctrl-C closes all observers.")
     p.add_argument("--fleet", dest="fleets", action="append", metavar="PATH",
                    help="register a fleet file (repeatable; otherwise discover from cwd/environment)")

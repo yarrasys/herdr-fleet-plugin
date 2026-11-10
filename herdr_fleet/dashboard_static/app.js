@@ -8,7 +8,23 @@
     question: null, reply: null, drafts: new Map(), intent: null, watch: null, streamKey: null,
     first: true, seen: new Set(), motion: !matchMedia("(prefers-reduced-motion: reduce)").matches,
     expanded: false, collapsed: false, messageMailbox: "owner", tick: null,
-    motionChosen: false, unseen: new Map(), ownerSeen: new Set(), tally: null, flights: 0, authEpoch: 0};
+    motionChosen: false, unseen: new Map(), ownerSeen: new Set(), tally: null, flights: 0, authEpoch: 0,
+    threads: new Map(), editGeneration: 0, replyGeneration: 0, readGeneration: 0,
+    conversationRequest: 0, historyRequest: 0, quiet: false, savedReplies: new Map(), threadAccess: 0};
+  const conversationView = typeof ConversationView !== "undefined" ? ConversationView.mount($("conversation"), {
+    onOlder: function () { const item = thread(); item.limit = Math.min(100, item.limit + 50); refreshConversation(); },
+    onSeen: function (key) { const item = state.threads.get(key); if (item) item.unseen = 0; },
+    onReply: function (key, id) {
+      if (key !== threadKey()) return;
+      chooseReply(id); render(); $("draft").focus();
+    }
+  }) : null;
+  const recentConversations = conversationView ? document.createElement("nav") : null;
+  if (recentConversations) {
+    recentConversations.className = "toolbar";
+    recentConversations.setAttribute("aria-label", "Recent conversations");
+    $("conversation-panel").insertBefore(recentConversations, $("conversation"));
+  }
   const term = new Terminal({disableStdin: true, cursorBlink: false, convertEol: false, scrollback: 1000,
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fontSize: 12,
     theme: {background: "#02050a", foreground: "#dcebf4", cursor: "#5fd8ff"},
@@ -47,10 +63,19 @@
   function targetFleet() { return state.data && state.data.fleets.find(function (f) { return f.id === state.targetFleet; }); }
   function currentSeat() { const f = targetFleet(); return f && f.seats.find(function (s) { return s.name === state.seat; }); }
   function draftKey() { return [state.fleet, state.targetFleet, state.seat, state.reply || ""].join("|"); }
-  function saveDraft() { if (state.fleet) state.drafts.set(draftKey(), {text: $("draft").value, intent: state.intent}); }
+  function saveDraft(event) {
+    if (!state.fleet) return;
+    const key = draftKey(), old = state.drafts.get(key), text = $("draft").value;
+    const changed = !old || old.text !== text || (event && event.type === "input");
+    const read = !!$("read-with-reply").checked;
+    const readGeneration = old && old.read !== read ? ++state.readGeneration : old ? old.readGeneration || 0 : 0;
+    state.drafts.set(key, {text: text, intent: state.intent, read: read, readGeneration: readGeneration,
+      generation: changed ? ++state.editGeneration : old.generation});
+  }
   function restoreDraft() {
     const draft = state.drafts.get(draftKey());
     $("draft").value = draft ? draft.text : ""; state.intent = draft ? draft.intent : null;
+    $("read-with-reply").checked = !!(draft && draft.read);
     $("new-attempt").hidden = !state.intent;
     $("action-result").textContent = state.intent && state.intent.description ? state.intent.description : "A confirmed delivery is not acceptance of work.";
   }
@@ -58,8 +83,189 @@
     const moved = fleetId !== state.targetFleet || name !== state.seat;
     saveDraft();
     if (moved) { disconnect("Watch disconnected: selected target changed. Screen cleared."); term.reset(); }
-    state.targetFleet = fleetId; state.seat = name; state.reply = null;
+    state.targetFleet = fleetId; state.seat = name; state.reply = null; state.replyGeneration++;
+    thread().unseen = 0;
     restoreDraft(); render();
+  }
+  function threadKey() { return [state.fleet, state.targetFleet, state.seat].join("|"); }
+  function thread(key) {
+    key = key || threadKey();
+    if (!state.threads.has(key)) state.threads.set(key, {messages: [], local: new Map(), supersedes: new Map(), state: "loading", limit: 50, unseen: 0});
+    const item = state.threads.get(key);
+    if (key === threadKey()) item.visited = true;
+    return item;
+  }
+  function chooseReply(id) {
+    saveDraft(); state.reply = id; state.replyGeneration++; restoreDraft();
+  }
+  function savedReply() {
+    const saved = state.savedReplies.get(threadKey());
+    if (!saved) return null;
+    for (const id of saved) {
+      const draft = state.drafts.get(threadKey() + "|" + id);
+      if (draft && (draft.text || draft.intent)) return id;
+      saved.delete(id);
+    }
+    return null;
+  }
+  function selectConversation(key) {
+    const identity = key.split("|"), source = state.data.fleets.find(function (f) { return f.id === identity[0]; });
+    const target = state.data.fleets.find(function (f) { return f.id === identity[1]; });
+    if (!source || !target || !target.seats.some(function (s) { return s.name === identity[2]; })) {
+      notice("This conversation is no longer registered. Refresh before acting."); return;
+    }
+    saveDraft(); disconnect("Watch disconnected: conversation changed. Screen cleared."); term.reset();
+    state.fleet = source.id; state.targetFleet = target.id; state.seat = identity[2];
+    thread().unseen = 0;
+    state.reply = null; state.replyGeneration++; state.question = null; $("owner-detail").hidden = true;
+    restoreDraft(); render(); refreshConversation();
+    if (state.tab !== "terminal") refreshTab().catch(fail);
+  }
+  function renderRecent() {
+    if (!recentConversations || !state.data) return;
+    const focused = document.activeElement && document.activeElement.dataset.focusKey;
+    const recent = Array.from(state.threads).filter(function (pair) {
+      const identity = pair[0].split("|");
+      return pair[1].visited && identity[0] === state.fleet && identity[1] !== identity[0] &&
+        state.data.fleets.some(function (f) { return f.id === identity[1] && f.seats.some(function (s) { return s.name === identity[2]; }); });
+    }).sort(function (a, b) { return (b[1].access || 0) - (a[1].access || 0); }).slice(0, 8);
+    const controls = recent.map(function (pair) {
+      const identity = pair[0].split("|"), source = currentFleet();
+      const target = state.data.fleets.find(function (f) { return f.id === identity[1]; });
+      const label = String(source.label).slice(0, 80) + " → " + String(target.label).slice(0, 80) + " · " + identity[2];
+      const control = button(label + (pair[1].unseen ? " · Activity +" + pair[1].unseen : ""), function () { selectConversation(pair[0]); });
+      control.dataset.focusKey = "recent:" + pair[0];
+      control.setAttribute("aria-pressed", String(pair[0] === threadKey()));
+      return control;
+    });
+    recentConversations.hidden = !controls.length;
+    recentConversations.replaceChildren.apply(recentConversations, controls);
+    const same = controls.find(function (control) { return control.dataset.focusKey === focused; });
+    if (same) same.focus({preventScroll: true});
+  }
+  function pruneCompletions(item) {
+    const visible = new Map(item.messages.map(function (row) { return [row.id, row]; }));
+    item.supersedes.forEach(function (_, id) { if (!visible.has(id)) item.supersedes.delete(id); });
+    item.local.forEach(function (record, intent) {
+      if (!record.retired || record.demo) return;
+      const actual = visible.get((record.result || {}).id);
+      if (actual && actual.from === "owner" && actual.to === record.seat) {
+        record.reconciled = true;
+        item.supersedes.set(actual.id, "intent:" + intent);
+        if (actual.body !== null) item.local.delete(intent);
+      } else if (record.reconciled) item.local.delete(intent);
+    });
+    const retained = Array.from(item.local).filter(function (pair) { return pair[1].retired && !pair[1].demo; });
+    retained.slice(0, Math.max(0, retained.length - 100)).forEach(function (pair) { item.local.delete(pair[0]); });
+    // Bodies of completed inactive conversations are a cache. Drafts and all
+    // pending/uncertain attempts remain independently retained.
+    const inactive = Array.from(state.threads).filter(function (pair) { return pair[0] !== threadKey(); })
+      .sort(function (a, b) { return (b[1].access || 0) - (a[1].access || 0); });
+    inactive.slice(31).forEach(function (pair) {
+      pair[1].messages = []; pair[1].supersedes.clear();
+      pair[1].local.forEach(function (record, id) { if (record.retired && !record.demo) pair[1].local.delete(id); });
+    });
+  }
+  function renderConversation() {
+    if (!conversationView || !state.data || !state.seat) return;
+    const item = thread(), rows = item.messages.map(function (row) {
+      const result = Object.assign({key: row.id}, row);
+      if (result.incomplete) result.certainty = "unconfirmed";
+      if (item.supersedes.has(row.id)) result.supersedes = item.supersedes.get(row.id);
+      return result;
+    });
+    const indexed = new Map(rows.map(function (row) { return [row.id, row]; }));
+    item.local.forEach(function (record, intent) {
+      const result = record.result || {};
+      let stored = indexed.get(result.id);
+      if (!stored && record.demo) stored = rows.find(function (row) { return row.status === "local" && row.from === "owner" && row.to === record.seat && row.reply_to === record.reply; });
+      const localKey = "intent:" + intent;
+      if (stored) { stored.supersedes = localKey; if (stored.body === null || record.demo) stored.body = record.text; return; }
+      rows.push({key: localKey, id: result.id || null, from: "owner", to: record.seat, time: record.time,
+        body: record.text, status: record.pending ? "sending" : result.status || "unconfirmed",
+        certainty: result.certainty || "unconfirmed", reply_to: record.reply, receipts: record.receipts || [],
+        detail: result.message || "", incomplete: !record.pending && result.certainty === "unconfirmed"});
+    });
+    const ordered = rows.map(function (row, index) {
+      const stamp = Date.parse(row.time);
+      if (!Number.isFinite(stamp)) { row.incomplete = true; row.certainty = "unconfirmed"; }
+      return {row: row, stamp: Number.isFinite(stamp) ? stamp : Infinity, index: index};
+    }).sort(function (a, b) { return a.stamp === b.stamp ? a.index - b.index : a.stamp - b.stamp; });
+    conversationView.render({thread: threadKey(), peer: state.seat, demo: !!state.data.demo,
+      state: item.state, note: item.note || "", older: item.truncated ? "truncated" : "none",
+      messages: ordered.map(function (item) { return item.row; }), quiet: state.quiet});
+    renderRecent();
+  }
+  function retire(record, result) {
+    if (result.certainty !== "confirmed" || !["queued", "delivered"].includes(result.status) || record.retired) return;
+    record.retired = true;
+    const draft = state.drafts.get(record.draftKey);
+    if (!draft || draft.intent !== record.intent) return;
+    const newerEdit = draft.generation !== record.generation;
+    const description = record.seat + " · " + result.status + (result.id ? " · #" + result.id.slice(-6) : "") +
+      " · " + result.certainty + " · delivery is not work acceptance";
+    record.intent.description = description;
+    draft.intent = null;
+    if (draft.generation === record.generation) draft.text = "";
+    const retireRead = record.reply && draft.readGeneration === record.readGeneration;
+    if (retireRead) draft.read = false;
+    if (record.reply) {
+      if (!state.savedReplies.has(record.threadKey)) state.savedReplies.set(record.threadKey, new Set());
+      const saved = state.savedReplies.get(record.threadKey);
+      if (draft.text) saved.add(record.reply); else saved.delete(record.reply);
+    }
+    if (draftKey() === record.draftKey && state.intent === record.intent) {
+      let restoredIndependent = false;
+      state.intent = null;
+      if ($("draft").value !== draft.text) $("draft").value = draft.text;
+      if (retireRead) $("read-with-reply").checked = false;
+      if (record.reply && state.reply === record.reply && state.replyGeneration === record.replyGeneration) {
+        state.reply = null; state.replyGeneration++;
+        const plain = state.drafts.get(draftKey());
+        if (plain && (plain.text || plain.intent)) {
+          restoreDraft();
+          restoredIndependent = true;
+          if (draft.text) notice("Reply delivered. Your independent plain draft is restored; Continue saved reply draft keeps your newer edit available.");
+        } else {
+          saveDraft();
+          if (draft.text) {
+            draft.text = "";
+            state.savedReplies.get(record.threadKey).delete(record.reply);
+          }
+        }
+      }
+      if (!restoredIndependent) $("action-result").textContent = (newerEdit ? "Previous message · " : "") + description +
+        (newerEdit ? ". Newer draft retained." : "");
+      $("new-attempt").hidden = !state.intent;
+    }
+  }
+  async function refreshConversation() {
+    if (!state.csrf || !state.seat || document.hidden) return;
+    const key = threadKey(), epoch = state.authEpoch, request = ++state.conversationRequest, item = thread(key);
+    const query = "?source=" + encodeURIComponent(state.fleet) + "&fleet=" + encodeURIComponent(state.targetFleet) +
+      "&seat=" + encodeURIComponent(state.seat) + "&limit=" + item.limit;
+    try {
+      const data = await (await api("/api/conversation" + query)).json();
+      if (epoch !== state.authEpoch || request !== state.conversationRequest || key !== threadKey()) return;
+      item.messages = data.messages || []; item.truncated = data.truncated;
+      item.access = ++state.threadAccess;
+      item.state = item.messages.some(function (row) { return row.incomplete; }) ? "stale" : "ready";
+      item.note = data.incomplete ? "Limited history · some prior records or receipts are incomplete." : "";
+      (data.intents || []).forEach(function (association) {
+        const record = item.local.get(association.intent);
+        const actual = item.messages.find(function (row) { return row.id === association.id && row.from === "owner" && row.to === record?.seat; });
+        if (!record || !actual) return;
+        record.result = {id: actual.id, status: actual.status, certainty: actual.incomplete ? "unconfirmed" : actual.certainty};
+        record.pending = false;
+        retire(record, record.result);
+      });
+      pruneCompletions(item);
+      renderConversation();
+    } catch (error) {
+      if (epoch !== state.authEpoch || request !== state.conversationRequest || key !== threadKey()) return;
+      item.state = "stale"; item.note = "Disconnected · last conversation retained. " + error.message;
+      renderConversation();
+    }
   }
   function lamp(status) {
     const item = node("span", "", "lamp " + (["working", "blocked", "idle", "done", "absent", "question"].includes(status) ? status : "unknown"));
@@ -75,7 +281,8 @@
     const fleet = state.data.fleets.find(function (f) { return f.id === id; }); if (!fleet) return;
     saveDraft(); disconnect("Watch disconnected: fleet changed. Screen cleared."); term.reset(); $("travel").replaceChildren();
     state.fleet = fleet.id; state.targetFleet = fleet.id; state.seat = fleet.seats[0] ? fleet.seats[0].name : null;
-    state.question = null; state.reply = null; $("owner-detail").hidden = true;
+    if (state.seat) thread().unseen = 0;
+    state.question = null; state.reply = null; state.replyGeneration++; $("owner-detail").hidden = true;
     restoreDraft(); render(); refreshTab().catch(fail);
   }
   /* Where a name sits along the shown fleet's line: a seat's lamp, the owner at the column edge, anyone else at the far end. */
@@ -183,6 +390,8 @@
       const card = node("span", "", "card");
       card.append(node("strong", seat.name), node("small", seat.kind + " · " + seat.state + (seat.waiting ? " · waiting on its inbox" + (data.demo ? " (authored)" : "") : ""), "state"),
         node("small", seat.queued + " queued · " + seat.fyi + " FYI"));
+      const activity = state.threads.get([state.fleet, fleet.id, seat.name].join("|"));
+      if (activity && activity.unseen) card.append(node("small", activity.unseen + " new", "seat-new"));
       if (seat.context) card.append(node("small", String(seat.context.tokens) + (seat.context.window ? "/" + seat.context.window : "") + " context tokens"));
       if (seat.limited) card.append(node("small", "Recorded provider limit · delivery may be held"));
       b.append(lamp(seat.state), card);
@@ -201,7 +410,9 @@
     $("compose-target").textContent = (state.reply ? "Reply #" + state.reply.slice(-6) + " → " : "To ") + (target ? target.name : "no selected seat") +
       (demoHold ? " · DEMO: recorded in this browser only. Nothing is sent, and the authored run continues as scripted."
         : data.demo ? " · Demo does not send live messages." : " · owner attribution · ordinary guarded delivery");
-    $("clear-reply").hidden = !state.reply; $("read-with-reply-label").hidden = !state.reply || data.demo;
+    $("clear-reply").hidden = !state.reply && !savedReply();
+    $("clear-reply").textContent = state.reply ? "New message" : "Continue saved reply draft";
+    $("read-with-reply-label").hidden = !state.reply || data.demo;
     $("composer-title").parentNode.parentNode.classList.toggle("replying", !!state.reply);
     $("demo-stages").hidden = !data.demo;
     $("demo-answer").hidden = !(data.demo && data.hold);
@@ -221,6 +432,7 @@
       const replacement = Array.from(document.querySelectorAll("[data-focus-key]")).find(function (item) { return item.dataset.focusKey === focusedKey; });
       if (replacement) replacement.focus({preventScroll: true});
     }
+    renderConversation();
   }
   async function refresh() {
     if (!state.csrf || document.hidden) return;
@@ -250,6 +462,20 @@
         events.forEach(function (pair) {
           const fleetId = pair[0], e = pair[1];
           state.unseen.set(fleetId, (state.unseen.get(fleetId) || 0) + 1);
+          const peerName = e.from === "owner" ? e.to : e.to === "owner" ? e.from :
+            e.from === "herdr-fleet" && e.kind === "delivered" ? e.to : null;
+          const sourceFleet = data.fleets.find(function (f) { return f.id === fleetId; });
+          if (peerName && sourceFleet && sourceFleet.seats.some(function (seat) { return seat.name === peerName; })) {
+            const key = [fleetId, fleetId, peerName].join("|");
+            if (key !== threadKey() && !state.threads.has(key)) thread(key);
+          }
+          state.threads.forEach(function (item, key) {
+            const identity = key.split("|");
+            if (key === threadKey() || identity[0] !== fleetId) return;
+            const peer = identity[2];
+            if ((e.from === peer && e.to === "owner") || (e.from === "owner" && e.to === peer) ||
+                (e.from === "herdr-fleet" && e.to === peer && e.kind === "delivered")) item.unseen = Math.min(999, item.unseen + 1);
+          });
           if (fleetId !== state.fleet) return;
           if (e.kind === "send") { sent.add(e.id); travel(e, e.delivery === "queued" ? "queued" : null); }
           else if (e.kind === "delivered") {
@@ -257,7 +483,6 @@
           }
         });
         bump($("log-count")); render();
-        if (state.tab === "log") refreshTab().catch(fail);
       }
       if (!state.first && previous) {
         const before = new Map();
@@ -269,10 +494,27 @@
         });
       }
       state.first = false;
-    } catch (error) { if (epoch === state.authEpoch) { notice("Disconnected · last observation retained. " + error.message); $("freshness").textContent = "DISCONNECTED · last observation retained"; } }
+      await refreshConversation();
+      if (state.tab !== "terminal") {
+        const historyKey = threadKey();
+        try { await refreshTab(); }
+        catch (error) { if (epoch === state.authEpoch && historyKey === threadKey()) notice("History unavailable. " + error.message); }
+      }
+      state.quiet = false;
+    } catch (error) {
+      if (epoch === state.authEpoch) {
+        notice("Disconnected · last observation retained. " + error.message);
+        $("freshness").textContent = "DISCONNECTED · last observation retained";
+        state.conversationRequest++;
+        if (state.data && state.seat) {
+          const item = thread(); item.state = "stale"; item.note = "Disconnected · last conversation retained. " + error.message;
+          renderConversation();
+        }
+      }
+    }
   }
-  async function list(mode, name, id) {
-    let query = "?fleet=" + encodeURIComponent(state.fleet) + "&mode=" + mode + "&limit=50";
+  async function list(mode, name, id, fleet) {
+    let query = "?fleet=" + encodeURIComponent(fleet || state.fleet) + "&mode=" + mode + "&limit=50";
     if (name) query += "&name=" + encodeURIComponent(name);
     if (id) query += "&id=" + encodeURIComponent(id);
     return (await api("/api/list" + query)).json();
@@ -286,13 +528,20 @@
     $("reply-question").focus();
   }
   async function refreshTab() {
+    const epoch = state.authEpoch, key = threadKey(), tab = state.tab, mailbox = state.messageMailbox;
+    const request = ++state.historyRequest;
+    const current = function () { return epoch === state.authEpoch && key === threadKey() && tab === state.tab &&
+      mailbox === state.messageMailbox && request === state.historyRequest; };
     if (state.tab === "log") {
       state.unseen.set(state.fleet, 0); logBadge();
       const result = await list("log");
+      if (!current()) return;
       const lines = result.items.map(function (e) { return [e.time, e.from + " → " + e.to, e.kind, e.delivery || e.via || "", e.id ? "#" + e.id.slice(-6) : "", e.first_line || ""].join("  "); });
       $("log-output").textContent = lines.join("\n") + (result.truncated ? "\n[Recent page truncated; inspect the CLI log for older entries.]" : "");
     } else if (state.tab === "messages") {
-      const result = await list("messages", state.messageMailbox === "owner" ? "owner" : state.seat);
+      const result = await list("messages", state.messageMailbox === "owner" ? "owner" : state.seat, null,
+                                state.messageMailbox === "owner" ? state.fleet : state.targetFleet);
+      if (!current()) return;
       const children = result.items.map(function (m) {
         const item = node("article", "", "message-item");
         item.append(node("strong", m.sender + " → " + m.to + " · #" + m.id.slice(-6) + " · " + m.box + "/"),
@@ -375,7 +624,7 @@
   new ResizeObserver(scheduleViewport).observe($("terminal-screen"));
   async function send() {
     const target = currentSeat(); if (!target) return;
-    if (state.data.demo) { demoReply(); return; }
+    if (state.data.demo) return demoReply();
     const text = $("draft").value;
     if (!text.trim()) { notice("Enter a plain-text message first."); return; }
     const body = {action: "send", source: state.fleet, fleet: state.targetFleet, seat: target.name,
@@ -392,34 +641,61 @@
     const origin = draftKey(), intent = state.intent;
     intent.pending = true;
     body.intent = intent.id; saveDraft(); $("send").disabled = true; $("new-attempt").disabled = true;
+    const conversation = thread(), captured = state.drafts.get(origin);
+    let record = conversation.local.get(intent.id);
+    if (!record) {
+      record = {intent: intent, draftKey: origin, generation: captured.generation,
+        threadKey: threadKey(),
+        replyGeneration: state.replyGeneration, readGeneration: captured.readGeneration,
+        seat: target.name, text: text, time: new Date().toISOString(), reply: state.reply,
+        pending: true, result: null};
+      conversation.local.set(intent.id, record);
+    }
+    record.pending = true; renderConversation();
     try {
       const result = await (await api("/api/action", body)).json();
+      if (!record.retired) record.result = result;
       intent.result = result;
       intent.description = target.name + " · " + result.status + (result.id ? " · #" + result.id.slice(-6) : "") +
         " · " + result.certainty + (result.replayed ? " · existing intent result" : "") + " · delivery is not work acceptance";
+      retire(record, record.result);
       await refresh();
     } catch (error) {
-      intent.description = target.name + " · Result uncertain or rejected · " + error.message + " Draft and intent retained.";
+      if (!record.retired) {
+        record.result = {status: "unconfirmed", certainty: "unconfirmed", message: "Result uncertain; inspect receipts before an explicit new attempt."};
+        intent.description = target.name + " · Result uncertain or rejected · " + error.message + ". Draft and intent retained.";
+      }
     } finally {
-      intent.pending = false;
+      intent.pending = false; record.pending = false;
       if (draftKey() === origin && state.intent === intent) {
         $("action-result").textContent = intent.description;
         $("new-attempt").hidden = false;
       }
-      render();
+      render(); renderConversation();
     }
   }
   async function demoReply() {
-    if (!state.data.demo || !state.data.hold || !state.reply) return;
+    if (!state.data.demo || !state.data.hold || !state.reply || state.demoPending) return;
     const typed = $("draft").value.trim().length;
     if (!typed) { notice("Type a sample reply first. It stays in this browser."); return; }
+    saveDraft();
+    const origin = draftKey(), reply = state.reply, generation = state.drafts.get(origin).generation;
+    const replyGeneration = state.replyGeneration, item = thread(), text = $("draft").value, seat = state.seat;
+    state.demoPending = true;
     $("send").disabled = true;
     try {
       await (await api("/api/demo/reply", {})).json();
-      $("action-result").textContent = "DEMO · sample reply recorded in this browser only (" + typed + " characters). Nothing was sent. The authored run continues.";
-      $("draft").value = ""; saveDraft(); state.reply = null; state.question = null; $("owner-detail").hidden = true; restoreDraft();
+      item.local.set("demo:" + uniqueIntent(), {demo: true, seat: seat, reply: reply, text: text,
+        time: new Date().toISOString(), result: {status: "local", certainty: "confirmed"}, pending: false});
+      if (draftKey() === origin && state.drafts.get(origin).generation === generation) {
+        $("action-result").textContent = "DEMO · sample reply recorded in this browser only (" + typed + " characters). Nothing was sent. The authored run continues.";
+        $("draft").value = ""; saveDraft();
+        if (state.replyGeneration === replyGeneration) { state.reply = null; state.replyGeneration++; saveDraft(); }
+        if (state.question && state.question.id === reply) { state.question = null; $("owner-detail").hidden = true; }
+      }
       await refresh();
-    } catch (error) { $("action-result").textContent = "DEMO · the Demo server did not accept the reply action · " + error.message; render(); }
+    } catch (error) { if (draftKey() === origin) $("action-result").textContent = "DEMO · the Demo server did not accept the reply action · " + error.message; render(); }
+    finally { state.demoPending = false; renderConversation(); }
   }
   $("demo-answer").addEventListener("click", function () {
     const fleet = state.data.fleets.find(function (f) { return questionsOf(f).length; }); if (!fleet) return;
@@ -461,6 +737,7 @@
   });
   $("replay").addEventListener("click", function () {
     $("travel").replaceChildren(); state.ownerSeen.clear();
+    state.threads.forEach(function (item) { item.local.forEach(function (record, key) { if (record.demo) item.local.delete(key); }); });
     $("action-result").textContent = "A confirmed delivery is not acceptance of work.";
     api("/api/demo/replay", {}).then(function (response) { return response.json(); }).then(refresh).catch(fail);
   });
@@ -490,7 +767,7 @@
     if (!state.question) return;
     const matches = []; state.data.fleets.forEach(function (f) { f.seats.forEach(function (s) { if (s.name === state.question.sender) matches.push([f.id, s.name]); }); });
     if (matches.length !== 1) { notice("The question sender is not a unique registered seat."); return; }
-    selectedChanged(matches[0][0], matches[0][1]); saveDraft(); state.reply = state.question.id; restoreDraft(); render(); $("draft").focus();
+    selectedChanged(matches[0][0], matches[0][1]); chooseReply(state.question.id); render(); $("draft").focus();
   });
   $("read-question").addEventListener("click", async function () {
     if (!state.question || state.data.demo) return;
@@ -501,7 +778,8 @@
       notice("Selected owner message: " + result.status + " · reading does not acknowledge it."); await refresh();
     } catch (error) { fail(error); } finally { button.disabled = state.data.demo; }
   });
-  $("clear-reply").addEventListener("click", function () { saveDraft(); state.reply = null; restoreDraft(); render(); });
+  $("clear-reply").addEventListener("click", function () { chooseReply(state.reply ? null : savedReply()); render(); });
+  $("read-with-reply").addEventListener("change", function () { saveDraft(); });
   $("draft").addEventListener("input", saveDraft);
   $("send").addEventListener("click", send);
   $("new-attempt").addEventListener("click", function () {
@@ -519,8 +797,8 @@
   $("grip").addEventListener("pointermove", function (event) { if (drag && !state.expanded) height(drag.height + event.clientY - drag.y); });
   $("grip").addEventListener("pointerup", function () { drag = null; });
   $("grip").addEventListener("keydown", function (event) { if (state.expanded) return; if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); height($("terminal-screen").clientHeight + (event.key === "ArrowUp" ? -24 : 24)); } });
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) { state.first = true; refresh(); } });
-  window.addEventListener("pagehide", function () { disconnect(); clearInterval(state.tick); clearTimeout(resizeTimer); });
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) { state.first = true; state.quiet = true; refresh(); } });
+  window.addEventListener("pagehide", function () { disconnect(); clearInterval(state.tick); clearTimeout(resizeTimer); if (conversationView) conversationView.destroy(); });
   async function bootstrap(supplied) {
     const launch = supplied || capability;
     capability = null;

@@ -133,6 +133,8 @@ def send_entry(message: Message, delivery: str, file: Optional[str] = None) -> D
     if message.reply_to:
         entry["reply_to"] = message.reply_to
     entry.update(timer_metadata(message))
+    if message.dashboard_chat is not None:
+        entry["dashboard_chat"] = dict(message.dashboard_chat)
     entry.update(route_metadata(message))
     return entry
 
@@ -917,7 +919,7 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
             when_ready_ms: Optional[int] = None, all_seats: bool = False, fyi: bool = False,
             queue: bool = False, now: bool = False, reply_to: Optional[str] = None,
             ttl: Optional[str] = None, urgent: bool = False,
-            on_result: Optional[Callable[[Dict], None]] = None) -> int:
+            on_result: Optional[Callable[[Dict], None]] = None, dashboard_chat: Optional[Dict] = None) -> int:
     """Design 18.3, 20.3, 23.1 and 37.3. The inbox note first, then one line per target, with a note
     after a queued FYI that answers an idle or done target's open request. Exit 0 when every message
     was sent or queued, 1 on a failed write, a herdr failure, an unconfirmed prompt or ``--now`` refusal."""
@@ -933,6 +935,11 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
     if not (owner_only and not ctx.inside_herdr()):  # a message to the owner may queue outside herdr
         agents = preflight(ctx)
     sender = resolve_sender(ctx, as_name)
+    if dashboard_chat is not None:
+        from herdr_fleet.dashboard_provenance import valid_shape
+        if (sender != OWNER or not valid_shape(dashboard_chat)
+                or dashboard_chat["source_file"] != os.path.realpath(ctx.fleet.path)):
+            raise UsageError("dashboard provenance requires its canonical owner source")
     if all_seats:
         live = {a.get("name") for a in agents}
         names += [s.name for s in ctx.fleet.seats if s.name in live and s.name != sender and s.name not in names]
@@ -960,7 +967,8 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
         message = Message(id="" if target.destination and not ctx.dry_run else inbox.new_id(stamp, taken), sender=sender, to=target.name, time=inbox.iso_local(stamp),
                           body=text, fyi=fyi, reply_to=answers,
                           ttl=inbox.iso_local(stamp + lifetime) if lifetime else None, file=text_file,
-                          queued_by=queued_by, priority=1 if urgent else None)
+                          queued_by=queued_by, priority=1 if urgent else None,
+                          dashboard_chat=dict(dashboard_chat) if dashboard_chat is not None else None)
         log_file = os.path.abspath(text_file) if text_file else None
         request = _request_to_sender(ctx, target, sender, answers) if fyi and mode != "now" else None
         if target.destination:

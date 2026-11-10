@@ -197,6 +197,8 @@ class Observer:
         self.herdr, self.registry, self.env = herdr, registry, dict(env)
         self.context = context
         self.cache = FileCache()
+        from herdr_fleet.dashboard_conversation import Conversation
+        self.conversations = Conversation(registry, self.cache)
         self.lock = threading.RLock()
         self.last = {}
         self.agents = []
@@ -290,6 +292,10 @@ class Observer:
     def snapshot(self):
         with self.lock:
             return {"demo": False, "revision": self.revision, "fleets": copy.deepcopy(list(self.last.values()))}
+
+    def conversation(self, source, fleet, seat, limit=50):
+        with self.lock:
+            return self.conversations.read(source, fleet, seat, limit)
 
     def listing(self, fleet_id, mode, name=None, limit=50, ref=None):
         if type(limit) is not int or not 1 <= limit <= 100:

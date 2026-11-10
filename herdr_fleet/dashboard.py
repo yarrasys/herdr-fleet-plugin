@@ -22,6 +22,7 @@ from herdr_fleet.dashboard_demo import Demo
 ASSET_ROOT = os.path.join(os.path.dirname(__file__), "dashboard_static")
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+          "/conversation-view.js": ("conversation-view.js", "text/javascript; charset=utf-8"),
           "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
           "/vendor/xterm.js": ("vendor/xterm.js", "text/javascript; charset=utf-8"),
           "/vendor/addon-fit.js": ("vendor/addon-fit.js", "text/javascript; charset=utf-8"),
@@ -224,6 +225,14 @@ class Handler(BaseHTTPRequestHandler):
             self.authenticate()
             if parsed.path == "/api/snapshot" and not parsed.query:
                 self.respond(200, self.server.observer.snapshot())
+            elif parsed.path == "/api/conversation":
+                query = parse_qs(parsed.query, strict_parsing=True, max_num_fields=5)
+                if (set(query) - {"source", "fleet", "seat", "limit"}
+                        or not {"source", "fleet", "seat"}.issubset(query)
+                        or any(len(values) != 1 for values in query.values())):
+                    raise DataError("Conversation accepts only a registered fleet pair, canonical seat and bounded limit")
+                self.respond(200, self.server.observer.conversation(query["source"][0], query["fleet"][0],
+                             query["seat"][0], int(query.get("limit", ["50"])[0])))
             elif parsed.path == "/api/list":
                 query = parse_qs(parsed.query, strict_parsing=True, max_num_fields=6)
                 if (set(query) - {"fleet", "mode", "name", "limit", "id"}

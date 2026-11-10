@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="/dashboard.css">
 <script defer src="/vendor/xterm.js"></script>
 <script defer src="/vendor/addon-fit.js"></script>
+<script defer src="/conversation-view.js"></script>
 <script defer src="/app.js"></script>
 </head>
 <body>
@@ -21,7 +22,7 @@
       <div class="tally"><strong id="attention-count">—</strong><span class="tally-label">owner<br>questions</span></div>
     </header>
     <nav id="fleets" aria-label="Choose a fleet"></nav>
-    <details class="legend"><summary>State signals</summary><ul class="legend-list"><li><span class="lamp working"></span>Working</li><li><span class="lamp idle"></span>Idle</li><li><span class="lamp question"></span>Owner question</li><li><span class="lamp blocked"></span>Native dialog</li><li><span class="lamp done"></span>Done</li><li><span class="lamp absent"></span>Absent or unknown</li></ul><p>A message crossing the line is a logged send. A ring is an observed state change or delivery. Delivery and agent state are separate. Idle does not mean work was accepted.</p></details>
+    <details class="legend"><summary>State signals</summary><ul class="legend-list"><li><span class="lamp working"></span>Working</li><li><span class="lamp idle"></span>Idle</li><li><span class="lamp question"></span>Owner question</li><li><span class="lamp blocked"></span>Native dialog</li><li><span class="lamp done"></span>Done</li><li><span class="lamp absent"></span>Absent or unknown</li></ul><p>A message crossing the line is a logged send. A ring is an observed state change or delivery. Delivery and agent state are separate. Idle does not mean work was accepted. In a conversation, each message carries only the receipts actually recorded for it.</p></details>
   </aside>
   <main class="pane" id="main">
     <p id="persistent-mode" class="persistent-mode">Owner session required</p>
@@ -42,6 +43,7 @@
     </section>
     <ol id="demo-stages" class="demo-stages" hidden aria-label="Synthetic authored Demo stages"></ol>
     <section aria-label="Agent seats" class="seat-line" id="seat-line"><div class="seats-wrap"><div id="travel" class="travel" aria-hidden="true"></div><div id="seats" class="seats"></div></div></section>
+    <div class="deck">
     <section class="workspace panel" id="workspace">
       <header class="workspace-head"><div class="tabs" role="tablist" aria-label="Fleet views">
         <button id="tab-terminal" role="tab" aria-selected="true" aria-controls="terminal-panel">Terminal</button>
@@ -58,13 +60,18 @@
       <div id="log-panel" role="tabpanel" aria-labelledby="tab-log" hidden><div class="toolbar"><button id="refresh-log">Refresh log</button><button id="watch-log">Watcher log</button></div><pre id="log-output"></pre></div>
       <div id="messages-panel" role="tabpanel" aria-labelledby="tab-messages" hidden><div class="toolbar"><button id="owner-history">Owner mailbox</button><button id="seat-history">Selected seat history</button><button id="refresh-messages">Refresh messages</button></div><div id="message-output"></div></div>
     </section>
-    <section class="composer panel" aria-labelledby="composer-title">
-      <div class="detail-heading"><h3 id="composer-title" class="eyebrow">Owner message</h3><button id="clear-reply" hidden>New message</button></div>
-      <p id="compose-target">Choose a registered seat. Sends use ordinary guarded delivery.</p>
-      <label for="draft">Message</label><textarea id="draft" rows="3" maxlength="32768" placeholder="Plain text for the selected seat"></textarea>
-      <label id="read-with-reply-label" hidden><input id="read-with-reply" type="checkbox"> Explicitly read this owner message before replying</label>
-      <div class="toolbar"><button class="solid" id="send">Send owner message</button><button id="new-attempt" hidden>Prepare new attempt</button><span id="action-result" role="status" aria-live="polite">A confirmed delivery is not acceptance of work.</span></div>
+    <section class="conversation panel" id="conversation-panel" aria-labelledby="composer-title">
+      <div class="convo-head"><h3 id="composer-title" class="eyebrow">Conversation</h3><button id="clear-reply" hidden>New message</button></div>
+      <div id="conversation" class="convo"><p class="convo-empty">Choose a seat to open its conversation.</p></div>
+      <div class="convo-compose">
+        <p id="compose-target">Choose a registered seat. Sends use ordinary guarded delivery.</p>
+        <label for="draft">Message</label><textarea id="draft" rows="2" maxlength="32768" placeholder="Plain text for the selected seat"></textarea>
+        <label id="read-with-reply-label" hidden><input id="read-with-reply" type="checkbox"> Explicitly read this owner message before replying</label>
+        <div class="toolbar"><button class="solid" id="send">Send owner message</button><button id="new-attempt" hidden>Prepare new attempt</button><span id="send-hint" class="send-hint" hidden>Ctrl or ⌘ + Enter sends</span></div>
+        <p id="action-result" class="action-result" role="status" aria-live="polite">A confirmed delivery is not acceptance of work.</p>
+      </div>
     </section>
+    </div>
     <footer>LOCAL OWNER SESSION · Data stays on this foreground service · Ctrl-C in its shell closes the dashboard.</footer>
   </main>
 </div>

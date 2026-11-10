@@ -316,7 +316,8 @@ class OwnerActions:
                     journal.update(intent, fingerprint, progress={"outgoing_id": outcome["id"],
                                    "outgoing_status": outcome["status"], "outgoing_certainty": outcome["certainty"]})
                 code = messages.op_send(ctx, [target, payload["text"]], as_name="owner",
-                                        reply_to=message, on_result=capture)
+                                        reply_to=message, on_result=capture,
+                                        dashboard_chat={"v": 1, "source_file": os.path.realpath(source.path), "intent": intent})
                 if outcomes:
                     outcome = outcomes[0]
                     result = {k: outcome[k] for k in ("id", "recipient", "status", "certainty", "code")}

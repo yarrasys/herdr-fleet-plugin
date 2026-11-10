@@ -48,7 +48,7 @@ button[aria-checked=false] .switch-state{color:var(--mute)}
 .stale .lamp{filter:grayscale(1);opacity:.55}
 
 /* ---------- frame: 25 / 75 */
-.app{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,3fr);min-height:100vh;transition:grid-template-columns .28s cubic-bezier(.2,.7,.2,1)}
+.app{display:grid;grid-template-columns:25% minmax(0,1fr);min-height:100vh;transition:grid-template-columns .28s cubic-bezier(.2,.7,.2,1)}
 .fleet-column{background:var(--deck);border-right:1px solid var(--line-strong);box-shadow:8px 0 40px rgba(95,216,255,.07);min-width:0;display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow:auto;z-index:1}
 .box-head{padding:20px 18px 16px;border-bottom:1px solid var(--line-dim)}
 .box-top{display:flex;align-items:center;gap:10px;justify-content:space-between}
@@ -195,14 +195,115 @@ h2{font:500 clamp(24px,3.1vw,44px)/1.05 var(--display);letter-spacing:.16em;text
 .message-item{padding:14px;border-top:1px solid var(--line-dim)}
 .message-item strong{font:12px/1.4 var(--mono);color:var(--ice)}
 .message-item .message-body{margin-bottom:0;border-color:var(--cyan)}
-.composer{padding:14px;margin-top:18px}
-.composer label{display:block;font:700 10.5px/1.2 var(--tech);letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin:12px 0 6px}
-.composer textarea{width:100%;max-width:100%;display:block;resize:vertical;padding:11px 12px;border:1px solid var(--line-strong);border-radius:0;background:var(--glass);color:#fff;line-height:1.5;min-height:84px}
-.composer textarea::placeholder{color:var(--mute);opacity:1}
-.composer .toolbar{margin-top:12px}
-#compose-target{color:var(--mute);font:12px/1.6 var(--mono);margin-top:10px}
-#action-result{color:var(--ice)}
 footer{font:10.5px/1.6 var(--mono);color:var(--mute);margin-top:20px}
+
+/* ---------- conversation (design 42): the selected seat's thread above the owner's input */
+.seat .seat-new{display:inline-block;width:fit-content;margin-top:5px;padding:1px 5px;border:1px solid var(--cyan);color:var(--cyan);font:10px/1.3 var(--mono)}
+.conversation{display:flex;flex-direction:column;margin-top:18px}
+.convo-head{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:40px;padding:5px 14px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,rgba(95,216,255,.1),transparent)}
+.convo-head h3{font-size:13px;letter-spacing:.2em;color:#fff}
+.convo-head button{min-height:30px;font-size:10.5px;padding:5px 9px}
+.convo{position:relative;display:flex;flex-direction:column;min-height:0}
+.convo-state{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;padding:9px 14px 8px;border-bottom:1px solid var(--line-dim);font:11px/1.5 var(--mono);color:var(--mute)}
+.convo-peer{font:500 13px/1.2 var(--display);letter-spacing:.14em;text-transform:uppercase;color:#fff;overflow-wrap:anywhere}
+.convo[data-state=stale] .convo-note,.convo[data-state=unavailable] .convo-note{color:var(--amber)}
+.convo[data-state=stale] .convo-list{opacity:.72}
+.convo.demo .convo-peer{color:var(--amber)}
+.convo-scroll{height:clamp(240px,40vh,440px);overflow-y:auto;overflow-anchor:none;overscroll-behavior:contain;padding:12px 14px 16px;scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+.convo-scroll:focus-visible{outline-offset:-3px}
+.convo-list{display:flex;flex-direction:column;gap:12px}
+.convo-list>li{display:flex;flex-direction:column;min-width:0}
+.convo-empty{padding:18px 14px;color:var(--mute);font-size:13px}
+.convo-scroll .convo-empty{padding:18px 0}
+.convo-older{display:block;margin:0 auto 12px;min-height:30px;font-size:10.5px;padding:5px 10px}
+.convo-older[aria-disabled=true]{opacity:.5;cursor:default;border-style:dashed}
+.convo-older-note{margin-bottom:12px;text-align:center;font:11px/1.5 var(--mono);color:var(--mute)}
+.convo-new{position:absolute;left:50%;bottom:10px;z-index:3;transform:translateX(-50%);min-height:32px;padding:7px 14px;border:0;background:var(--cyan);color:#04121c;clip-path:var(--cut);white-space:nowrap}
+.convo-new:hover:not(:disabled){background:#fff;color:#04121c}
+.convo-new:focus-visible{outline:none;box-shadow:inset 0 0 0 2px #04121c,inset 0 0 0 4px #fff}
+.convo-spoken{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.msg-day{align-self:center;display:flex;align-items:center;gap:10px;width:100%;margin:2px 0 12px;font:700 10px/1.2 var(--tech);letter-spacing:.22em;text-transform:uppercase;color:var(--mute)}
+.msg-day:before,.msg-day:after{content:"";flex:1;height:1px;background:var(--line-dim)}
+.first-new:before{content:"New";display:block;margin:0 0 10px;padding-top:6px;border-top:1px solid var(--cyan);font:700 10px/1.2 var(--tech);letter-spacing:.22em;text-transform:uppercase;color:var(--cyan)}
+.msg{position:relative;align-self:flex-start;min-width:min(230px,100%);max-width:88%;padding:8px 12px 9px;border:1px solid var(--line);background:rgba(150,210,255,.04);box-shadow:inset 2px 0 0 var(--cyan)}
+.msg:before{content:"";position:absolute;inset:-1px;pointer-events:none;background:linear-gradient(var(--ice),var(--ice)) left top/10px 1px no-repeat,linear-gradient(var(--ice),var(--ice)) left top/1px 10px no-repeat}
+.from-owner .msg{align-self:flex-end;border-color:var(--line-strong);background:rgba(207,239,255,.1);box-shadow:inset -2px 0 0 var(--ice)}
+.from-owner .msg:before{background:linear-gradient(var(--ice),var(--ice)) right bottom/10px 1px no-repeat,linear-gradient(var(--ice),var(--ice)) right bottom/1px 10px no-repeat}
+.owed .msg{box-shadow:inset 2px 0 0 var(--amber);background:linear-gradient(90deg,rgba(255,178,36,.1),transparent 60%)}
+.s-pending .msg{border-style:dashed}
+.s-pending .msg:after{content:"";position:absolute;left:-1px;right:-1px;bottom:-1px;height:2px;background:linear-gradient(90deg,transparent,var(--ice),transparent) no-repeat;background-size:45% 100%;animation:sweep 1.5s linear infinite}
+.s-held .msg{box-shadow:inset -2px 0 0 var(--amber)}
+.s-unsure .msg{border-style:dashed;border-color:var(--amber);box-shadow:inset -2px 0 0 var(--amber)}
+.from-agent.s-unsure .msg{box-shadow:inset 2px 0 0 var(--amber)}
+.s-bad .msg{border-color:var(--red);box-shadow:inset -2px 0 0 var(--red)}
+.s-local .msg{border-style:dashed;border-color:var(--amber);box-shadow:inset -2px 0 0 var(--amber)}
+.msg-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:3px 10px;font:11px/1.4 var(--mono);color:var(--mute)}
+.msg-from{font:700 11px/1.3 var(--tech);letter-spacing:.16em;text-transform:uppercase;color:var(--ice);overflow-wrap:anywhere}
+.from-owner .msg-from{color:#fff}
+.msg-demo,.msg-tag{padding:0 5px;border:1px solid var(--mute);font:700 9.5px/1.5 var(--tech);letter-spacing:.14em;text-transform:uppercase;color:var(--ice)}
+.msg-demo{border-color:var(--amber);color:var(--amber);background:repeating-linear-gradient(-45deg,rgba(255,178,36,.16) 0 4px,transparent 4px 8px)}
+.msg-id{margin-left:auto;color:var(--mute)}
+.msg-reply-to{display:block;margin-top:5px;font:11px/1.4 var(--mono);color:var(--mute);text-align:left}
+button.msg-reply-to,.rcpt button.jump{min-height:0;padding:0;border:0;background:transparent;font:11px/1.4 var(--mono);letter-spacing:0;text-transform:none;color:var(--cyan);text-decoration:underline;text-underline-offset:3px;clip-path:none}
+button.msg-reply-to:hover:not(:disabled),.rcpt button.jump:hover:not(:disabled){background:transparent;color:#fff}
+.msg-text{margin:6px 0 0;font:13px/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text)}
+.from-owner .msg-text{color:#fff}
+.msg-text.clamped{max-height:15em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent);mask-image:linear-gradient(#000 70%,transparent)}
+.msg-more{margin-top:6px;min-height:26px;padding:3px 8px;font-size:10px}
+.msg-note,.msg-detail{margin-top:6px;font:11px/1.5 var(--mono);color:var(--mute)}
+.msg-detail{color:var(--ice)}
+.msg-detail.unsure,.s-unsure .msg-detail,.s-held .msg-detail,.s-local .msg-detail{color:var(--amber)}
+.s-bad .msg-detail{color:var(--red)}
+.msg-owed{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:9px;padding-top:8px;border-top:1px dashed rgba(255,178,36,.5);font:700 11px/1.3 var(--tech);letter-spacing:.14em;text-transform:uppercase;color:var(--amber)}
+.msg-owed .lamp{--here:transparent;margin:0 3px}
+.msg-owed button{margin-left:auto;min-height:30px;padding:6px 12px}
+/* a message's own short line: one lit lamp per recorded receipt, in order; none for anything not recorded */
+.rcpt{display:flex;flex-direction:column;gap:5px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line-dim);font:11px/1.4 var(--mono);color:var(--mute)}
+.rcpt .r{position:relative;display:flex;align-items:baseline;flex-wrap:wrap;gap:0 7px;padding-left:17px;min-width:0}
+.rcpt .r+.r:before{content:"";position:absolute;left:4px;top:-8px;width:1px;height:10px;background:var(--line-strong)}
+.rcpt .dot{position:absolute;left:0;top:3px;width:9px;height:9px;border:2px solid var(--ice);border-radius:50%;background:var(--void)}
+.rcpt .what{font:700 10.5px/1.3 var(--tech);letter-spacing:.14em;text-transform:uppercase;color:var(--ice)}
+.rcpt .t-ok .dot{background:var(--cyan);border-color:var(--cyan)}
+.rcpt .t-ack .dot{background:#fff;border-color:#fff;box-shadow:0 0 10px 2px rgba(95,216,255,.9)}
+.rcpt .t-ack .what{color:#fff}
+.rcpt .t-reply .dot{left:1px;width:7px;height:7px;border-radius:0;border-width:0 0 2px 2px;border-color:var(--cyan);background:transparent;transform:rotate(45deg)}
+.rcpt .t-held .dot{border-color:var(--amber)}
+.rcpt .t-held .what{color:var(--amber)}
+.rcpt .t-pending .dot{border-style:dotted}
+.rcpt .t-unsure .dot,.rcpt .t-local .dot{border-style:dashed;border-color:var(--amber)}
+.rcpt .t-unsure .what,.rcpt .t-local .what{color:var(--amber)}
+.rcpt .t-bad .dot{border-radius:1px;background:var(--red);border-color:var(--red)}
+.rcpt .t-bad .what{color:var(--red)}
+.fresh .msg{animation:msg-in .45s cubic-bezier(.2,.7,.2,1)}
+.convo-compose{padding:10px 14px 12px;border-top:1px solid var(--line);background:rgba(2,5,10,.55)}
+.conversation.replying .convo-compose{box-shadow:inset 3px 0 0 var(--amber)}
+.convo-compose label{display:block;font:700 10.5px/1.2 var(--tech);letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin:8px 0 6px}
+.convo-compose textarea{width:100%;max-width:100%;display:block;resize:vertical;field-sizing:content;padding:9px 12px;border:1px solid var(--line-strong);border-radius:0;background:var(--glass);color:#fff;line-height:1.5;min-height:62px;max-height:220px}
+.convo-compose textarea:focus-visible{outline:2px solid var(--cyan);outline-offset:1px}
+.convo-compose textarea::placeholder{color:var(--mute);opacity:1}
+.convo-compose .toolbar{margin-top:10px}
+.send-hint{font:11px/1.4 var(--mono)}
+#compose-target{color:var(--mute);font:11.5px/1.5 var(--mono);overflow-wrap:anywhere}
+.action-result{margin-top:8px;min-height:17px;font:11.5px/1.5 var(--mono);color:var(--ice);overflow-wrap:anywhere}
+/* where the selected-fleet column is wide enough, the conversation stands beside the terminal */
+.pane{container:pane/inline-size}
+@container pane (min-width:960px){
+  .deck{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(340px,1fr);gap:16px;align-items:stretch}
+  .deck .conversation{margin-top:0;min-height:460px;max-height:calc(100vh - 24px);position:sticky;top:12px}
+  .deck .convo{flex:1 1 0}
+  .deck .convo-scroll{flex:1 1 0;height:auto;min-height:0}
+  .app.expanded .deck{grid-template-columns:minmax(0,2.1fr) minmax(320px,1fr)}
+  /* beside the terminal the input block is compact: its label stays for assistive technology only */
+  .deck .convo-compose{padding:8px 14px 10px}
+  .deck .convo-compose label[for=draft]{position:absolute;width:1px;height:1px;margin:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .deck .convo-compose textarea{min-height:44px;margin-top:7px}
+  .deck .convo-compose .toolbar{margin-top:8px}
+  .deck .action-result{margin-top:6px}
+  /* expanded: the terminal is as tall as the screen allows, so terminal, thread and input end at the screen edge */
+  .app.expanded .deck .terminal-screen{height:max(360px,calc(100vh - 390px - var(--above-stages,0px) - var(--above-questions,0px)))}
+}
+.pane:has(.demo-stages:not([hidden])){--above-stages:67px}
+.pane:has(.questions:not(.is-empty)){--above-questions:108px}
 
 /* ---------- collapsed fleet column: a rail of numbers, short codes and lamps */
 .app.collapsed{grid-template-columns:92px minmax(0,1fr)}
@@ -224,7 +325,7 @@ footer{font:10.5px/1.6 var(--mono);color:var(--mute);margin-top:20px}
 
 /* ---------- expanded terminal: everything above it steps aside; owner questions stay */
 .app.expanded .terminal-screen{height:max(360px,calc(100vh - 318px))}
-.app.expanded .pane-head .eyebrow,.app.expanded .readouts,.app.expanded #notice,.app.expanded .demo-stage .sub,.app.expanded .seat small,.app.expanded .composer:not(.replying),.app.expanded .terminal-foot,.app.expanded footer,.app.expanded .questions.is-empty{display:none}
+.app.expanded .pane-head .eyebrow,.app.expanded .readouts,.app.expanded #notice,.app.expanded .demo-stage .sub,.app.expanded .seat small,.app.expanded .terminal-foot,.app.expanded footer,.app.expanded .questions.is-empty{display:none}
 .app.expanded h2{font-size:22px;margin-top:0}
 .app.expanded .persistent-mode{margin-bottom:8px}
 .app.expanded .questions{margin-top:10px}
@@ -236,8 +337,10 @@ footer{font:10.5px/1.6 var(--mono);color:var(--mute);margin-top:20px}
 @keyframes run{to{background-position:calc(100% + 90px) 0,0 0}}
 @keyframes flow{to{background-position:16px 0}}
 @keyframes sweep{from{background-position:-90% 0}to{background-position:190% 0}}
+@keyframes msg-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 .motion-off *,.motion-off *:before,.motion-off *:after{animation:none!important;transition:none!important}
 .motion-off .seat.working .card:after{background:var(--green)}
+.motion-off .s-pending .msg:after{background:repeating-linear-gradient(90deg,var(--ice) 0 6px,transparent 6px 12px)}
 
 /* ---------- 1024-class desktops */
 @media(max-width:1180px){
@@ -291,4 +394,7 @@ footer{font:10.5px/1.6 var(--mono);color:var(--mute);margin-top:20px}
   .question-row{flex-wrap:wrap}
   .workspace-head{display:block}
   #target-label{display:block}
+  .convo-scroll{height:clamp(240px,46vh,400px);padding:10px 12px 16px}
+  .msg{max-width:94%}
+  .convo-compose{padding:10px 12px 12px}
 }

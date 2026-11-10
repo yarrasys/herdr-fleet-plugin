@@ -86,6 +86,7 @@ class Message:
     origin_send_order: Optional[int] = None
     destination_send_order: Optional[int] = None
     kickoff_reason: Optional[str] = None  # design 32.6: a queued kickoff's reason (up, restart, swap)
+    dashboard_chat: Optional[Dict] = None  # versioned internal provenance (42.3), never the stored body
 
     @property
     def short(self) -> str:
@@ -287,6 +288,8 @@ def render_file(message: Message) -> str:
         lines.append("history_only: true")
     if message.route_bytes is not None:
         lines.append("route_bytes: %d" % message.route_bytes)
+    if message.dashboard_chat is not None:
+        lines.append("dashboard_chat: " + json.dumps(message.dashboard_chat, separators=(",", ":")))
     for key in ("origin_send_order", "destination_send_order"):
         if getattr(message, key) is not None:
             lines.append("%s: %d" % (key, getattr(message, key)))
@@ -321,6 +324,10 @@ def parse_file(text: str, path: str = "", box: str = NEW) -> Message:
     except ValueError:
         route_bytes = None
     orders = {}
+    try:
+        dashboard_chat = json.loads(fields["dashboard_chat"]) if "dashboard_chat" in fields else None
+    except ValueError:
+        dashboard_chat = {"invalid": True}
     for key in ("origin_send_order", "destination_send_order"):
         try:
             orders[key] = int(fields[key]) if key in fields else None
@@ -334,7 +341,8 @@ def parse_file(text: str, path: str = "", box: str = NEW) -> Message:
                    origin_fleet=fields.get("origin_fleet") or None,
                    destination_fleet=fields.get("destination_fleet") or None,
                    requested_to=fields.get("requested_to") or None, history_only=fields.get("history_only") == "true",
-                   route_bytes=route_bytes, kickoff_reason=fields.get("kickoff_reason") or None, **orders)
+                   route_bytes=route_bytes, kickoff_reason=fields.get("kickoff_reason") or None,
+                   dashboard_chat=dashboard_chat, **orders)
 
 
 def write(repo: str, message: Message, box: str = NEW) -> Message:
@@ -520,7 +528,8 @@ def direct_text(message: Message) -> str:
     """An ordinary direct message always carries its authoritative sender/id (40.2)."""
     if message.timer:
         return item_header(message) + " " + message.body
-    return "[from %s #%s] %s" % (message.sender, message.short, message.body)
+    from herdr_fleet.dashboard_provenance import guidance
+    return "[from %s #%s] %s" % (message.sender, message.short, message.body) + guidance(message)
 
 
 def item_header(message: Message, direction: bool = False, today: Optional[datetime.date] = None) -> str:
@@ -535,7 +544,8 @@ def item_header(message: Message, direction: bool = False, today: Optional[datet
 def render_batch(messages: Sequence[Message], direction: bool = False,
                  today: Optional[datetime.date] = None) -> str:
     """Each message as its header line and its body, joined by blank lines (design 18.4)."""
-    return "\n\n".join("%s\n%s" % (item_header(m, direction, today), m.body.rstrip("\n")) for m in messages)
+    from herdr_fleet.dashboard_provenance import guidance
+    return "\n\n".join("%s\n%s%s" % (item_header(m, direction, today), m.body.rstrip("\n"), guidance(m)) for m in messages)
 
 
 def in_delivery_order(messages: Sequence[Message]) -> List[Message]:
@@ -557,7 +567,8 @@ def render_for_print(messages: Sequence[Message], limit: Optional[int], directio
         if limit is not None and size > limit:
             head = "\n".join(body.split("\n")[:PRINT_HEAD_LINES])
             body = "%s\n… %s in full: %s" % (head, size_label(size), m.path)
-        items.append("%s\n%s" % (item_header(m, direction, today), body))
+        from herdr_fleet.dashboard_provenance import guidance
+        items.append("%s\n%s%s" % (item_header(m, direction, today), body, guidance(m)))
     return "\n\n".join(items)
 
 
@@ -568,6 +579,9 @@ def pointer_text(messages: Sequence[Message], size: int, prefix: bool = True,
     oldest = min(messages, key=Message.sort_key)
     text = "%d message%s waiting (oldest %s, %s); run: %s" % (
         count, "" if count == 1 else "s", time_label(oldest.time, today), size_label(size), POINTER_COMMAND)
+    from herdr_fleet.dashboard_provenance import validated
+    if any(validated(m) is not None for m in messages):
+        text += ". Dashboard owner requests retain per-message return guidance on inbox read; ack alone is not an answer."
     return "[from herdr-fleet] " + text if prefix else text
 
 

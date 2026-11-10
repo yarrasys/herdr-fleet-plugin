@@ -256,6 +256,31 @@ class Demo:
                           "body_truncated": False})
         return {"items": items[-limit:], "truncated": len(items) > limit}
 
+    def conversation(self, source, fleet, seat, limit=50):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("invalid Demo conversation limit")
+        fleets = {f["id"]: f for f in self.snapshot()["fleets"]}
+        if (source not in fleets or fleet not in fleets
+                or not any(s["name"] == seat for s in fleets[fleet]["seats"])):
+            raise ValueError("unknown Demo conversation")
+        state = self._state()
+        rows = []
+        for event in state["events"] if source == TEAM and fleet == TEAM else []:
+            if event["kind"] != "send" or (event["from"], event["to"]) not in (("owner", seat), (seat, "owner")):
+                continue
+            ident = event["id"]
+            landed = next((e for e in state["events"] if e["id"] == ident and e["kind"] == "delivered"), None)
+            receipts = [{"kind": "queued", "time": event["time"], "by": event["to"], "exact": True}]
+            if landed:
+                receipts.append({"kind": "delivered", "time": landed["time"], "by": event["to"], "exact": True})
+            rows.append({"id": ident, "from": event["from"], "to": event["to"], "time": event["time"],
+                         "body": BODIES[ident][4], "body_available": True, "body_truncated": False,
+                         "reply_to": M_ASK if ident == M_REPLY else None, "fyi": BODIES[ident][2],
+                         "status": "local" if ident == M_REPLY else "received", "certainty": "confirmed",
+                         "receipts": receipts, "incomplete": False})
+        return {"source": source, "fleet": fleet, "seat": seat, "messages": rows[-limit:], "intents": [],
+                "revision": state["run"] * 1000 + state["steps"], "incomplete": False, "truncated": len(rows) > limit}
+
     def _screen(self, fleet_id, name):
         if fleet_id == TEAM:
             s = self._state()

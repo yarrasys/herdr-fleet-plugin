@@ -500,6 +500,10 @@ def _as_dict(message: Message, body: bool = False) -> Dict:
     if message.origin_fleet:
         item.update(origin_fleet=message.origin_fleet, destination_fleet=message.destination_fleet,
                     requested_to=message.requested_to, history_only=message.history_only)
+    from herdr_fleet.dashboard_provenance import validated
+    provenance = validated(message)
+    if provenance is not None:
+        item["dashboard_chat"] = provenance
     return item
 
 
