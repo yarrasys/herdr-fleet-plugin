@@ -10,7 +10,71 @@
     expanded: false, collapsed: false, messageMailbox: "owner", tick: null,
     motionChosen: false, unseen: new Map(), ownerSeen: new Set(), tally: null, flights: 0, authEpoch: 0,
     threads: new Map(), editGeneration: 0, replyGeneration: 0, readGeneration: 0,
-    conversationRequest: 0, historyRequest: 0, quiet: false, savedReplies: new Map(), threadAccess: 0};
+    conversationRequest: 0, historyRequest: 0, quiet: false, savedReplies: new Map(), threadAccess: 0,
+    attention: null, attentionScope: "all", attentionCategory: "all", attentionRequest: 0, detailRequest: 0,
+    preferenceMode: null, preferenceWarning: false, terminalHeight: 360};
+  const attentionTypes = ["owner_message", "native_dialog", "send_issue", "provider_hold", "observation_issue"];
+  const attentionView = typeof AttentionView !== "undefined" ? AttentionView.mount($("attention-desk"), {
+    onAction: function (id) { actAttention(id).catch(fail); },
+    onFilter: function (scope, category) {
+      if (!["all", "selected"].includes(scope) || !["all"].concat(attentionTypes).includes(category)) return;
+      state.attentionScope = scope; state.attentionCategory = category;
+      state.attention = null; renderAttention();
+      saveView();
+      refreshAttention().catch(fail);
+    }
+  }) : null;
+  function preferenceKey() { return state.preferenceMode ? "herdr-fleet.view.v1." + state.preferenceMode : null; }
+  function defaultView() {
+    return {version: 1, collapsed: false, motion: null, height: 360, scope: "all", category: "all"};
+  }
+  function validView(value) {
+    return value && typeof value === "object" && !Array.isArray(value) &&
+      Object.keys(value).sort().join(",") === "category,collapsed,height,motion,scope,version" && value.version === 1 &&
+      typeof value.collapsed === "boolean" && (value.motion === null || typeof value.motion === "boolean") &&
+      Number.isInteger(value.height) && value.height >= 200 && value.height <= 900 &&
+      ["all", "selected"].includes(value.scope) && ["all"].concat(attentionTypes).includes(value.category);
+  }
+  function applyView(value) {
+    state.collapsed = value.collapsed; state.motionChosen = value.motion !== null;
+    state.motion = state.motionChosen ? value.motion : !matchMedia("(prefers-reduced-motion: reduce)").matches;
+    state.attentionScope = value.scope; state.attentionCategory = value.category;
+    $("app").classList.toggle("collapsed", state.collapsed);
+    $("collapse").textContent = state.collapsed ? "Expand fleets" : "Collapse fleets";
+    $("collapse").setAttribute("aria-expanded", String(!state.collapsed));
+    height(value.height); motion();
+  }
+  function preferenceStatus() {
+    $("view-pref-status").textContent = state.preferenceWarning ?
+      "View settings are temporary; browser storage is unavailable or invalid." :
+      "Only cosmetic settings are stored for this origin. A different port has separate settings. Drafts are not saved.";
+  }
+  function loadView(demo) {
+    const mode = demo ? "demo" : "live";
+    if (state.preferenceMode === mode) return;
+    state.preferenceMode = mode; state.preferenceWarning = false;
+    state.attention = null; state.attentionRequest++;
+    let value = defaultView();
+    try {
+      const raw = localStorage.getItem(preferenceKey());
+      if (raw !== null) {
+        if (typeof raw !== "string" || raw.length > 2048 || new TextEncoder().encode(raw).length > 2048) throw new Error("size");
+        const parsed = JSON.parse(raw); if (!validView(parsed)) throw new Error("schema"); value = parsed;
+      }
+    } catch (error) { state.preferenceWarning = true; }
+    applyView(value); preferenceStatus();
+  }
+  function saveView() {
+    if (!preferenceKey()) return;
+    const value = {version: 1, collapsed: state.collapsed, motion: state.motionChosen ? state.motion : null,
+      height: state.terminalHeight, scope: state.attentionScope, category: state.attentionCategory};
+    try {
+      const raw = JSON.stringify(value);
+      if (!validView(value) || new TextEncoder().encode(raw).length > 2048) throw new Error("schema");
+      localStorage.setItem(preferenceKey(), raw); state.preferenceWarning = false;
+    } catch (error) { state.preferenceWarning = true; }
+    preferenceStatus();
+  }
   const conversationView = typeof ConversationView !== "undefined" ? ConversationView.mount($("conversation"), {
     onOlder: function () { const item = thread(); item.limit = Math.min(100, item.limit + 50); refreshConversation(); },
     onSeen: function (key) { const item = state.threads.get(key); if (item) item.unseen = 0; },
@@ -276,11 +340,77 @@
     return (words.length > 1 ? words.map(function (w) { return w[0]; }).join("").slice(0, 3) : String(label).slice(0, 3)).toUpperCase();
   }
   function questionsOf(fleet) { return fleet.owner.filter(function (m) { return !m.fyi; }); }
+  function renderBuild() {
+    const build = state.data && state.data.build;
+    if (!build) return;
+    const version = function (value) { return value && typeof value.version === "string" ? value.version.slice(0, 64) : "unknown"; };
+    const commit = function (value) { return value && typeof value.commit === "string" && /^[a-f0-9]{40,64}$/.test(value.commit) ? value.commit.slice(0, 8) : "commit unknown"; };
+    $("build-running").textContent = "Running " + version(build.running) + " · " + commit(build.running);
+    $("build-installed").textContent = "Installed " + version(build.installed) + " · " + commit(build.installed);
+    $("build-status").textContent = build.comparison === "different" ? "Running a different build" :
+      build.comparison === "current" ? "Running the installed build" : "Installed build comparison unknown";
+    $("build-status").classList.toggle("upd", build.comparison === "different");
+    $("build-guidance").textContent = build.comparison === "different" ?
+      "Stop the foreground dashboard with Ctrl-C, " + (build.restart === "all_fleets" ?
+      "run herdr-fleet dashboard --all-fleets --open" : "rerun your original dashboard command with --open") +
+      ", and use the fresh tab. Page Refresh does not replace the running package; preserve drafts before restarting." :
+      "Installed identity is checked at most once per 60 seconds. No automatic update or restart.";
+  }
+  function renderAttention() {
+    if (!attentionView || !state.data) return;
+    attentionView.render(Object.assign({}, state.attention || {items: [], counts: {}, incomplete: true}, {
+      scope: state.attentionScope, category: state.attentionCategory, quiet: state.quiet || state.first,
+      fleets: state.data.fleets.map(function (fleet) { return {id: fleet.id, label: fleet.label}; })}));
+  }
+  async function refreshAttention() {
+    if (!attentionView || !state.csrf || !state.data || document.hidden) return;
+    const epoch = state.authEpoch, request = ++state.attentionRequest;
+    const scope = state.attentionScope, category = state.attentionCategory, fleet = state.fleet;
+    let query = "?scope=" + encodeURIComponent(scope) + "&category=" + encodeURIComponent(category);
+    if (scope === "selected" && fleet) query += "&fleet=" + encodeURIComponent(fleet);
+    try {
+      const data = await (await api("/api/attention" + query)).json();
+      if (epoch !== state.authEpoch || request !== state.attentionRequest || scope !== state.attentionScope ||
+          category !== state.attentionCategory || (scope === "selected" && fleet !== state.fleet)) return;
+      state.attention = data; renderAttention();
+    } catch (error) {
+      if (epoch !== state.authEpoch || request !== state.attentionRequest) return;
+      state.attention = Object.assign({}, state.attention || {items: [], counts: {}}, {stale: true, incomplete: true});
+      renderAttention();
+    }
+  }
+  async function actAttention(id) {
+    const item = state.attention && state.attention.items.find(function (row) { return row.id === id; });
+    if (!item || !item.actions || item.actions.length !== 1 ||
+        (state.attention.stale && item.actions[0].kind !== "refresh")) {
+      notice("This attention item is no longer actionable; refresh the observation."); return;
+    }
+    const action = item.actions[0], fleets = state.data.fleets;
+    const source = fleets.find(function (fleet) { return fleet.id === (action.source || action.fleet || item.fleet); });
+    if (action.kind === "refresh" && source) { await refresh(); return; }
+    if (!source || source.stale) { notice("The source observation is unavailable; refresh before acting."); return; }
+    if (action.kind === "inspect_owner") {
+      selectFleet(source.id); await inspectQuestion({id: action.message}); return;
+    }
+    if (action.kind === "inspect_log") { selectFleet(source.id); tab("log"); return; }
+    const fleet = fleets.find(function (f) { return f.id === action.fleet; });
+    const seat = fleet && fleet.seats.find(function (s) { return s.name === action.seat; });
+    if (!fleet || fleet.stale || !seat) { notice("The registered seat changed; refresh before acting."); return; }
+    if (action.kind === "watch" && (!seat.view || action.view !== seat.view || seat.state !== "blocked")) {
+      notice("The native dialog or its seat binding changed; refresh before Watch."); return;
+    }
+    if (!["watch", "inspect_send", "inspect_seat"].includes(action.kind)) return;
+    if (action.kind === "watch") tab("terminal");
+    selectFleet(source.id); selectedChanged(fleet.id, seat.name);
+    if (action.kind === "watch") await watch();
+    else if (action.kind === "inspect_seat") notice("Recorded provider hold. Inspect it here; no release, failover or interruption is performed.");
+  }
   function selectFleet(id) {
     if (state.fleet === id) return;
     const fleet = state.data.fleets.find(function (f) { return f.id === id; }); if (!fleet) return;
     saveDraft(); disconnect("Watch disconnected: fleet changed. Screen cleared."); term.reset(); $("travel").replaceChildren();
     state.fleet = fleet.id; state.targetFleet = fleet.id; state.seat = fleet.seats[0] ? fleet.seats[0].name : null;
+    if (state.attentionScope === "selected") { state.attention = null; state.attentionRequest++; }
     if (state.seat) thread().unseen = 0;
     state.question = null; state.reply = null; state.replyGeneration++; $("owner-detail").hidden = true;
     restoreDraft(); render(); refreshTab().catch(fail);
@@ -328,30 +458,45 @@
   function render() {
     const focusedKey = document.activeElement && document.activeElement.dataset.focusKey;
     const data = state.data; if (!data) return;
+    loadView(!!data.demo);
+    renderBuild();
     const fleets = data.fleets;
     $("mode").textContent = data.demo ? "DEMO · Authored synthetic run · No live actions" : "LIVE · Authenticated local owner";
     $("persistent-mode").textContent = $("mode").textContent;
     $("replay").hidden = !data.demo;
-    const tally = fleets.reduce(function (n, f) { return n + questionsOf(f).length; }, 0);
+    const allAttention = data.attention;
+    const tally = allAttention ? attentionTypes.reduce(function (n, type) { return n + (allAttention.counts[type] || 0); }, 0) :
+      fleets.reduce(function (n, f) { return n + questionsOf(f).length; }, 0);
     $("attention-count").textContent = String(tally);
     if (state.tally !== null && state.tally !== tally) bump($("attention-count"));
     state.tally = tally;
     const navigation = fleets.map(function (fleet, index) {
-      const asks = questionsOf(fleet).length, fresh = state.unseen.get(fleet.id) || 0;
+      const categories = allAttention && allAttention.fleet_counts && allAttention.fleet_counts[fleet.id];
+      const asks = categories ? attentionTypes.reduce(function (n, type) { return n + (categories[type] || 0); }, 0) : questionsOf(fleet).length;
+      const fresh = state.unseen.get(fleet.id) || 0;
       const b = button("", function () { selectFleet(fleet.id); });
       b.className = "fleet-button" + (fleet.stale ? " stale" : "") + (asks ? " hold" : "");
       b.dataset.focusKey = "fleet:" + fleet.id;
       b.setAttribute("aria-current", String(state.fleet === fleet.id));
       b.setAttribute("aria-label", fleet.label + " · " + (fleet.stale ? "stale" : "observed " + ago(fleet.observed_at)) +
-        " · " + asks + " owner questions · " + fleet.seats.map(function (s) { return s.name + " " + s.state; }).join(", "));
+        " · " + asks + " observed attention items · " + fleet.seats.map(function (s) { return s.name + " " + s.state; }).join(", "));
       b.title = fleet.label;
       const top = node("span", "", "fleet-top");
       top.append(node("span", String(index + 1).padStart(2, "0"), "fleet-idx"), node("strong", fleet.label, "fleet-name"), node("span", fleetCode(fleet.label), "fleet-code"));
       const signals = node("span", "", "fleet-signals");
       fleet.seats.slice(0, 7).forEach(function (s) { signals.append(lamp(s.state)); });
       if (asks) signals.append(lamp("question"));
-      const meta = node("span", (fleet.stale ? "Stale · " : "") + ago(fleet.observed_at) + " · " + asks + " owner", "fleet-meta" + (asks ? " hot" : ""));
+      const meta = node("span", (fleet.stale ? "Stale · " : "") + ago(fleet.observed_at) + " · " + asks + " observed attention", "fleet-meta" + (asks ? " hot" : ""));
       b.append(top, signals, meta);
+      if (categories) {
+        const marks = node("span", "", "fleet-kinds"), tones = ["question", "dialog", "send", "limit", "stale"];
+        attentionTypes.forEach(function (type, i) {
+          if (!categories[type]) return;
+          const mark = node("span"); mark.append(node("i", "", "mark " + tones[i]), node("b", String(categories[type])));
+          mark.setAttribute("aria-label", type.replace(/_/g, " ") + ": " + categories[type]); marks.append(mark);
+        });
+        b.append(marks);
+      }
       if (fresh && state.fleet !== fleet.id) b.append(node("span", fresh + " new", "fleet-new"));
       return b;
     });
@@ -361,7 +506,8 @@
     $("fleet-title").textContent = fleet.label;
     document.title = (data.demo ? "DEMO · " : "LIVE · ") + fleet.label + " · Signal Box";
     $("freshness").textContent = (fleet.stale ? "STALE · " : "Observed ") + (fleet.observed_at ? new Date(fleet.observed_at).toLocaleTimeString() + " · " + ago(fleet.observed_at) : "unknown");
-    $("watcher").textContent = fleet.watcher && fleet.watcher.running === true ? "Watcher process running" :
+    $("watcher").textContent = fleet.watcher && fleet.watcher.enabled === false ? "Watcher intentionally disabled by fleet configuration" :
+      fleet.watcher && fleet.watcher.running === true ? "Watcher process running" :
       fleet.watcher && fleet.watcher.running === false ? "Watcher stopped · no automatic startup" : "Watcher liveness unknown · no automatic startup";
     if (fleet.warning) notice(fleet.warning);
     const questions = fleet.owner.map(function (message) {
@@ -378,7 +524,8 @@
       return row;
     });
     $("questions").replaceChildren.apply($("questions"), questions.length ? questions : [node("p", "No queued owner messages in this observation.", "empty")]);
-    $("questions").parentNode.classList.toggle("is-empty", !questions.length && $("owner-detail").hidden);
+    $("questions").hidden = !!attentionView;
+    if (!attentionView) $("questions").parentNode.classList.toggle("is-empty", !questions.length && $("owner-detail").hidden);
     const asking = questionsOf(fleet).length > 0;
     $("seat-line").classList.toggle("hold", asking && !fleet.stale);
     $("seat-line").classList.toggle("stale", !!fleet.stale);
@@ -435,6 +582,7 @@
       if (replacement) replacement.focus({preventScroll: true});
     }
     renderConversation();
+    renderAttention();
   }
   async function refresh() {
     if (!state.csrf || document.hidden) return;
@@ -495,8 +643,8 @@
           if (old !== undefined && old !== x.state) ring(x.name, x.state === "working" ? "working" : x.state === "blocked" ? "blocked" : "state");
         });
       }
+      await Promise.all([refreshConversation(), refreshAttention()]);
       state.first = false;
-      await refreshConversation();
       if (state.tab !== "terminal") {
         const historyKey = threadKey();
         try { await refreshTab(); }
@@ -508,6 +656,9 @@
         notice("Disconnected · last observation retained. " + error.message);
         $("freshness").textContent = "DISCONNECTED · last observation retained";
         state.conversationRequest++;
+        state.attentionRequest++;
+        state.attention = Object.assign({}, state.attention || {items: [], counts: {}}, {stale: true, incomplete: true});
+        renderAttention();
         if (state.data && state.seat) {
           const item = thread(); item.state = "stale"; item.note = "Disconnected · last conversation retained. " + error.message;
           renderConversation();
@@ -522,12 +673,26 @@
     return (await api("/api/list" + query)).json();
   }
   async function inspectQuestion(message) {
+    const epoch = state.authEpoch, fleet = state.fleet, request = ++state.detailRequest;
     const result = await list("messages", "owner", message.id);
+    if (epoch !== state.authEpoch || fleet !== state.fleet || request !== state.detailRequest) return;
     const item = result.items[0]; if (!item) throw new Error("Owner message unavailable; refresh.");
+    if (item.id !== message.id || item.to !== "owner") throw new Error("Owner message identity changed; refresh.");
     state.question = item; $("question-sender").textContent = item.sender + " · #" + item.id.slice(-6) + " · " + item.box + "/";
-    $("question-body").textContent = item.body + (item.body_truncated ? "\n[Body truncated]" : "");
+    $("question-body").textContent = (item.body_available === false ? "Message body unavailable; inspect the recorded metadata." : item.body) + (item.body_truncated ? "\n[Body truncated]" : "");
     $("owner-detail").hidden = false; $("read-question").disabled = state.data.demo;
-    $("reply-question").focus();
+    const choices = replyTargets(item.sender);
+    $("reply-question").disabled = choices.length !== 1 || item.body_available === false || !!item.incomplete;
+    if (!$("reply-question").disabled) $("reply-question").focus();
+    else { $("question-body").tabIndex = -1; $("question-body").focus(); }
+  }
+  function replyTargets(sender) {
+    const matches = [];
+    state.data.fleets.forEach(function (fleet) {
+      if (fleet.stale) return;
+      fleet.seats.forEach(function (seat) { if (seat.name === sender && seat.view) matches.push([fleet.id, seat.name]); });
+    });
+    return matches;
   }
   async function refreshTab() {
     const epoch = state.authEpoch, key = threadKey(), tab = state.tab, mailbox = state.messageMailbox;
@@ -712,6 +877,7 @@
     state.collapsed = !state.collapsed; $("app").classList.toggle("collapsed", state.collapsed);
     $("collapse").textContent = state.collapsed ? "Expand fleets" : "Collapse fleets";
     $("collapse").setAttribute("aria-expanded", String(!state.collapsed));
+    saveView();
   });
   $("expand").addEventListener("click", function () {
     state.expanded = !state.expanded; $("app").classList.toggle("expanded", state.expanded);
@@ -733,7 +899,17 @@
     $("motion-state").textContent = state.motion ? "on" : "off";
     if (!state.motion) $("travel").replaceChildren();
   }
-  $("motion").addEventListener("click", function () { state.motion = !state.motion; state.motionChosen = true; motion(); }); motion();
+  $("motion").addEventListener("click", function () { state.motion = !state.motion; state.motionChosen = true; motion(); saveView(); }); motion();
+  $("view-settings").addEventListener("click", function () {
+    $("view-prefs").hidden = !$("view-prefs").hidden;
+    $("view-settings").setAttribute("aria-expanded", String(!$("view-prefs").hidden));
+  });
+  $("reset-view-preferences").addEventListener("click", function () {
+    state.preferenceWarning = false;
+    try { if (preferenceKey()) localStorage.removeItem(preferenceKey()); }
+    catch (error) { state.preferenceWarning = true; }
+    applyView(defaultView()); state.attention = null; state.attentionRequest++; preferenceStatus(); renderAttention();
+  });
   matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change", function (event) {
     if (!state.motionChosen) { state.motion = !event.matches; motion(); }
   });
@@ -753,6 +929,7 @@
     });
   });
   $("watch").addEventListener("click", watch);
+  $("refresh-observation").addEventListener("click", refresh);
   $("disconnect").addEventListener("click", function () { disconnect(); });
   $("refit").addEventListener("click", function () { if (state.watch) watch(); else notice("Open Watch before refitting its read-only viewport."); });
   $("copy").addEventListener("click", function () {
@@ -767,7 +944,7 @@
   $("close-question").addEventListener("click", function () { $("owner-detail").hidden = true; state.question = null; render(); });
   $("reply-question").addEventListener("click", function () {
     if (!state.question) return;
-    const matches = []; state.data.fleets.forEach(function (f) { f.seats.forEach(function (s) { if (s.name === state.question.sender) matches.push([f.id, s.name]); }); });
+    const matches = replyTargets(state.question.sender);
     if (matches.length !== 1) { notice("The question sender is not a unique registered seat."); return; }
     selectedChanged(matches[0][0], matches[0][1]); chooseReply(state.question.id); render(); $("draft").focus();
   });
@@ -797,16 +974,17 @@
   });
   let drag = null;
   function height(value) {
-    const pixels = Math.max(200, Math.min(900, value));
+    const pixels = Number.isFinite(value) ? Math.round(Math.max(200, Math.min(900, value))) : 360;
+    state.terminalHeight = pixels;
     $("terminal-screen").style.setProperty("--terminal-height", pixels + "px");
     $("grip").setAttribute("aria-valuenow", String(pixels));
   }
   $("grip").addEventListener("pointerdown", function (event) { if (state.expanded) return; drag = {y: event.clientY, height: $("terminal-screen").clientHeight}; $("grip").setPointerCapture(event.pointerId); });
   $("grip").addEventListener("pointermove", function (event) { if (drag && !state.expanded) height(drag.height + event.clientY - drag.y); });
-  $("grip").addEventListener("pointerup", function () { drag = null; });
-  $("grip").addEventListener("keydown", function (event) { if (state.expanded) return; if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); height($("terminal-screen").clientHeight + (event.key === "ArrowUp" ? -24 : 24)); } });
+  $("grip").addEventListener("pointerup", function () { drag = null; saveView(); });
+  $("grip").addEventListener("keydown", function (event) { if (state.expanded) return; if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); height($("terminal-screen").clientHeight + (event.key === "ArrowUp" ? -24 : 24)); saveView(); } });
   document.addEventListener("visibilitychange", function () { if (!document.hidden) { state.first = true; state.quiet = true; refresh(); } });
-  window.addEventListener("pagehide", function () { disconnect(); clearInterval(state.tick); clearTimeout(resizeTimer); if (conversationView) conversationView.destroy(); });
+  window.addEventListener("pagehide", function () { disconnect(); clearInterval(state.tick); clearTimeout(resizeTimer); if (conversationView) conversationView.destroy(); if (attentionView) attentionView.destroy(); });
   async function bootstrap(supplied) {
     const launch = supplied || capability;
     capability = null;

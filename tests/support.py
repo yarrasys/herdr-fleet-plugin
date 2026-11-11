@@ -371,14 +371,14 @@ class FleetCase(unittest.TestCase):
                     if argv[:2] == ["agent", "prompt"]:
                         self.assertEqual(argv[2], dashboard_target, "dashboard prompted an unapproved target")
                     else:
-                        self.assertTrue(argv == ["--version"] or argv[:2] in allowed, argv)
+                        self.assertTrue(argv in (["--version"], ["plugin", "list", "--json"]) or argv[:2] in allowed, argv)
                 elif argv[:3] == ["terminal", "session", "observe"]:
                     self.assertEqual(dashboard_action, "watch", "observer was not explicitly selected")
                     self.assertEqual(argv[3], dashboard_target)
                     self.assertEqual(argv[4::2], ["--cols", "--rows"])
                     self.assertEqual(len(argv), 8)
                 else:
-                    self.assertIn(argv, (["--version"], ["agent", "list"]),
+                    self.assertIn(argv, (["--version"], ["agent", "list"], ["plugin", "list", "--json"]),
                                   "dashboard observation issued a non-read-only command")
             if command[:1] == ["timers"]:
                 self.assertNotIn("--dry-run", command, "offline timers called Herdr")

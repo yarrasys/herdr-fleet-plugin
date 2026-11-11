@@ -77,6 +77,34 @@ def dashboard_runner(argv: List[str]) -> Tuple[int, str, str]:
         raise HerdrError("timeout", "Herdr request timed out; action delivery may be unconfirmed")
 
 
+def registry_runner(argv: List[str]) -> Tuple[int, str, str]:
+    """One bounded metadata read: no stdin, at most 1 MiB and five seconds."""
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    selector, chunks, size = selectors.DefaultSelector(), [], 0
+    end = time.monotonic() + 5.0
+    try:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = end - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise HerdrError("registry_unavailable", "Plugin registry timed out")
+            chunk = os.read(process.stdout.fileno(), 8192)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > 1048576:
+                raise HerdrError("registry_unavailable", "Plugin registry exceeds observation limit")
+            chunks.append(chunk)
+        code = process.wait(timeout=max(0.01, end - time.monotonic()))
+        return code, b"".join(chunks).decode("utf-8"), ""
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=1)
+        process.stdout.close()
+
+
 def find_binary(env: Dict[str, str]) -> str:
     """HERDR_BIN_PATH when set, else ``herdr`` on PATH."""
     path = env.get("HERDR_BIN_PATH")
@@ -230,6 +258,17 @@ class Herdr:
         return None
 
     # -- agents ----------------------------------------------------------
+
+    def plugin_list(self) -> List[Dict]:
+        argv = ["plugin", "list", "--json"]
+        answer = (registry_runner([self.binary] + argv) if self.runner in (subprocess_runner, dashboard_runner)
+                  else self._exec(argv))
+        if len(answer[1].encode("utf-8")) > 1048576:
+            raise HerdrError("registry_unavailable", "Plugin registry exceeds observation limit")
+        records = self._json(argv, answer).get("plugins")
+        if not isinstance(records, list) or len(records) > 512 or any(not isinstance(p, dict) for p in records):
+            raise HerdrError("registry_unavailable", "Invalid plugin registry")
+        return records
 
     def agent_list(self) -> List[Dict]:
         return list(self.run("agent", "list").get("agents") or [])

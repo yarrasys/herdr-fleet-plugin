@@ -23,6 +23,7 @@ ASSET_ROOT = os.path.join(os.path.dirname(__file__), "dashboard_static")
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           "/conversation-view.js": ("conversation-view.js", "text/javascript; charset=utf-8"),
+          "/attention-view.js": ("attention-view.js", "text/javascript; charset=utf-8"),
           "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
           "/vendor/xterm.js": ("vendor/xterm.js", "text/javascript; charset=utf-8"),
           "/vendor/addon-fit.js": ("vendor/addon-fit.js", "text/javascript; charset=utf-8"),
@@ -225,6 +226,12 @@ class Handler(BaseHTTPRequestHandler):
             self.authenticate()
             if parsed.path == "/api/snapshot" and not parsed.query:
                 self.respond(200, self.server.observer.snapshot())
+            elif parsed.path == "/api/attention":
+                query = parse_qs(parsed.query, strict_parsing=True, max_num_fields=3, keep_blank_values=True)
+                if (set(query) - {"scope", "fleet", "category"} or any(len(v) != 1 for v in query.values())):
+                    raise DataError("Attention accepts only scope, registered fleet and category")
+                self.respond(200, self.server.observer.attention_page(query.get("scope", ["all"])[0],
+                             query.get("fleet", [None])[0], query.get("category", ["all"])[0]))
             elif parsed.path == "/api/conversation":
                 query = parse_qs(parsed.query, strict_parsing=True, max_num_fields=5)
                 if (set(query) - {"source", "fleet", "seat", "limit"}

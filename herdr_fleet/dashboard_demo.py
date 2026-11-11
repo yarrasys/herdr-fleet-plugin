@@ -10,6 +10,7 @@ import base64
 import datetime
 import threading
 import time
+from herdr_fleet import __version__
 
 STAGES = ["Brief", "Review", "Decision", "Fix", "Verify", "Report"]
 TEAM, DOCS, ARCHIVE = "demo-team", "demo-docs", "demo-archive"
@@ -223,7 +224,33 @@ class Demo:
                    "watcher": {"running": False}, "contacts": [], "owed": [], "truncated": False, "owner": [],
                    "events": [], "seats": [self._seat("spare-reader", "idle"), self._seat("spare-indexer", "absent", absent=True)]}
         return {"demo": True, "revision": s["run"] * 1000 + s["steps"], "stage": done, "stages": list(STAGES),
+                "attention": self._attention(s),
+                "build": {"running": {"version": __version__, "commit": None},
+                          "installed": {"version": None, "commit": None}, "comparison": "unknown",
+                          "checked_at": None, "restart": "original_command"},
                 "stage_evidence": s["evidence"], "hold": s["holding"], "fleets": [team, docs, archive]}
+
+    def _attention(self, state):
+        from herdr_fleet.dashboard_attention import item, filtered
+        now = _iso(time.time())
+        owner = item("owner_message", TEAM, M_ASK, "unread" if state["asked"] else "unavailable",
+                     "owner_pending" if state["asked"] else "owner_header_unavailable", now,
+                     sender=REV, message=M_ASK, incomplete=not state["asked"],
+                     actions=[{"kind": "inspect_owner", "source": TEAM, "message": M_ASK}] if state["asked"] else [])
+        rows = [owner,
+                item("native_dialog", DOCS, "peer-writer", "blocked", "native_dialog_in_herdr", now,
+                     seat="peer-writer", actions=[{"kind": "watch", "fleet": DOCS, "seat": "peer-writer", "view": "demo-view-peer-writer"}]),
+                item("send_issue", TEAM, M_FIX, "unconfirmed", "send_unconfirmed", now, seat=DEV, message=M_FIX,
+                     actions=[{"kind": "inspect_send", "source": TEAM, "fleet": TEAM, "seat": DEV, "message": M_FIX}]),
+                item("provider_hold", DOCS, "peer-checker", "held", "active_provider_hold", now,
+                     seat="peer-checker", resets_at=None, actions=[{"kind": "inspect_seat", "fleet": DOCS, "seat": "peer-checker"}]),
+                item("observation_issue", ARCHIVE, "sample-stale", "stale", "fleet_observation_stale", _iso(time.time() - 2460),
+                     actions=[{"kind": "refresh"}])]
+        return filtered(rows, [TEAM, DOCS, ARCHIVE])
+
+    def attention_page(self, scope="all", fleet=None, category="all"):
+        from herdr_fleet.dashboard_attention import filtered
+        return filtered(self._attention(self._state())["items"], [TEAM, DOCS, ARCHIVE], scope, fleet, category)
 
     def listing(self, fleet, mode, name=None, limit=50, ref=None):
         if fleet not in (TEAM, DOCS, ARCHIVE):

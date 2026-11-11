@@ -8,26 +8,27 @@ const test = require('node:test');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../herdr_fleet/dashboard_static/app.js'), 'utf8');
 
-function fixture() {
+function fixture(options={}) {
   class Element {
     constructor(tag='div') {
       this.tagName=tag.toUpperCase(); this.textContent=''; this.value=''; this.children=[];
       this.dataset={}; this.listeners={}; this.attrs={}; this.hidden=false; this.disabled=false;
-      this.style={setProperty(){}}; this.classList={toggle(){},contains(){return false;}};
+      this.style={setProperty(name,value){this[name]=value;}}; this.classList={toggle(){},contains(){return false;}};
       this.clientHeight=360; this.scrollTop=0;
     }
     addEventListener(name, fn) { this.listeners[name]=fn; }
     click() { if(!this.disabled && this.listeners.click)return this.listeners.click({target:this}); }
     setAttribute(name,value) { this.attrs[name]=String(value); }
     getAttribute(name) { return this.attrs[name]; }
-    append(...items) { this.children.push(...items); }
-    insertBefore(item,before) { const index=this.children.indexOf(before); if(index<0)this.children.push(item);else this.children.splice(index,0,item); }
-    replaceChildren(...items) { this.children=items; }
+    append(...items) { for(const item of items){if(item&&typeof item==='object'){item.remove();item.parentNode=this;}this.children.push(item);} }
+    insertBefore(item,before) { if(item===before)return;item.remove();const index=this.children.indexOf(before);if(index<0)this.children.push(item);else this.children.splice(index,0,item);item.parentNode=this; }
+    replaceChildren(...items) { for(const item of this.children){if(item&&typeof item==='object')item.parentNode=null;}this.children=[];this.append(...items); }
     querySelector() { return null; }
     getBoundingClientRect() { return {left:0,width:100,height:360}; }
     focus() { document.activeElement=this; }
     animate() { return {finished:Promise.resolve()}; }
-    remove() {}
+    contains(item) { return this===item||this.children.some(child=>child&&typeof child.contains==='function'&&child.contains(item)); }
+    remove() { if(this.parentNode){const i=this.parentNode.children.indexOf(this);if(i>=0)this.parentNode.children.splice(i,1);this.parentNode=null;} }
   }
   const elements=new Map();
   const $=id=>{if(!elements.has(id))elements.set(id,new Element()); return elements.get(id);};
@@ -37,6 +38,8 @@ function fixture() {
   for(const id of ['composer-title','questions']) {$(id).parentNode=new Element();$(id).parentNode.parentNode=new Element();}
   const listeners={},timers=new Map(),requests=[];
   const models=[];
+  const attentionModels=[],attentionOptions={};
+  const attention={items:[],counts:{},matched_count:0,truncated:false,incomplete:false,counts_capped:false};
   const conversation={messages:[],intents:[],truncated:false,incomplete:false,revision:1};
   let timer=0,ident=0,application;
   const deferred=[],watchResponses=[];
@@ -46,29 +49,37 @@ function fixture() {
   class Terminal {loadAddon(){}open(){}reset(){}resize(){}write(){} get buffer(){return {active:{length:0}};}}
   const context={document,location:{hash:'',pathname:'/'},history:{replaceState(){context.location.hash='';}},
     ConversationView:{mount(){return {render(model){models.push(model);},destroy(){}};}},
+    AttentionView:{mount(root,callbacks){attentionOptions.current=callbacks;return {render(model){attentionModels.push(model);},destroy(){}};}},
     Terminal,FitAddon:{FitAddon:class {proposeDimensions(){return {cols:80,rows:24};}fit(){}}},
     ResizeObserver:class {observe(){}},matchMedia:()=>({matches:true,addEventListener(){}}),
     window:{addEventListener(name,fn){listeners[name]=fn;}},navigator:{},
     setInterval(fn){timers.set(++timer,fn);return timer;},clearInterval(id){timers.delete(id);},
     setTimeout(){return ++timer;},clearTimeout(){},AbortController,TextDecoder,Uint8Array,Map,Set,
-    crypto:{randomUUID(){return 'intent-synthetic-'+(++ident);}},console,
+    crypto:{randomUUID(){return 'intent-synthetic-'+(++ident);}},console,TextEncoder,
+    localStorage:options.storage,
     fetch:async(url,options={})=>{
       const body=options.body?JSON.parse(options.body):null;
       requests.push({url,body});
       if(url==='/api/session')return sessionResponder(body);
       if(url==='/api/snapshot')return {ok:true,json:async()=>data};
+      if(url.startsWith('/api/attention?'))return {ok:true,json:async()=>attention};
       if(url.startsWith('/api/conversation?'))return {ok:true,json:async()=>conversation};
       if(url.startsWith('/api/list?'))return {ok:true,json:async()=>({items:[]})};
       if(url==='/api/action')return new Promise(resolve=>deferred.push(result=>resolve({ok:true,json:async()=>result})));
       if(url==='/api/watch')return new Promise(resolve=>watchResponses.push(resolve));
       throw new Error('Unexpected fixture request '+url);
     }};
+  if(options.realAttention) {
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../herdr_fleet/dashboard_static/attention-view.js'),'utf8'),context);
+    context.AttentionView=context.window.AttentionView;
+  }
   // Only export lexical handles; every function under test is the real shipped function.
   vm.runInNewContext(source.replace(/\}\(\)\);\s*$/, 'globalThis.application = {state, send, selectedChanged, selectFleet, restoreDraft, saveDraft, bootstrap, refresh, draftKey, watch, chooseReply}; }());'),context);
   application=context.application;
   application.state.data=data;application.state.csrf='csrf-initial';
   application.state.fleet=application.state.targetFleet='team';application.state.seat='sample-dev';
   return {app:application,$,data,requests,deferred,watchResponses,listeners,timers,context,models,conversation,documentListeners,
+    attention,attentionModels,attentionOptions,
     session(fn){sessionResponder=fn;},
     select(fleet,seat,reply=null){application.selectedChanged(fleet,seat); application.chooseReply(reply);},
     text(text){$('draft').value=text;application.saveDraft();}};
@@ -76,6 +87,174 @@ function fixture() {
 const confirmed={status:'delivered',certainty:'confirmed',id:'20261101T100000Z-aabbcc'};
 const uncertain={status:'unconfirmed',certainty:'unconfirmed',id:'20261101T100001Z-ddeeff'};
 const flush=async()=>{for(let i=0;i<24;i++)await Promise.resolve();};
+
+test('Decision Desk receives real cross-fleet attention without moving selection or fetching bodies',async()=>{
+ const f=fixture();f.text('Keep my draft');f.$('draft').focus();
+ f.attention.items=[{id:'a'.repeat(32),type:'owner_message',fleet:'docs',sender:'sample-reviewer',
+  message:confirmed.id,status:'awaiting_reply',reason:'owner_awaiting_reply',time:'2026-11-01T10:00:00Z',
+  actions:[{kind:'inspect_owner',source:'docs',message:confirmed.id}]}];
+ f.attention.counts.owner_message=1;f.attention.matched_count=1;
+ await f.app.refresh();
+ assert.equal((f.attentionModels.at(-1)?.items||[]).length,1);
+ assert.equal(f.app.state.fleet,'team');assert.equal(f.app.state.seat,'sample-dev');
+ assert.equal(f.$('draft').value,'Keep my draft');assert.equal(f.context.document.activeElement,f.$('draft'));
+ assert.equal(f.requests.filter(r=>r.url.startsWith('/api/list?')).length,0);
+ assert.equal(f.requests.filter(r=>r.url==='/api/action').length,0);
+});
+
+test('different running build shows bounded restart guidance without changing a draft or using newer wording',async()=>{
+ const f=fixture();f.text('Retained draft');
+ f.data.build={running:{version:'0.22.0',commit:'a'.repeat(40)},installed:{version:'0.21.2',commit:'b'.repeat(40)},
+  comparison:'different',checked_at:'2026-11-01T10:00:00Z',restart:'original_command'};
+ await f.app.refresh();
+ assert.match(f.$('build-status').textContent,/Running a different build/);
+ assert.doesNotMatch(f.$('build-status').textContent,/newer/i);
+ assert.match(f.$('build-guidance').textContent,/original dashboard command/);
+ assert.doesNotMatch(f.$('build-guidance').textContent,/--all-fleets/);
+ assert.equal(f.$('draft').value,'Retained draft');
+});
+
+test('view preferences restore cosmetic fields only and new page stays Terminal without Watch or body inspection',async()=>{
+ const values=new Map([['herdr-fleet.view.v1.live',JSON.stringify({version:1,collapsed:true,motion:true,
+  height:600,scope:'selected',category:'native_dialog'})]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+ const f=fixture({storage});f.text('Never persist this draft');await f.app.refresh();
+ assert.equal(f.app.state.collapsed,true);assert.equal(f.app.state.motion,true);assert.equal(f.app.state.tab,'terminal');
+ assert.equal(f.$('terminal-screen').style['--terminal-height'],'600px');
+ assert.equal(f.app.state.attentionScope,'selected');assert.equal(f.app.state.attentionCategory,'native_dialog');
+ assert.equal(f.requests.filter(r=>r.url==='/api/watch'||r.url==='/api/action'||r.url.startsWith('/api/list?')).length,0);
+ f.$('collapse').listeners.click();
+ const saved=JSON.parse(values.get('herdr-fleet.view.v1.live'));
+ assert.deepEqual(Object.keys(saved).sort(),['category','collapsed','height','motion','scope','version']);
+ assert.doesNotMatch(JSON.stringify(saved),/Never persist|csrf|sample-dev|team|intent/);
+ assert.ok(new TextEncoder().encode(JSON.stringify(saved)).length<=2048);
+});
+
+test('malformed or unavailable preference storage does not break polling, shortcuts or defaults',async()=>{
+ for(const raw of ['{', 'x'.repeat(2049), JSON.stringify({version:1,collapsed:true,motion:null,height:360,
+  scope:'all',category:'all',tab:'messages'}),JSON.stringify({version:1,collapsed:'true',motion:null,height:360,scope:'all',category:'all'})]) {
+  const f=fixture({storage:{getItem(){return raw;},setItem(){throw new Error('quota');}}});await f.app.refresh();
+  assert.equal(f.app.state.collapsed,false);assert.equal(f.app.state.tab,'terminal');
+  assert.equal(f.app.state.attentionScope,'all');assert.equal(f.app.state.attentionCategory,'all');
+ }
+ const f=fixture({storage:{getItem(){throw new Error('denied');},setItem(){throw new Error('quota');},removeItem(){throw new Error('denied');}}});
+ await f.app.refresh();f.text('Still able to type');f.$('motion').listeners.click();
+ f.$('draft').listeners.keydown({key:'Enter',ctrlKey:true,preventDefault(){}});await flush();
+ assert.equal(f.requests.filter(r=>r.url==='/api/action').length,1);
+ f.deferred.shift()(confirmed);await flush();assert.equal(f.$('draft').value,'');
+});
+
+test('Reset view preferences removes its own key and preserves active Watch/tab, auth, draft and intent',async()=>{
+ const values=new Map([['unrelated-site-key','retain']]);const removed=[];
+ const f=fixture({storage:{getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem(k){removed.push(k);values.delete(k);}}});
+ await f.app.refresh();f.text('Keep draft and uncertainty');f.app.state.intent={id:'intent-retained',pending:false};
+ const intent=f.app.state.intent;let aborted=0;const watch={abort(){aborted++;}};f.app.state.watch=watch;f.app.state.tab='messages';
+ const before=f.requests.length;f.$('reset-view-preferences').listeners.click();await flush();
+ assert.deepEqual(removed,['herdr-fleet.view.v1.live']);assert.equal(values.get('unrelated-site-key'),'retain');
+ assert.equal(f.app.state.watch,watch);assert.equal(aborted,0);assert.equal(f.app.state.tab,'messages');
+ assert.equal(f.app.state.csrf,'csrf-initial');assert.equal(f.app.state.intent,intent);assert.equal(f.$('draft').value,'Keep draft and uncertainty');
+ assert.ok(f.requests.slice(before).every(r=>r.url.startsWith('/api/attention?')));
+});
+
+test('Desk filter and stale Refresh are pure, stale item callbacks cannot act, and late filter responses stay scoped',async()=>{
+ const f=fixture();f.text('Keep draft');await f.app.refresh();
+ f.attention.items=[{id:'refresh-id',type:'observation_issue',fleet:'team',status:'stale',reason:'fleet_observation_stale',actions:[{kind:'refresh'}]}];
+ f.data.fleets[0].stale=true;await f.app.refresh();
+ const before=f.requests.length;f.attentionOptions.current.onAction('refresh-id');await flush();
+ assert.ok(f.requests.slice(before).some(r=>r.url==='/api/snapshot'),'stale item can refresh its observation');
+ assert.ok(f.requests.slice(before).every(r=>r.url!=='/api/action'&&r.url!=='/api/watch'&&!r.url.startsWith('/api/list?')));
+ f.attention.items=[];await f.app.refresh();const gone=f.requests.length;
+ f.attentionOptions.current.onAction('refresh-id');await flush();assert.equal(f.requests.length,gone);
+ f.data.fleets[0].stale=false;const original=f.context.fetch,waiting=[];
+ f.context.fetch=async(url,options)=>url.startsWith('/api/attention?')?new Promise(resolve=>waiting.push({url,resolve})):original(url,options);
+ f.attentionOptions.current.onFilter('selected','native_dialog');await flush();
+ f.attentionOptions.current.onFilter('all','provider_hold');await flush();
+ assert.equal(waiting.length,2);waiting[1].resolve({ok:true,json:async()=>({items:[{id:'current'}],counts:{}})});await flush();
+ waiting[0].resolve({ok:true,json:async()=>({items:[{id:'old'}],counts:{}})});await flush();
+ assert.equal(f.attentionModels.at(-1).items[0].id,'current');assert.equal(f.app.state.fleet,'team');
+ assert.equal(f.$('draft').value,'Keep draft');
+});
+
+test('real inert Desk retains row/focus identity, follows server order, folds manually and uses literal unknown text',async()=>{
+ const f=fixture({realAttention:true});
+ const row=(id)=>({id,type:'owner_message',fleet:'docs',sender:'sample-reviewer',message:confirmed.id,
+  status:'awaiting_reply',reason:'owner_awaiting_reply',actions:[{kind:'inspect_owner',source:'docs',message:confirmed.id}]});
+ f.attention.items=[row('one'),row('two')];f.attention.matched_count=2;await f.app.refresh();
+ const root=f.$('attention-desk'),list=root.children.find(e=>e.id==='attention-list');
+ const first=list.children[0],action=first.children.at(-1);action.focus();
+ f.attention.items=[row('two'),row('one')];await f.app.refresh();
+ assert.equal(list.children[1],first);assert.equal(first.children.at(-1),action);assert.equal(f.context.document.activeElement,action);
+ const head=root.children[0],fold=head.children.find(e=>e.className==='desk-fold');fold.click();assert.equal(list.hidden,true);
+ await f.app.refresh();assert.equal(list.hidden,true,'polling cannot unfold the list');
+ fold.click();f.attention.items=[row('two')];await f.app.refresh();
+ assert.equal(f.context.document.activeElement,head.children.find(e=>e.id==='attention-title'));
+ f.attention.items=[{...row('unknown'),type:'constructor',reason:'<script>literal</script>',status:'__proto__'}];await f.app.refresh();
+ assert.equal(list.children[0].children[1].textContent,'constructor');
+ assert.match(list.children[0].children[3].textContent,/<script>literal<\/script>.*__proto__.*unconfirmed/);
+ assert.equal(list.children[0].children.at(-1).disabled,true);
+});
+
+test('Live and Demo preference keys stay separate and invalid schema never restores ids or a body tab',async()=>{
+ const values=new Map([['herdr-fleet.view.v1.live',JSON.stringify({version:1,collapsed:true,motion:false,height:700,scope:'all',category:'all'})],
+  ['herdr-fleet.view.v1.demo',JSON.stringify({version:1,collapsed:false,motion:true,height:300,scope:'all',category:'send_issue'})]]);
+ const f=fixture({storage:{getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)}});
+ await f.app.refresh();assert.equal(f.app.state.collapsed,true);assert.equal(f.app.state.motion,false);
+ f.data.demo=true;await f.app.refresh();assert.equal(f.app.state.collapsed,false);assert.equal(f.app.state.motion,true);
+ assert.equal(f.app.state.attentionCategory,'send_issue');assert.equal(f.app.state.tab,'terminal');
+ f.$('collapse').click();assert.equal(JSON.parse(values.get('herdr-fleet.view.v1.live')).height,700);
+ assert.equal(JSON.parse(values.get('herdr-fleet.view.v1.demo')).height,300);
+});
+
+test('Desk owner inspection keeps exact source/id and cannot reply through ambiguous or absent sender',async()=>{
+ const f=fixture(),original=f.context.fetch;f.text('Independent team draft');await f.app.refresh();
+ f.attention.items=[{id:'owner-docs',type:'owner_message',fleet:'docs',sender:'sample-reviewer',message:confirmed.id,
+  status:'awaiting_reply',reason:'owner_awaiting_reply',actions:[{kind:'inspect_owner',source:'docs',message:confirmed.id}]}];
+ let sender='sample-reviewer';
+ f.context.fetch=async(url,options)=>{
+  if(url.startsWith('/api/list?')){f.requests.push({url,body:null});return {ok:true,json:async()=>({items:[{id:confirmed.id,
+   sender,to:'owner',body:'<b>Literal owner message</b>',box:'cur'}]})};}
+  return original(url,options);
+ };
+ await f.app.refresh();f.attentionOptions.current.onAction('owner-docs');await flush();
+ const listing=f.requests.filter(r=>r.url.startsWith('/api/list?'));
+ const query=new URL('http://synthetic.local'+listing[0].url).searchParams;
+ assert.equal(query.get('fleet'),'docs');assert.equal(query.get('id'),confirmed.id);assert.equal(query.get('name'),'owner');
+ assert.equal(f.app.state.fleet,'docs');assert.equal(f.$('question-body').textContent,'<b>Literal owner message</b>');
+ assert.equal(f.$('reply-question').disabled,true,'two declared matching names are ambiguous');
+ assert.equal(f.requests.filter(r=>r.url==='/api/action').length,0);
+ f.app.selectFleet('team');assert.equal(f.$('draft').value,'Independent team draft');
+ sender='absent-sender';await f.app.refresh();f.attentionOptions.current.onAction('owner-docs');await flush();
+ assert.equal(f.$('reply-question').disabled,true);assert.equal(f.requests.filter(r=>r.url==='/api/action').length,0);
+});
+
+test('Desk Watch is explicit and exact-binding guarded while scope changes issue metadata GETs only',async()=>{
+ const f=fixture(),original=f.context.fetch;f.data.fleets[0].seats[0].state='blocked';await f.app.refresh();
+ f.attention.items=[{id:'dialog',type:'native_dialog',fleet:'team',seat:'sample-dev',status:'blocked',
+  reason:'native_dialog_in_herdr',actions:[{kind:'watch',fleet:'team',seat:'sample-dev',view:'old-binding'}]}];
+ await f.app.refresh();f.attentionOptions.current.onAction('dialog');await flush();
+ assert.equal(f.requests.filter(r=>r.url==='/api/watch').length,0);
+ f.attention.items[0].actions[0].view='teamsample-dev';await f.app.refresh();
+ f.context.fetch=async(url,options)=>{
+  if(url==='/api/watch'){f.requests.push({url,body:JSON.parse(options.body)});return {ok:true,body:{getReader(){return {read:async()=>({done:true})};}}};}
+  return original(url,options);
+ };
+ f.attentionOptions.current.onAction('dialog');await flush();
+ assert.equal(f.requests.filter(r=>r.url==='/api/watch').length,1);
+ assert.equal(f.requests.filter(r=>r.url==='/api/action').length,0);
+ const before=f.requests.length;f.attentionOptions.current.onFilter('selected','owner_message');await flush();
+ assert.ok(f.requests.slice(before).every(r=>r.url.startsWith('/api/attention?')));
+});
+
+test('selected-fleet attention invalidates old visible authority immediately and quiet return does not announce history',async()=>{
+ const f=fixture({realAttention:true});await f.app.refresh();
+ f.attention.items=[{id:'notice',type:'observation_issue',fleet:'team',status:'unknown',reason:'watcher_liveness_unknown',actions:[{kind:'refresh'}]}];
+ await f.app.refresh();const root=f.$('attention-desk'),live=root.children.at(-1),announced=live.textContent;
+ f.context.document.hidden=true;f.attention.items=[];const before=f.requests.length;await f.app.refresh();
+ assert.equal(f.requests.length,before);f.context.document.hidden=false;await f.documentListeners.visibilitychange();await flush();
+ assert.equal(live.textContent,announced,'quiet catch-up suppresses historic announcements');
+ f.app.state.attentionScope='selected';f.app.state.attention={items:[{id:'old'}]};f.app.selectFleet('docs');
+ assert.equal(f.app.state.attention,null,'previous fleet items cannot act during replacement request');
+});
 
 for(const modifier of ['metaKey','ctrlKey']) {
  test('composer '+modifier+' Enter clicks Send once and uses its existing pending intent',async()=>{

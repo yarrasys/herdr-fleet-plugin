@@ -7,6 +7,8 @@ counters, ``behaviors`` and ``canned`` responses. Every call reads the world,
 acts, writes it back and appends one JSON line to the call log (env
 ``FAKE_HERDR_LOG``): ``{"argv": [...], "exit": n, "info": {...}}``.
 
+``plugin list --json`` returns the synthetic world's ``plugins`` metadata only.
+
 - Canned responses: ``world["canned"]`` entries ``{"prefix": [...], "exit": n,
   "stdout": str|obj, "stderr": str|obj, "times": n}`` answer any call whose
   argv starts with ``prefix`` (``times`` limits how often), before simulation.
@@ -778,6 +780,8 @@ class Sim:
             return _ok({"type": "ok"})
         if args == ["--version"]:
             return 0, self.w["version"] + "\n", ""
+        if args == ["plugin", "list", "--json"]:
+            return _ok({"plugins": self.w.get("plugins", [])})
         if args == ["agent"]:
             usage = "herdr agent commands:\n  herdr agent list\n  kinds: %s\n" % "|".join(self.w["kinds"])
             return 2, "", usage

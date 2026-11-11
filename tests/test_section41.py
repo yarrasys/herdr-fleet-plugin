@@ -102,7 +102,7 @@ class Observation(DashboardCase):
         self.assertNotIn("MUST NOT", text)
         self.assertEqual(result["fleets"][0]["seats"][1]["queued"], 1)
         self.assertEqual(result["fleets"][0]["owner"][0]["id"], owner.id)
-        self.assertEqual([call["argv"] for call in self.calls()], [["agent", "list"]])
+        self.assertEqual([call["argv"] for call in self.calls()], [["plugin", "list", "--json"], ["agent", "list"]])
 
     def test_invalid_state_retains_last_success_and_then_recovers(self):
         first = self.observer.refresh()["fleets"][0]

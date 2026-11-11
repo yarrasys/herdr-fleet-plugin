@@ -75,20 +75,26 @@ class FileCache:
         data, truncated = self.bytes(path, MAX_LOG, tail=True)
         # A writer may be in the middle of its final record. Never expose it.
         lines = data.split(b"\n")[:-1]
-        truncated = truncated or len(lines) > MAX_ENTRIES
+        truncated = truncated or len(lines) > MAX_ENTRIES or bool(data and not data.endswith(b"\n"))
         entries = []
         for line in lines[-MAX_ENTRIES:]:
             try:
                 item = json.loads(line)
             except (ValueError, UnicodeDecodeError):
+                truncated = True
                 continue
-            if isinstance(item, dict) and all(isinstance(item.get(k), str) for k in ("time", "from", "to")):
-                if (any(len(item[k]) > 64 for k in ("time", "from", "to"))
+            if isinstance(item, dict) and all(isinstance(item.get(k), str) for k in ("time", "from", "to", "kind")):
+                if (any(len(item[k]) > 64 for k in ("time", "from", "to", "kind"))
+                        or any(k in item and item[k] is not None and not isinstance(item[k], str)
+                               for k in ("delivery", "origin_fleet", "destination_fleet", "requested_to", "reply_to"))
                         or ("id" in item and (not isinstance(item["id"], str) or not inbox.ID_RE.fullmatch(item["id"])))):
+                    truncated = True
                     continue
                 if "first_line" in item:
                     item["first_line"] = str(item["first_line"])[:1024]
                 entries.append(item)
+            else:
+                truncated = True
         return entries, truncated
 
 
@@ -97,6 +103,7 @@ class Registry:
         if len(paths or []) > MAX_FLEETS:
             raise DataError("at most 32 fleets may be registered")
         self.cwd, self.env, self.all_fleets = cwd, dict(env), all_fleets
+        self.explicit_launch = bool(paths)
         selected = paths or [find_fleet_file(cwd, None, env)]
         self.explicit = {os.path.realpath(os.path.expanduser(p)) for p in selected}
         self.paths = {}
@@ -199,6 +206,11 @@ class Observer:
         self.cache = FileCache()
         from herdr_fleet.dashboard_conversation import Conversation
         self.conversations = Conversation(registry, self.cache)
+        from herdr_fleet.dashboard_attention import Attention
+        self.attention = Attention(registry, self.conversations)
+        self.attention_sources = {}
+        from herdr_fleet.dashboard_build import Builds
+        self.builds = Builds(herdr, registry.all_fleets and not registry.explicit_launch)
         self.lock = threading.RLock()
         self.last = {}
         self.agents = []
@@ -207,6 +219,7 @@ class Observer:
     def refresh(self):
         with self.lock:
             now = datetime.datetime.now(datetime.timezone.utc)
+            self.builds.refresh(now)
             try:
                 agents = self.herdr.agent_list()
                 if not isinstance(agents, list) or len(agents) > MAX_FLEETS * MAX_SEATS:
@@ -216,8 +229,13 @@ class Observer:
             except Exception:
                 for item in self.last.values():
                     item.update(stale=True, warning="Herdr disconnected; showing the last observation")
+                if not self.last:
+                    self.last = {ident: {"id": ident, "label": "Unavailable fleet", "observed_at": None,
+                                         "stale": True, "seats": [], "owner": [], "owed": [], "watcher": {"running": None}}
+                                 for ident in self.registry.paths}
+                self.attention.project(list(self.last.values()), self.attention_sources, now)
                 return self.snapshot()
-            latest = {}
+            latest, sources = {}, {}
             with self.registry.lock:
                 paths = list(self.registry.paths)
             for ident in paths:
@@ -226,7 +244,11 @@ class Observer:
                     state = self.cache.object(os.path.join(fleet.repo, ".herdr", "fleet.state.json"))
                     if not isinstance(state.get("agents", {}), dict):
                         raise DataError("invalid state")
-                    entries, truncated = self.cache.log(messages.log_path(fleet.repo))
+                    try:
+                        entries, truncated = self.cache.log(messages.log_path(fleet.repo))
+                    except (OSError, ValueError):
+                        entries, truncated = [], True
+                    sources[ident] = {"fleet": fleet, "entries": entries, "state": state, "incomplete": truncated}
                     seats = []
                     for seat in fleet.seats:
                         records = [a for a in agents if a.get("name") == seat.name]
@@ -275,7 +297,7 @@ class Observer:
                                      "observed_at": now.isoformat(), "stale": False, "warning": None,
                                      "seats": seats, "owner": [message_metadata(m) for m in owner[:100]],
                                      "owed": [{k: d.get(k) for k in ("id", "from", "to", "since")} for d in debts[:200]],
-                                     "watcher": {"running": running, "since": watcher.get("since")},
+                                     "watcher": {"running": running, "since": watcher.get("since"), "enabled": fleet.watch},
                                      "contacts": [{"name": c.name} for c in fleet.contacts[:128]],
                                      "events": [{k: e[k] for k in ("id", "time", "from", "to", "kind", "delivery")
                                                  if k in e} for e in entries[-100:] if e.get("id")],
@@ -286,12 +308,21 @@ class Observer:
                     previous.update(stale=True, warning="Fleet files unavailable or invalid; last observation retained")
                     latest[ident] = previous
             self.last = latest
+            self.attention_sources = sources
+            self.attention.project(list(latest.values()), sources, now)
             self.revision += 1
             return self.snapshot()
 
     def snapshot(self):
         with self.lock:
-            return {"demo": False, "revision": self.revision, "fleets": copy.deepcopy(list(self.last.values()))}
+            fleets = copy.deepcopy(list(self.last.values()))
+            return {"demo": False, "revision": self.revision, "fleets": fleets,
+                    "build": self.builds.snapshot(),
+                    "attention": copy.deepcopy(self.attention.page())}
+
+    def attention_page(self, scope="all", fleet=None, category="all"):
+        with self.lock:
+            return copy.deepcopy(self.attention.page(scope, fleet, category))
 
     def conversation(self, source, fleet, seat, limit=50):
         with self.lock:
@@ -329,6 +360,20 @@ class Observer:
             headers.sort(key=inbox.Message.sort_key, reverse=True)
             result = []
             for message in headers[:limit]:
+                if name == "owner" and ref is not None:
+                    self.conversations.header(message.path, message.box)
+                    roots = set()
+                    for registered in list(self.registry.paths):
+                        try:
+                            roots.add(os.path.realpath(self.registry.fleet(registered).repo))
+                        except (OSError, ValueError):
+                            pass
+                    if not self.attention.safe(message, os.path.realpath(fleet.repo), roots):
+                        raise DataError("Owner message route is not approved")
+                    body, shortened, missing = self.conversations.body(message, [65536])
+                    result.append(dict(message_metadata(message), body=body, body_available=not missing,
+                                       body_truncated=shortened, incomplete=missing))
+                    continue
                 # Paths are server-derived; bodies are read only for this explicit listing.
                 with open(message.path, "rb") as handle:
                     raw = handle.read(65537)

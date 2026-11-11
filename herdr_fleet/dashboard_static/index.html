@@ -10,6 +10,7 @@
 <script defer src="/vendor/xterm.js"></script>
 <script defer src="/vendor/addon-fit.js"></script>
 <script defer src="/conversation-view.js"></script>
+<script defer src="/attention-view.js"></script>
 <script defer src="/app.js"></script>
 </head>
 <body>
@@ -19,7 +20,9 @@
       <div class="box-top"><span class="eyebrow">Local fleet console</span><button id="collapse" aria-controls="fleets" aria-expanded="true">Collapse fleets</button></div>
       <h1>Signal Box</h1>
       <p id="mode" class="mode">Owner session required</p>
-      <div class="tally"><strong id="attention-count">—</strong><span class="tally-label">owner<br>questions</span></div>
+      <div class="build"><span id="build-running">Running build unknown</span><span id="build-installed">Installed build unknown</span><span id="build-status">Build comparison unknown</span></div>
+      <p id="build-guidance" class="build-guidance"></p>
+      <div class="tally"><strong id="attention-count">—</strong><span class="tally-label">observed<br>attention</span></div>
     </header>
     <nav id="fleets" aria-label="Choose a fleet"></nav>
     <details class="legend"><summary>State signals</summary><ul class="legend-list"><li><span class="lamp working"></span>Working</li><li><span class="lamp idle"></span>Idle</li><li><span class="lamp question"></span>Owner question</li><li><span class="lamp blocked"></span>Native dialog</li><li><span class="lamp done"></span>Done</li><li><span class="lamp absent"></span>Absent or unknown</li></ul><p>A message crossing the line is a logged send. A ring is an observed state change or delivery. Delivery and agent state are separate. Idle does not mean work was accepted. In a conversation, each message carries only the receipts actually recorded for it.</p></details>
@@ -28,13 +31,13 @@
     <p id="persistent-mode" class="persistent-mode">Owner session required</p>
     <header class="pane-head">
       <div><p class="eyebrow">Fleet observation · Watch only</p><h2 id="fleet-title">Connect your console</h2></div>
-      <div class="toolbar"><button id="motion" role="switch" aria-checked="true">Motion <span id="motion-state" class="switch-state" aria-hidden="true">on</span></button><button id="demo-answer" class="attention" hidden>Answer Demo question</button><button id="replay" hidden>Replay Demo</button></div>
+      <div class="toolbar"><button id="motion" role="switch" aria-checked="true">Motion <span id="motion-state" class="switch-state" aria-hidden="true">on</span></button><div class="view-wrap"><button id="view-settings" aria-controls="view-prefs" aria-expanded="false">View</button><section id="view-prefs" class="view-pop" aria-label="View preferences" hidden><h4>View preferences</h4><p>Fleet rail, Motion, terminal height and Desk filters are remembered using their existing controls. Terminal expansion and the active tab stay temporary.</p><button id="reset-view-preferences">Reset view preferences</button><p id="view-pref-status" role="status"></p></section></div><button id="demo-answer" class="attention" hidden>Answer Demo question</button><button id="replay" hidden>Replay Demo</button></div>
     </header>
-    <div class="readouts"><span id="freshness">Use the full launch address printed by the foreground process.</span><span id="watcher">Watcher unknown</span></div>
+    <div class="readouts"><span id="freshness">Use the full launch address printed by the foreground process.</span><span id="watcher">Watcher unknown</span><button id="refresh-observation">Refresh observation</button></div>
     <p id="notice" role="status" aria-live="polite">The launch capability establishes this browser's owner session.</p>
-    <section class="questions panel" aria-labelledby="questions-title">
-      <h3 id="questions-title" class="eyebrow panel-heading">Owner questions</h3>
-      <div id="questions"><p class="empty">No observation yet.</p></div>
+    <section class="questions panel desk" aria-labelledby="attention-title">
+      <div id="attention-desk"><h3 id="attention-title" class="eyebrow panel-heading">Needs attention</h3></div>
+      <div id="questions" hidden><p class="empty">No observation yet.</p></div>
       <div id="owner-detail" hidden>
         <div class="detail-heading"><strong id="question-sender"></strong><button id="close-question">Close question</button></div>
         <pre id="question-body" class="message-body"></pre>
