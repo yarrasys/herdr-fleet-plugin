@@ -15,6 +15,7 @@ import contextlib
 import copy
 import fcntl
 import os
+import errno
 from typing import Dict, Mapping, Optional, Sequence
 
 from herdr_fleet import inbox
@@ -167,6 +168,72 @@ def reserved(roots):
         for fd in reversed(handles):
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+
+class ReservationBusy(OSError):
+    """Only pre-effect acquisition contention may be retried."""
+
+
+@contextlib.contextmanager
+def routed_reservation(roots, destination, name, clock, allow_backoff=True):
+    """45.4: acquire sorted roots AND mailbox, or release all before backoff."""
+    roots = sorted(set(roots))
+    if destination not in roots:
+        raise OSError("destination is outside the routed reservation")
+    end = clock.monotonic() + 5.0
+    for root in roots:
+        validated_fleet(root)
+    safe_mailbox(destination, name)
+    prepared = inbox.open_mailbox_lock(destination, name, prepare=True)
+    os.close(prepared)
+    handles = []
+    mailbox = None
+    while True:
+        try:
+            for root in roots:
+                validated_fleet(root)
+                fd = os.open(os.path.join(root, FLEET_DIR), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                handles.append(fd)
+                _try_reservation(fd)
+            safe_mailbox(destination, name)
+            mailbox = inbox.open_mailbox_lock(destination, name)
+            handles.append(mailbox)
+            _try_reservation(mailbox)
+            # No effects/id allocation have happened. Revalidate the full set,
+            # including the opened mailbox inode, before yielding to its writer.
+            for root in roots:
+                validated_fleet(root)
+                safe_mailbox(root, name)
+            actual = os.stat(os.path.join(destination, FLEET_DIR, "inbox", name, inbox.LOCK_NAME), follow_symlinks=False)
+            opened = os.fstat(mailbox)
+            if (actual.st_dev, actual.st_ino) != (opened.st_dev, opened.st_ino):
+                raise OSError("mailbox lock changed during routed acquisition")
+            if clock.monotonic() > end:
+                raise ReservationBusy("destination busy: routed acquisition deadline exceeded")
+            break
+        except ReservationBusy:
+            for fd in reversed(handles): os.close(fd)
+            handles = []
+            left = end - clock.monotonic()
+            if not allow_backoff or left <= 0:
+                raise ReservationBusy("destination busy: could not acquire routed roots and mailbox")
+            clock.sleep(min(0.05, left))
+        except BaseException:
+            for fd in reversed(handles): os.close(fd)
+            raise
+    try:
+        yield
+    finally:
+        for fd in reversed(handles): os.close(fd)
+
+
+def _try_reservation(fd):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EAGAIN, errno.EACCES):
+            raise ReservationBusy("routed reservation is contended")
+        raise
 
 
 def receipt_matches(actual: Message, expected: Message) -> bool:

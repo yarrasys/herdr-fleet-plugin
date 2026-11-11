@@ -17,6 +17,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import contextlib
+import copy
 from typing import Dict, List, Optional, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +28,27 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+
+
+@contextlib.contextmanager
+def client_permit_fixture(client, name="sample-dev", pane="w1:p2", topology=False):
+    """Transport-unit fixture with real producer locks and synthetic mapping.
+
+    CLI integration uses actual resolver/status checks, never this fixture.
+    """
+    from herdr_fleet import permits
+    with tempfile.TemporaryDirectory() as folder:
+        domain = permits.endpoints({"HERDR_SOCKET_PATH": folder + "/api.sock"})[0]
+        record = {"name": name, "pane_id": pane, "terminal_id": "term_" + pane,
+                  "workspace_id": pane.split(":", 1)[0], "agent": "claude"}
+        values = [("W", record["workspace_id"]), ("N", name), ("P", pane), ("T", record["terminal_id"])]
+        with permits.Store(folder + "/locks").acquire([domain], values, topology=topology, growth=5 if topology else 0) as permit:
+            bound = copy.copy(client)
+            bound.configure({"HERDR_SOCKET_PATH": domain.api})
+            bound._domain, bound.permit = domain, permit
+            bound._agents = {name: record, pane: record}
+            bound._panes = {pane: record}
+            yield bound
 
 import fake_herdr  # noqa: E402
 from herdr_fleet.cli import main  # noqa: E402
@@ -63,7 +87,7 @@ HOOK_CALLS = (["agent", "get"],)
 # pane get, workspace list and pane read.
 WATCH_CALLS = (["agent", "wait"], ["agent", "get"], ["agent", "list"], ["agent", "prompt"],
                ["notification", "show"], ["--version"], ["pane", "get"], ["workspace", "list"], ["pane", "read"],
-               ["agent", "read"], ["agent", "focus"], ["pane", "zoom"])  # the last three: the board (24, 25)
+               ["agent", "read"], ["agent", "focus"], ["pane", "zoom"], ["status", "server"])  # 45: bounded endpoint corroboration
 # Design 19.3: only `up` (also from the popup menu) and `ui` open plugin panes; only `up` resizes.
 # Design 32.5: `restart NAME --handover` and `swap NAME --handover` open the handover pane, in a tab.
 PLUGIN_PANE_COMMANDS = ("up", "ui", "menu")
@@ -126,12 +150,20 @@ def install_fake_herdr(directory: str, cwd: str) -> Dict[str, str]:
     bindir = os.path.join(directory, "pybin")
     os.makedirs(bindir, exist_ok=True)
     os.symlink(sys.executable, os.path.join(bindir, "python3"))
+    # Python child fixtures use an internal constructor substitution. Production
+    # has no environment/CLI lock-root override, and tests never create its root.
+    with open(os.path.join(bindir, "sitecustomize.py"), "w") as handle:
+        handle.write("import sys\nsys.path.insert(0, %r)\nfrom herdr_fleet import permits\n"
+                     "_Store = permits.Store\nclass IsolatedStore(_Store):\n"
+                     "    def __init__(self, root=None):\n"
+                     "        super().__init__(root if root is not None else %r)\n"
+                     "permits.Store = IsolatedStore\n" % (ROOT, os.path.join(directory, "permits")))
     world = fake_herdr.new_world()
     fake_herdr.add_workspace(world, CALLER_WS, "caller", cwd)
     fake_herdr.put_agent(world, CALLER_PANE, "claude", name="caller", status="working")
     with open(os.path.join(directory, "world.json"), "w") as handle:
         json.dump(world, handle)
-    return {"PATH": bindir + os.pathsep + os.environ.get("PATH", ""), "HOME": directory,  # never the real ~/.claude
+    return {"PATH": bindir + os.pathsep + os.environ.get("PATH", ""), "HOME": directory, "PYTHONPATH": bindir,
             "HERDR_ENV": "1", "HERDR_BIN_PATH": herdr, "HERDR_PANE_ID": CALLER_PANE,
             "HERDR_WORKSPACE_ID": CALLER_WS, "FAKE_HERDR_WORLD": os.path.join(directory, "world.json"),
             "FAKE_HERDR_LOG": os.path.join(directory, "calls.jsonl"),
@@ -168,6 +200,9 @@ class FleetCase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="herdr-fleet-test-")
+        self.permit_root_patch = mock.patch("herdr_fleet.permits.default_root", return_value=os.path.join(self.tmp, "permits"))
+        self.permit_root_patch.start()
+        self.addCleanup(self.permit_root_patch.stop)
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, ".herdr"))
         self.world_path = os.path.join(self.tmp, "world.json")
@@ -256,6 +291,27 @@ class FleetCase(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     # -- log inspection -----------------------------------------------------------
+
+    def oracle_permitted_event(self, entry):
+        """Give oracle-unit events real isolated resource evidence, never an exemption.
+
+        This constructs log facts only; it submits no native command. Negative
+        key/state fixtures still receive valid permit evidence so those guards,
+        rather than a missing-permit shortcut, must reject them.
+        """
+        argv = entry.get("argv")
+        if not argv:
+            return entry
+        required = fake_herdr.permit_need(self.world, argv)
+        if required is None:
+            return entry
+        from herdr_fleet import permits
+        values = required["keys"] or [("N", "sample-dev")]
+        with permits.Store().acquire(permits.endpoints(self.env)[:1], values, topology=required.get("topology", False)) as permit:
+            evidence = {"pid": os.getpid(), "live_fds": True, "fds": list(permit.descriptors()),
+                        "claims": [[k, v, "exclusive" if k == "W" and required.get("topology") else "shared"]
+                                   for k, v in permit.requests]}
+            return dict(entry, info=dict(entry.get("info", {}), permit_required=required, permit=evidence))
 
     def log_key(self, key: str) -> None:
         """Mark a key the fake screen replays in the call log (design 24.5), so the safety
@@ -356,12 +412,39 @@ class FleetCase(unittest.TestCase):
                 pressed = call["key"]
                 continue
             argv, info = call["argv"], call["info"]
+            required = info.get("permit_required")
+            mutation = (tuple(argv[:2]) in (("agent", "start"), ("agent", "prompt"), ("agent", "send-keys"),
+                                           ("agent", "rename"), ("agent", "focus"), ("workspace", "create"), ("workspace", "close"))
+                        or (argv[:1] == ["pane"] and argv[1:2] in (["split"], ["move"], ["resize"], ["close"], ["rename"], ["zoom"]))
+                        or argv[:3] == ["plugin", "pane", "open"])
+            if mutation and argv != ["agent", "start", "--help"]:
+                self.assertIsNotNone(required, "mutation omitted independent permit inventory: %s" % argv)
+            if required is not None:
+                evidence = info.get("permit") or {}
+                self.assertTrue(evidence.get("live_fds"), "mutation lacked live inherited-permit descriptors: %s" % argv)
+                self.assertEqual(evidence.get("pid"), os.getpid())
+                claims = {(k, v): mode for k, v, mode in evidence.get("claims", [])}
+                if required.get("creation"):
+                    self.assertTrue(any(k == "N" for k, _ in claims), "workspace creation reserved no names")
+                for key in required["keys"]:
+                    self.assertIn(tuple(key), claims, "mutation lacked target resource %s: %s" % (key, argv))
+                    if key[0] == "W" and required["topology"]:
+                        self.assertEqual(claims[tuple(key)], "exclusive", "topology ran without exclusive W")
+            if argv[:2] == ["status", "server"]:
+                self.assertEqual(argv, ["status", "server", "--json"])
             if codex_thread and argv[:2] in (["agent", "send-keys"], ["agent", "prompt"]):
                 if argv[:2] == ["agent", "send-keys"] or (command[:1] in (
                         ["restart"], ["swap"], ["down"], ["handover"], ["menu"])):
                     self.assertNotIn(info.get("pane"), protected,
                                      "key or quit prompt reached a possible caller's pane: %s" % argv)
             self.assertTrue(argv, "bare herdr was run")
+            if argv[:1] == ["terminal"]:
+                self.assertEqual(command[:1], ["dashboard"], "terminal streams are dashboard-only")
+                if argv[:3] == ["terminal", "session", "observe"]:
+                    self.assertEqual(dashboard_action, "watch")
+                else:
+                    self.assertEqual(argv[:3], ["terminal", "session", "control"], "unapproved terminal command")
+                    self.assertEqual(dashboard_action, "control", "only the named authenticated human seam controls")
             if command[:1] == ["dashboard"]:
                 if dashboard_action == "read":
                     self.fail("selected owner reading ran Herdr: %s" % argv)
@@ -371,14 +454,42 @@ class FleetCase(unittest.TestCase):
                     if argv[:2] == ["agent", "prompt"]:
                         self.assertEqual(argv[2], dashboard_target, "dashboard prompted an unapproved target")
                     else:
-                        self.assertTrue(argv in (["--version"], ["plugin", "list", "--json"]) or argv[:2] in allowed, argv)
+                        self.assertTrue(argv in (["--version"], ["plugin", "list", "--json"],
+                                                ["status", "server", "--json"]) or argv[:2] in allowed, argv)
+                elif dashboard_action in ("control_prepare", "control") and argv[:2] in (
+                        ["agent", "list"], ["pane", "get"], ["pane", "process-info"], ["status", "server"]):
+                    if argv[:2] == ["status", "server"]:
+                        self.assertEqual(argv, ["status", "server", "--json"])
+                    elif argv[:2] in (["pane", "get"], ["pane", "process-info"]):
+                        pane = argv[argv.index("--pane") + 1] if "--pane" in argv else argv[2]
+                        self.assertIn(dashboard_target, (pane, "term_" + pane))
+                elif argv[:3] == ["terminal", "session", "control"]:
+                    self.assertEqual(dashboard_action, "control")
+                    self.assertEqual(argv[3], dashboard_target)
+                    self.assertEqual(argv[4::2], ["--cols", "--rows"])
+                    self.assertEqual(len(argv), 8)
+                    evidence = info.get("control_permit") or {}
+                    self.assertIs(info.get("authenticated_human"), True)
+                    self.assertIs(evidence.get("human_control"), True)
+                    self.assertIs(evidence.get("live_fds"), True)
+                    pane = next((pid for pid in self.world["panes"] if "term_" + pid == argv[3]), None)
+                    self.assertIsNotNone(pane)
+                    record = self.world["panes"][pane]
+                    expected = {("W", record["workspace_id"], "shared"),
+                                ("N", record["agent"]["name"], "exclusive"),
+                                ("P", pane, "exclusive"), ("T", argv[3], "exclusive")}
+                    self.assertEqual({tuple(c) for c in evidence.get("claims", [])}, expected)
+                    self.assertEqual(len(evidence.get("fds", [])), 4)
                 elif argv[:3] == ["terminal", "session", "observe"]:
                     self.assertEqual(dashboard_action, "watch", "observer was not explicitly selected")
                     self.assertEqual(argv[3], dashboard_target)
                     self.assertEqual(argv[4::2], ["--cols", "--rows"])
                     self.assertEqual(len(argv), 8)
                 else:
-                    self.assertIn(argv, (["--version"], ["agent", "list"], ["plugin", "list", "--json"]),
+                    reads = [["--version"], ["agent", "list"], ["plugin", "list", "--json"]]
+                    if dashboard_action == "watch":
+                        reads.append(["status", "server", "--json"])
+                    self.assertIn(argv, reads,
                                   "dashboard observation issued a non-read-only command")
             if command[:1] == ["timers"]:
                 self.assertNotIn("--dry-run", command, "offline timers called Herdr")

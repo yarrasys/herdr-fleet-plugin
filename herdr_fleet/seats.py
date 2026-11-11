@@ -291,6 +291,16 @@ SEND_ALLOWED = SETTLED + ("working",)
 
 
 def safe_prompt(herdr: Herdr, target: str, text: str, allow: Sequence[str] = SETTLED) -> Outcome:
+    try:
+        with herdr.target_operation(target) as native:
+            return _safe_prompt(native, target, text, allow)
+    except HerdrError as exc:
+        if exc.code in ("owner_control", "permit_unavailable"):
+            return Outcome(False, "coordination", "owner control" if exc.code == "owner_control" else describe(exc))
+        return Outcome(False, "absent", "no live agent %s (%s)" % (target, describe(exc)))
+
+
+def _safe_prompt(herdr: Herdr, target: str, text: str, allow: Sequence[str] = SETTLED) -> Outcome:
     """Send text to an agent only if its state right now is in ``allow``
     (invariants 1-3): idle or done for every command; ``send --now`` and
     ``deliver NAME --now`` alone also allow working (SEND_ALLOWED). Blocked and

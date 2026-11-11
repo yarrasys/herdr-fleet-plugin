@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import contextlib
 import os
 from unittest import mock
 
@@ -401,6 +402,8 @@ class CodexCaller(LiveFleet):
 
     def test_cli_codex_zoom_uses_recorded_strip(self):
         herdr = mock.Mock()
+        herdr.pane_get.return_value = {"workspace_id": "w2", "terminal_id": "sample-terminal"}
+        herdr.operation.return_value = contextlib.nullcontext(herdr)
         self.assertEqual(tui.zoom(herdr, self.env, "w2:p4"), "w2:p4")
         herdr.pane_zoom_toggle.assert_called_once_with("w2:p4")
 
@@ -411,6 +414,8 @@ class CodexCaller(LiveFleet):
 
     def test_plugin_codex_environment_keeps_own_strip_for_zoom(self):
         herdr = mock.Mock()
+        herdr.pane_get.return_value = {"workspace_id": "w2", "terminal_id": "sample-terminal"}
+        herdr.operation.return_value = contextlib.nullcontext(herdr)
         env = dict(self.env, HERDR_PLUGIN_ENTRYPOINT_ID="watch")
         self.assertEqual(tui.zoom(herdr, env, "w2:p4"), OTHER)
         herdr.pane_zoom_toggle.assert_called_once_with(OTHER)
@@ -454,8 +459,8 @@ class CodexCaller(LiveFleet):
         for pane in (OTHER, PANE):
             self.run_cli("restart", "sample-dev", "sample-reviewer")
             with open(self.log_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"argv": ["agent", "start", "sample-reviewer", "--kind", "codex",
-                                                  "--pane", pane, "--"], "exit": 1, "info": {}}) + "\n")
+                handle.write(json.dumps(self.oracle_permitted_event({"argv": ["agent", "start", "sample-reviewer", "--kind", "codex",
+                                                  "--pane", pane, "--"], "exit": 1, "info": {}})) + "\n")
             try:
                 with self.assertRaisesRegex(AssertionError, "started into the caller's pane"):
                     self.assert_safety()

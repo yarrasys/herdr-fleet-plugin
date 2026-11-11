@@ -271,7 +271,7 @@ def start_seat(ctx: Ctx, seat: Seat, pane: str, created: bool, report: Report, a
     return ""
 
 
-QUEUE_ON = ("working", "blocked", "unknown", "typing")  # design 32.6: refusals that queue a kickoff
+QUEUE_ON = ("working", "blocked", "unknown", "typing", "coordination")  # refusals that queue a kickoff
 
 
 def send_kickoffs(ctx: Ctx, seats: Sequence[Seat], reason: str, note: Optional[str],

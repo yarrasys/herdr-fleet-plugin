@@ -22,7 +22,7 @@ import unittest
 from unittest import mock
 
 import fake_herdr
-from support import policy_output, CALLER_PANE, FakeClock, LiveFleet, THREE_SEATS
+from support import policy_output, CALLER_PANE, FakeClock, LiveFleet, THREE_SEATS, client_permit_fixture
 from herdr_fleet import inbox, kickoff, seats
 from herdr_fleet.herdr import FORBIDDEN, SENDABLE_KEYS, Herdr, HerdrError
 from herdr_fleet.inbox import CUR, NEW
@@ -812,8 +812,9 @@ class Client(unittest.TestCase):
     def test_send_keys_only_through_its_method_and_only_four_keys(self):
         herdr = self.herdr()
         self.assertEqual(SENDABLE_KEYS, ("enter", "esc", "ctrl+c", "ctrl+u"))
-        herdr.agent_send_keys("sample-dev", ["enter"])
-        herdr.agent_send_keys("sample-dev", ["ctrl+c", "esc"])
+        with client_permit_fixture(herdr) as bound:
+            bound.agent_send_keys("sample-dev", ["enter"])
+            bound.agent_send_keys("sample-dev", ["ctrl+c", "esc"])
         self.assertEqual(self.seen, [["agent", "send-keys", "sample-dev", "enter"],
                                      ["agent", "send-keys", "sample-dev", "ctrl+c", "esc"]])
         for target, keys in (("sample-dev", ["ctrl+d"]), ("sample-dev", []), ("sample-dev", ["enter", "y"]),
@@ -848,7 +849,7 @@ class Harness(S23):
     def write_log(self, *entries):
         with open(self.log_path, "a") as handle:
             for entry in entries:
-                handle.write(json.dumps(entry) + "\n")
+                handle.write(json.dumps(self.oracle_permitted_event(entry)) + "\n")
 
     def assert_caught(self, *entries):
         if os.path.exists(self.log_path):
@@ -1059,7 +1060,7 @@ class HarnessFor2311(S23):
     def write_log(self, *entries):
         with open(self.log_path, "a") as handle:
             for entry in entries:
-                handle.write(json.dumps(entry) + "\n")
+                handle.write(json.dumps(self.oracle_permitted_event(entry)) + "\n")
 
     def assert_caught(self, *entries):
         if os.path.exists(self.log_path):

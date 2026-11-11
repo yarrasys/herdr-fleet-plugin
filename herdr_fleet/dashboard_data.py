@@ -202,6 +202,7 @@ def message_metadata(message):
 class Observer:
     def __init__(self, herdr, registry, env, context=False):
         self.herdr, self.registry, self.env = herdr, registry, dict(env)
+        self.herdr.configure(self.env)
         self.context = context
         self.cache = FileCache()
         from herdr_fleet.dashboard_conversation import Conversation

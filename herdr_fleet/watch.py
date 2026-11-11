@@ -167,8 +167,10 @@ def watcher_line(status: Dict) -> str:
 def acquire(repo: str, fleet_path: str, pid: Optional[int] = None) -> Dict:
     """Write ``.herdr/watch.lock``, or raise OpError when a live watcher holds it. The file
     is created with a hard link, so of two watchers starting at once only one gets it."""
+    from herdr_fleet.process_identity import identity
     data = {"pid": pid or os.getpid(), "started": now_iso(), "fleet": fleet_path,
-            "launch": dict(build_identity.current())}
+            "launch": dict(build_identity.current()), "control_gate_protocol": 1,
+            "process_identity": identity(pid or os.getpid())}
     folder = os.path.join(repo, ".herdr")
     os.makedirs(folder, exist_ok=True)
     ensure_gitignore(folder)
@@ -296,7 +298,7 @@ def _watch_once(ctx: Ctx) -> int:
         codes.append(code)
         if drop is not None and name != OWNER:
             notify_delivery(ctx, name, drop)
-            if drop.status == "typing":
+            if drop.status in ("typing", "coordination"):
                 typing.append(name)
     if ctx.fleet.timers:
         pending = [m for queue in inbox.queued(ctx.fleet.repo, ctx.fleet.fyi_ttl).values() for m in queue]
@@ -942,7 +944,7 @@ class Watcher:
                     return
                 continue
             drop = self.deliver(name, target)
-            if drop is None or drop.status != "typing" or not self.hold(name, target, drop):
+            if drop is None or drop.status not in ("typing", "coordination") or not self.hold(name, target, drop):
                 return
 
     def hold(self, name: str, target: str, drop: Drop) -> bool:
@@ -978,7 +980,7 @@ class Watcher:
                     self.say(title, error=True)
                     self.ctx.notify(title, "answer or close it there; herdr-fleet sends it nothing until its input is back",
                                     "request")
-                detail = presence.typing_at(self.ctx.herdr, drop.agent)
+                detail = presence.typing_at(self.ctx.herdr, drop.agent) if drop.status == "typing" else ""
                 if detail:
                     drop.detail = detail
                     with self.cond:
@@ -992,7 +994,7 @@ class Watcher:
                     self.say("%s %s; waiting" % (name, state_words(state)))
                     return True
                 again = self.deliver(name, target)
-                if again is None or again.status != "typing":
+                if again is None or again.status not in ("typing", "coordination"):
                     return False
                 drop = again  # typing again since the look: keep holding, without a second line
                 with self.cond:
@@ -1089,7 +1091,7 @@ class Watcher:
                 name, inbox.pointer_text(drop.waiting, drop.size, prefix=False)))
         elif drop.status == "refused":
             self.say("%s %s; still waiting" % (name, state_words(drop.state)))
-        elif drop.status == "typing":  # the hold says it (design 21.2)
+        elif drop.status in ("typing", "coordination"):
             return
         elif drop.status == "failed":
             self.retry_later(name)
@@ -1489,6 +1491,6 @@ class BoardView:
         if name in w.pointed and {m.id for m in waiting} <= w.pointed[name]:
             return "pointed", ""
         drop = w.deliver(name, target)
-        if drop is not None and drop.status == "typing":
+        if drop is not None and drop.status in ("typing", "coordination"):
             return "typing", "%s; %s" % (drop.state or state, drop.detail)
         return "", ""

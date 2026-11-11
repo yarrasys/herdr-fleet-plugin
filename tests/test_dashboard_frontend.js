@@ -17,7 +17,9 @@ function fixture(options={}) {
       this.clientHeight=360; this.scrollTop=0;
     }
     addEventListener(name, fn) { this.listeners[name]=fn; }
-    click() { if(!this.disabled && this.listeners.click)return this.listeners.click({target:this}); }
+    click() { if(!this.disabled && this.listeners.click)return this.listeners.click({target:this,isTrusted:true}); }
+    showModal() { this.open=true; }
+    close() { this.open=false; }
     setAttribute(name,value) { this.attrs[name]=String(value); }
     getAttribute(name) { return this.attrs[name]; }
     append(...items) { for(const item of items){if(item&&typeof item==='object'){item.remove();item.parentNode=this;}this.children.push(item);} }
@@ -34,9 +36,12 @@ function fixture(options={}) {
   const $=id=>{if(!elements.has(id))elements.set(id,new Element()); return elements.get(id);};
   const documentListeners={};
   const document={getElementById:$,createElement:tag=>new Element(tag),createTextNode:text=>text,
-    body:new Element(),activeElement:null,hidden:false,title:'',addEventListener(name,fn){documentListeners[name]=fn;},querySelectorAll(){return [];}};
+    body:new Element(),activeElement:null,hidden:false,title:'',addEventListener(name,fn){const old=documentListeners[name];documentListeners[name]=old?e=>{old(e);return fn(e);}:fn;},querySelectorAll(){return [];}};
   for(const id of ['composer-title','questions']) {$(id).parentNode=new Element();$(id).parentNode.parentNode=new Element();}
-  const listeners={},timers=new Map(),requests=[];
+  const controlBar=new Element();controlBar.className='control-tools';
+  for(const id of ['control-mode','control-target','control-expiry','take-control','release-control'])controlBar.append($(id));
+  $('terminal-panel').append(controlBar,$('control-state'));
+  const listeners={},timers=new Map(),timeouts=new Map(),requests=[];
   const models=[];
   const attentionModels=[],attentionOptions={};
   const attention={items:[],counts:{},matched_count:0,truncated:false,incomplete:false,counts_capped:false};
@@ -46,16 +51,25 @@ function fixture(options={}) {
   let sessionResponder=async()=>({ok:true,json:async()=>({csrf:'csrf-current',demo:false})});
   const data={demo:false,revision:1,fleets:['team','docs'].map(id=>({id,label:id,stale:false,owner:[],events:[],
     seats:['sample-dev','sample-reviewer'].map(name=>({name,kind:'claude',state:'idle',view:id+name,queued:0,fyi:0}))}))};
-  class Terminal {loadAddon(){}open(){}reset(){}resize(){}write(){} get buffer(){return {active:{length:0}};}}
+  let terminal;
+  class Terminal {
+    constructor(settings){this.options=settings;this.modes={bracketedPasteMode:false};this.dataListeners=[];this.pendingWrites=[];this.writeBytes=0;terminal=this;}
+    loadAddon(){}open(){}reset(){}resize(){}focus(){$('terminal-screen').focus();}hasSelection(){return false;}
+    onKey(fn){this.key=fn;}onData(fn){this.dataListeners.push(fn);}
+    write(bytes,done){this.writeBytes+=bytes.length;if(new TextDecoder().decode(bytes).includes('\x1b[6n'))for(const fn of this.dataListeners)fn('\x1b[1;1R');if(done){if(options.delayWrites)this.pendingWrites.push(done);else done();}}
+    get buffer(){return {active:{length:0}};}
+  }
+  let controlResponder=options.controlResponder;
   const context={document,location:{hash:'',pathname:'/'},history:{replaceState(){context.location.hash='';}},
     ConversationView:{mount(){return {render(model){models.push(model);},destroy(){}};}},
     AttentionView:{mount(root,callbacks){attentionOptions.current=callbacks;return {render(model){attentionModels.push(model);},destroy(){}};}},
     Terminal,FitAddon:{FitAddon:class {proposeDimensions(){return {cols:80,rows:24};}fit(){}}},
-    ResizeObserver:class {observe(){}},matchMedia:()=>({matches:true,addEventListener(){}}),
+    ResizeObserver:class {constructor(fn){context.resizeObserver=fn;}observe(){}},matchMedia:()=>({matches:true,addEventListener(){}}),
     window:{addEventListener(name,fn){listeners[name]=fn;}},navigator:{},
     setInterval(fn){timers.set(++timer,fn);return timer;},clearInterval(id){timers.delete(id);},
-    setTimeout(){return ++timer;},clearTimeout(){},AbortController,TextDecoder,Uint8Array,Map,Set,
+    setTimeout(fn,ms){timeouts.set(++timer,{fn,ms});return timer;},clearTimeout(id){timeouts.delete(id);},AbortController,TextDecoder,Uint8Array,Map,Set,
     crypto:{randomUUID(){return 'intent-synthetic-'+(++ident);}},console,TextEncoder,
+    atob:value=>Buffer.from(value,'base64').toString('binary'),
     localStorage:options.storage,
     fetch:async(url,options={})=>{
       const body=options.body?JSON.parse(options.body):null;
@@ -67,19 +81,29 @@ function fixture(options={}) {
       if(url.startsWith('/api/list?'))return {ok:true,json:async()=>({items:[]})};
       if(url==='/api/action')return new Promise(resolve=>deferred.push(result=>resolve({ok:true,json:async()=>result})));
       if(url==='/api/watch')return new Promise(resolve=>watchResponses.push(resolve));
+      if(url.startsWith('/api/control/')&&controlResponder)return controlResponder(url,body,options);
       throw new Error('Unexpected fixture request '+url);
     }};
   if(options.realAttention) {
     vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../herdr_fleet/dashboard_static/attention-view.js'),'utf8'),context);
     context.AttentionView=context.window.AttentionView;
   }
+  if(fs.existsSync(path.join(__dirname,'../herdr_fleet/dashboard_static/terminal-renderer.js'))) {
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../herdr_fleet/dashboard_static/terminal-renderer.js'),'utf8'),context);
+    context.TerminalRenderer=context.window.TerminalRenderer;
+  }
+  if(options.realControl&&fs.existsSync(path.join(__dirname,'../herdr_fleet/dashboard_static/terminal-control.js'))) {
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../herdr_fleet/dashboard_static/terminal-control.js'),'utf8'),context);
+    context.TerminalControl=context.window.TerminalControl;
+  }
   // Only export lexical handles; every function under test is the real shipped function.
-  vm.runInNewContext(source.replace(/\}\(\)\);\s*$/, 'globalThis.application = {state, send, selectedChanged, selectFleet, restoreDraft, saveDraft, bootstrap, refresh, draftKey, watch, chooseReply}; }());'),context);
+  vm.runInNewContext(source.replace(/\}\(\)\);\s*$/, 'globalThis.application = {state, send, selectedChanged, selectFleet, restoreDraft, saveDraft, bootstrap, refresh, draftKey, watch, chooseReply, control: typeof control === "undefined" ? null : control}; }());'),context);
   application=context.application;
   application.state.data=data;application.state.csrf='csrf-initial';
   application.state.fleet=application.state.targetFleet='team';application.state.seat='sample-dev';
-  return {app:application,$,data,requests,deferred,watchResponses,listeners,timers,context,models,conversation,documentListeners,
-    attention,attentionModels,attentionOptions,
+  return {app:application,$,data,requests,deferred,watchResponses,listeners,timers,timeouts,context,models,conversation,documentListeners,
+    attention,attentionModels,attentionOptions,terminal,
+    controlReplies(fn){controlResponder=fn;},
     session(fn){sessionResponder=fn;},
     select(fleet,seat,reply=null){application.selectedChanged(fleet,seat); application.chooseReply(reply);},
     text(text){$('draft').value=text;application.saveDraft();}};
@@ -87,6 +111,266 @@ function fixture(options={}) {
 const confirmed={status:'delivered',certainty:'confirmed',id:'20261101T100000Z-aabbcc'};
 const uncertain={status:'unconfirmed',certainty:'unconfirmed',id:'20261101T100001Z-ddeeff'};
 const flush=async()=>{for(let i=0;i<24;i++)await Promise.resolve();};
+
+function controlFixture(options={}) {
+ const f=fixture(Object.assign({realControl:true},options)),submissions=[];
+ const respond=async(url,body,options)=>{
+  if(url.endsWith('/prepare'))return {ok:true,json:async()=>({nonce:'nonce_synthetic_0123456789',expires_in:30,
+   target:{fleet_label:'Team',seat:'sample-dev',pane:'w7:p1',terminal:'terminal_sample'},disclosures:['Terminal may become a shell.','Native resume before input cannot be undone.']})};
+  if(url.endsWith('/acquire'))return {ok:true,json:async()=>({lease:'lease_synthetic_0123456789',target:{fleet_label:'Team',seat:'sample-dev',pane:'w7:p1',terminal:'terminal_sample'},remaining_seconds:600,state:'ready'})};
+  if(url.endsWith('/stream')) {
+   let first=true;
+   return {ok:true,body:{getReader(){return {read(){
+    if(first){first=false;return Promise.resolve({done:false,value:new TextEncoder().encode(JSON.stringify({type:'frame',full:true,seq:1,cols:80,rows:24,bytes:Buffer.from('\x1b[6n').toString('base64')})+'\n')});}
+    return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(Object.assign(new Error('closed'),{name:'AbortError'}))));
+   }};}}};
+  }
+  if(url.endsWith('/input')||url.endsWith('/resize'))return new Promise(resolve=>submissions.push({body,resolve:()=>resolve({ok:true,json:async()=>({status:'submitted',accepted:body.seq})})}));
+  if(url.endsWith('/release'))return {ok:true,json:async()=>({state:'released'})};
+  if(url.endsWith('/heartbeat'))return {ok:true,json:async()=>({state:'active',remaining_seconds:590})};
+  throw new Error(url);
+ };
+ f.controlReplies(respond);
+ return Object.assign(f,{submissions,respond});
+}
+async function activateControl(f) {await f.app.refresh();f.$('take-control').click();await flush();f.$('confirm-control').click();await flush();}
+function terminalEvent(f,values={}) {return Object.assign({key:'a',target:f.$('terminal-screen'),isTrusted:true,
+ preventDefault(){this.prevented=true;},stopPropagation(){},stopImmediatePropagation(){}},values);}
+
+test('explicit Control confirmation starts input only after its full frame and never forwards output replies',async()=>{
+ const f=controlFixture();await f.app.refresh();
+ assert.ok(f.app.control,'the shipped controller must mount the real Control adapter');
+ f.$('take-control').click();await flush();
+ assert.equal(f.$('control-confirmation').open,true);
+ assert.equal(f.context.document.activeElement,f.$('cancel-control'));
+ assert.equal(f.requests.filter(r=>r.url==='/api/control/acquire').length,0);
+ f.$('confirm-control').click();await flush();
+ assert.equal(f.$('control-mode').textContent,'Control');
+ assert.equal(f.context.document.activeElement,f.$('terminal-screen'));
+ f.terminal.write(new TextEncoder().encode('\x1b[6n'));await flush();
+ assert.equal(f.submissions.length,0,'DSR output must never write a terminal reply');
+ f.terminal.key({key:'a',domEvent:{key:'a',isTrusted:false,target:f.$('terminal-screen')}});await flush();
+ assert.equal(f.submissions.length,0,'synthetic terminal keys have no write authority');
+ f.terminal.key({key:'a',domEvent:{key:'a',isTrusted:true,target:f.$('terminal-screen')}});await flush();
+ f.terminal.key({key:'b',domEvent:{key:'b',isTrusted:true,target:f.$('terminal-screen')}});await flush();
+ assert.equal(f.submissions.length,1,'only one submission may be in flight');
+ assert.equal(f.submissions[0].body.seq,1);f.submissions[0].resolve();await flush();
+ assert.equal(f.submissions.length,2);assert.equal(f.submissions[1].body.seq,2);
+ f.submissions[1].resolve();await flush();
+ await f.app.control.release('Test release');
+ assert.equal(f.terminal.options.disableStdin,true);
+ assert.equal(f.requests.filter(r=>r.url==='/api/watch').length,0,'Release never reconnects Watch');
+});
+
+test('Control paste and IME commit are explicit once, wrappers count toward the full byte limit',async()=>{
+ const f=controlFixture();await activateControl(f);f.terminal.modes.bracketedPasteMode=true;
+ f.terminal.key({key:'\x16',domEvent:terminalEvent(f,{key:'v',ctrlKey:true})});
+ f.$('terminal-screen').listeners.paste(terminalEvent(f,{clipboardData:{getData:()=> 'two\nlines'}}));await flush();
+ assert.equal(f.submissions.length,1);assert.equal(f.submissions[0].body.text,'\x1b[200~two\nlines\x1b[201~');
+ f.submissions[0].resolve();await flush();
+ f.$('expand').click();await flush();
+ assert.equal(f.app.state.expanded,true);assert.equal(f.$('control-state').parentNode,f.$('terminal-panel'));
+ f.$('terminal-screen').listeners.paste(terminalEvent(f,{clipboardData:{getData:()=> 'x'.repeat(8192)}}));await flush();
+ assert.equal(f.submissions.length,1);assert.match(f.$('control-state').textContent,/8 KiB/);
+ f.$('terminal-screen').listeners.compositionstart(terminalEvent(f));
+ f.terminal.key({key:'Process',domEvent:terminalEvent(f,{isComposing:true,keyCode:229})});
+ const end=terminalEvent(f,{data:'文'});f.$('terminal-screen').listeners.compositionend(end);f.$('terminal-screen').listeners.compositionend(end);
+ f.terminal.key({key:'文',domEvent:terminalEvent(f,{keyCode:229})});await flush();
+ assert.equal(f.submissions.length,2);assert.equal(f.submissions[1].body.text,'文');assert.equal(f.submissions[1].body.seq,2);
+ f.submissions[1].resolve();await flush();await f.app.control.release();
+});
+
+test('Control cancel and busy preserve the current Watch and independent conversation draft',async()=>{
+ const f=controlFixture();await f.app.refresh();f.text('Keep this independent draft');
+ const old=new AbortController();f.app.state.watch=old;f.app.state.streamKey=f.app.state.data.fleets[0].seats[0].view;
+ f.$('terminal-status').textContent='WATCH CONNECTED · read only';
+ f.$('take-control').click();await flush();f.$('cancel-control').click();await flush();
+ assert.equal(old.signal.aborted,false);assert.equal(f.app.state.watch,old);assert.equal(f.$('draft').value,'Keep this independent draft');
+ f.controlReplies((url,body,options)=>url.endsWith('/acquire')?Promise.resolve({ok:false,json:async()=>({error:'Busy'})}):f.respond(url,body,options));
+ f.$('take-control').click();await flush();f.$('confirm-control').click();await flush();
+ assert.equal(old.signal.aborted,false);assert.equal(f.app.state.watch,old);assert.match(f.$('terminal-status').textContent,/WATCH CONNECTED/);
+ assert.equal(f.$('draft').value,'Keep this independent draft');assert.equal(f.requests.filter(r=>r.url.endsWith('/stream')).length,0);
+});
+
+test('late Control acquisition is discarded and cancellation names its original nonce',async()=>{
+ const f=controlFixture();let resolveAcquire;
+ f.controlReplies((url,body,options)=>url.endsWith('/acquire')?new Promise(resolve=>{resolveAcquire=resolve;}):f.respond(url,body,options));
+ await f.app.refresh();f.$('take-control').click();await flush();f.$('confirm-control').click();await flush();
+ f.select('docs','sample-reviewer');await flush();
+ resolveAcquire({ok:true,json:async()=>({lease:'obsolete_lease_0123456789',state:'ready'})});await flush();
+ assert.equal(f.requests.filter(r=>r.url==='/api/control/stream').length,0);
+ assert.ok(f.requests.filter(r=>r.url==='/api/control/release').every(r=>r.body.nonce==='nonce_synthetic_0123456789'&&!r.body.lease));
+ assert.equal(f.terminal.options.disableStdin,true);assert.equal(f.app.state.targetFleet,'docs');
+});
+
+test('old heartbeat completions cannot suppress or reopen the newer lease heartbeat slot',async()=>{
+ const f=controlFixture(),beats=[];
+ f.controlReplies((url,body,options)=>url.endsWith('/heartbeat')?new Promise(resolve=>beats.push({body,resolve})):f.respond(url,body,options));
+ await activateControl(f);[...f.timers.values()].at(-1)();await flush();assert.equal(beats.length,1);
+ await f.app.control.release();await activateControl(f);
+ const tick=[...f.timers.values()].at(-1);tick();await flush();assert.equal(beats.length,2,'old request must not suppress current lease heartbeat');
+ beats[0].resolve({ok:true,json:async()=>({state:'active',remaining_seconds:590})});await flush();
+ tick();await flush();assert.equal(beats.length,2,'old completion must not clear current in-flight slot');
+ beats[1].resolve({ok:true,json:async()=>({state:'active',remaining_seconds:590})});await flush();
+ await f.app.control.release();
+});
+
+test('Control local Release shortcut is never native, while Escape remains a terminal key',async()=>{
+ const f=controlFixture();await activateControl(f);f.app.state.expanded=true;
+ const escape=terminalEvent(f,{key:'Escape'});f.documentListeners.keydown(escape);
+ f.terminal.key({key:'\x1b',domEvent:escape});await flush();
+ assert.equal(f.app.state.expanded,true);assert.equal(f.submissions[0].body.text,'\x1b');f.submissions[0].resolve();await flush();
+ const release=terminalEvent(f,{key:'X',ctrlKey:true,shiftKey:true});f.documentListeners.keydown(release);
+ f.terminal.key({key:'\x18',domEvent:release});await flush();
+ assert.equal(f.submissions.length,1);assert.equal(release.prevented,true);assert.equal(f.terminal.options.disableStdin,true);
+ assert.equal(f.requests.filter(r=>r.url==='/api/watch').length,0);
+});
+
+test('only explicit trusted Control layout gestures resize, never frame/fit/observer feedback',async()=>{
+ const f=controlFixture();await activateControl(f);
+ f.context.resizeObserver();for(const task of [...f.timeouts.values()])if(task.ms===200)task.fn();await flush();
+ assert.equal(f.submissions.length,0);
+ f.listeners.resize({isTrusted:false});assert.equal([...f.timeouts.values()].filter(t=>t.ms===120).length,0);
+ f.listeners.resize({isTrusted:true});for(const [id,task] of [...f.timeouts])if(task.ms===120){f.timeouts.delete(id);task.fn();}await flush();
+ assert.equal(f.submissions.length,1);assert.equal(f.submissions[0].body.seq,1);assert.equal(f.submissions[0].body.cols,80);
+ f.submissions[0].resolve();await flush();await f.app.control.release();
+ f.listeners.resize({isTrusted:true});await flush();assert.equal(f.submissions.length,1);
+});
+
+test('hidden page and changed observed view disable Control before any later input',async()=>{
+ for(const change of ['hidden','view']){
+  const f=controlFixture();await activateControl(f);f.text('Preserved draft');
+  if(change==='hidden'){f.context.document.hidden=true;f.documentListeners.visibilitychange();}
+  else {f.data.fleets[0].seats[0].view='changed-binding';await f.app.refresh();}
+  f.terminal.key({key:'x',domEvent:terminalEvent(f)});await flush();
+  assert.equal(f.submissions.length,0);assert.equal(f.terminal.options.disableStdin,true);assert.equal(f.$('draft').value,'Preserved draft');
+  assert.ok(f.requests.some(r=>r.url==='/api/control/release'));
+ }
+});
+
+test('uncertain Control input discards queued bytes without retry or automatic Watch',async()=>{
+ const f=controlFixture();f.controlReplies((url,body,options)=>url.endsWith('/input')?Promise.resolve({ok:false,json:async()=>({error:'Uncertain'})}):f.respond(url,body,options));
+ await activateControl(f);
+ f.terminal.key({key:'a',domEvent:terminalEvent(f)});f.terminal.key({key:'b',domEvent:terminalEvent(f)});await flush();
+ assert.equal(f.requests.filter(r=>r.url==='/api/control/input').length,1);assert.equal(f.terminal.options.disableStdin,true);
+ assert.equal(f.requests.filter(r=>r.url==='/api/watch').length,0);assert.match(f.$('control-state').textContent,/uncertain|ended/i);
+});
+
+test('Control input waits for actual full-frame parse and stale write callbacks cannot reactivate',async()=>{
+ const f=controlFixture({delayWrites:true});await activateControl(f);
+ assert.equal(f.terminal.options.disableStdin,true,'receiving an ANSI frame is not completion of its parse');
+ assert.equal(f.$('control-mode').textContent,'Watch');assert.equal(f.terminal.pendingWrites.length,1);
+ f.terminal.key({key:'x',domEvent:terminalEvent(f)});assert.equal(f.submissions.length,0);
+ f.terminal.pendingWrites[0]();await flush();assert.equal(f.terminal.options.disableStdin,false);
+ await f.app.control.release();f.terminal.pendingWrites[0]();await flush();assert.equal(f.terminal.options.disableStdin,true);
+ const stale=controlFixture({delayWrites:true});await activateControl(stale);await stale.app.control.release();
+ stale.terminal.pendingWrites[0]();await flush();assert.equal(stale.terminal.options.disableStdin,true);
+ assert.equal(stale.context.document.activeElement,stale.$('take-control'));
+});
+
+test('active Control promotes the same authority bar outside pane containment and restores it after release',async()=>{
+ const f=controlFixture(),original=f.$('control-mode').parentNode;
+ await activateControl(f);assert.equal(original.parentNode,f.context.document.body);
+ assert.equal(f.$('control-state').parentNode,original);assert.equal(f.$('release-control').parentNode,original);
+ await f.app.control.release();assert.equal(original.parentNode,f.$('terminal-panel'));
+ assert.equal(f.$('control-state').parentNode,f.$('terminal-panel'));
+});
+
+test('focused expansion keeps the same Control bar and lease, then restores normal reading position',async()=>{
+ const f=controlFixture();await activateControl(f);f.text('Independent draft survives focused view');
+ const bar=f.$('control-mode').parentNode,normal=f.$('terminal-panel'),scroll=[];
+ f.context.window.scrollX=0;f.context.window.scrollY=420;
+ f.context.window.scrollTo=(x,y)=>scroll.push([x,y]);
+ assert.equal(bar.parentNode,f.context.document.body);
+ f.$('expand').click();await flush();
+ assert.equal(bar.parentNode,normal,'focused view must place the same authority bar within its sizing flow');
+ assert.equal(f.$('release-control').parentNode,bar);assert.equal(f.$('control-mode').textContent,'Control');
+ assert.equal(f.terminal.options.disableStdin,false);assert.equal(f.$('expand').attrs['aria-expanded'],'true');
+ f.$('expand').click();await flush();
+ assert.equal(bar.parentNode,f.context.document.body);assert.deepEqual(scroll.at(-1),[0,420]);
+ assert.equal(f.$('draft').value,'Independent draft survives focused view');
+ assert.equal(f.requests.filter(r=>r.url==='/api/control/acquire').length,1);
+ assert.equal(f.requests.filter(r=>r.url==='/api/control/release').length,0);
+ await f.app.control.release();
+});
+
+test('unconfirmed Control release stays unavailable without automatic retries during refresh',async()=>{
+ const f=controlFixture();await activateControl(f);
+ f.controlReplies((url,body,options)=>url.endsWith('/release')?Promise.resolve({ok:false,json:async()=>({error:'Unavailable'})}):f.respond(url,body,options));
+ await f.app.control.release();await f.app.refresh();await f.app.refresh();
+ assert.equal(f.requests.filter(r=>r.url.endsWith('/release')).length,1);
+ assert.match(f.$('control-state').textContent,/incomplete|unconfirmed/i);assert.equal(f.$('take-control').disabled,true);
+ assert.equal(f.$('release-control').hidden,false);assert.equal(f.terminal.options.disableStdin,true);
+ f.controlReplies(f.respond);f.$('release-control').click();await flush();
+ assert.equal(f.requests.filter(r=>r.url.endsWith('/release')).length,2);assert.equal(f.$('take-control').disabled,false);
+});
+
+test('browser blur releases Control while Demo never prepares a native attempt',async()=>{
+ const f=controlFixture();await activateControl(f);f.listeners.blur();await flush();
+ f.terminal.key({key:'x',domEvent:terminalEvent(f)});assert.equal(f.submissions.length,0);
+ assert.equal(f.terminal.options.disableStdin,true);assert.ok(f.requests.some(r=>r.url.endsWith('/release')));
+ const demo=controlFixture();demo.data.demo=true;await demo.app.refresh();demo.$('take-control').click();await flush();
+ assert.equal(demo.requests.filter(r=>r.url.startsWith('/api/control/')).length,0);
+ assert.match(demo.$('control-state').textContent,/DEMO.*unavailable/);
+});
+
+test('healthy Watch with idle Control survives hidden and return without reconnect',async()=>{
+ const f=controlFixture();await f.app.refresh();const observer=new AbortController();
+ f.app.state.watch=observer;f.app.state.streamKey=f.data.fleets[0].seats[0].view;
+ f.context.document.hidden=true;f.documentListeners.visibilitychange();await flush();
+ assert.equal(observer.signal.aborted,false);assert.equal(f.app.state.watch,observer);
+ f.context.document.hidden=false;f.documentListeners.visibilitychange();await flush();
+ assert.equal(f.app.state.watch,observer);assert.equal(f.requests.filter(r=>r.url==='/api/watch').length,0);
+});
+
+test('slow Control parser cannot queue 100 writes or 10 MiB, and Release fences Copy immediately',async()=>{
+ const f=controlFixture({delayWrites:true});
+ f.controlReplies((url,body,options)=>{
+  if(!url.endsWith('/stream'))return f.respond(url,body,options);
+  let seq=0;
+  return Promise.resolve({ok:true,body:{getReader(){return {read(){
+   if(seq===100)return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('closed'))));
+   const full=seq===0;seq++;
+   return Promise.resolve({done:false,value:new TextEncoder().encode(JSON.stringify({type:'frame',full,seq,cols:80,rows:24,bytes:Buffer.from('x'.repeat(102400)).toString('base64')})+'\n')});
+  }};}}});
+ });
+ await activateControl(f);for(let i=0;i<20;i++)await flush();
+ assert.ok(f.terminal.writeBytes<=196608,'only one bounded payload may reach vendor while its callback is pending');
+ assert.ok(f.terminal.pendingWrites.length<=1);
+ const releasing=f.app.control.release();
+ assert.equal(f.terminal.options.disableStdin,true);assert.equal(f.$('copy').disabled,true);
+ assert.ok(f.requests.some(r=>r.url==='/api/control/release'),'native release must not wait for renderer');
+ await releasing;f.terminal.pendingWrites[0]();await flush();
+ assert.equal(f.terminal.options.disableStdin,true);assert.equal(f.$('copy').disabled,true);
+});
+
+test('actual vendor renderer drains old ownership before reset and exposes only the new target',async()=>{
+ const f=fixture();assert.ok(f.context.TerminalRenderer,'packaged shared renderer must be loaded');
+ const {Terminal}=require('../herdr_fleet/dashboard_static/vendor/xterm.js');
+ const term=new Terminal({cols:80,rows:24}),screen=f.context.document.createElement('div'),copy=f.context.document.createElement('button');
+ const renderer=f.context.TerminalRenderer.mount({term,screen,copy});
+ const frame=(text)=>({type:'frame',full:true,seq:1,cols:80,rows:24,bytes:Buffer.from(text).toString('base64')});
+ for(const [previous,next] of [['control','watch'],['watch','control']]){
+  const old=renderer.begin(previous),oldWrite=renderer.frame(old,frame('OLD_'+previous)).catch(()=>{});
+  const current=renderer.begin(next);assert.equal(copy.disabled,true);assert.equal(screen.attrs['aria-hidden'],'true');
+  await renderer.frame(current,frame('NEW_'+next));await oldWrite;
+  assert.equal(term.buffer.active.getLine(0).translateToString(true),'NEW_'+next);
+  assert.equal(copy.disabled,false);assert.equal(renderer.ready(current),true);
+  renderer.invalidate(current);assert.equal(copy.disabled,true);
+ }
+ term.dispose();
+});
+
+test('stalled renderer ends Control finitely, fences Copy and never activates from a later callback',async()=>{
+ const f=controlFixture({delayWrites:true});await activateControl(f);
+ const timeout=[...f.timeouts.values()].find(item=>item.ms===2000);assert.ok(timeout);timeout.fn();await flush();
+ assert.equal(f.terminal.options.disableStdin,true);assert.equal(f.$('copy').disabled,true);
+ assert.ok(f.requests.some(r=>r.url==='/api/control/release'));
+ await f.app.refresh();assert.equal(f.$('take-control').disabled,true);assert.match(f.$('control-state').textContent,/renderer unavailable/);
+ f.terminal.pendingWrites[0]();await flush();await f.app.refresh();
+ assert.equal(f.terminal.options.disableStdin,true);assert.equal(f.$('copy').disabled,true);
+ assert.equal(f.requests.filter(r=>r.url==='/api/control/acquire').length,1);
+});
 
 test('Decision Desk receives real cross-fleet attention without moving selection or fetching bodies',async()=>{
  const f=fixture();f.text('Keep my draft');f.$('draft').focus();

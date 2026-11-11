@@ -303,7 +303,7 @@ class Harness(S36):
     def write_log(self, *entries):
         with open(self.log_path, "a", encoding="utf-8") as handle:
             for entry in entries:
-                handle.write(json.dumps(entry) + "\n")
+                handle.write(json.dumps(self.oracle_permitted_event(entry)) + "\n")
 
     def assert_caught(self, *entries):
         if os.path.exists(self.log_path):

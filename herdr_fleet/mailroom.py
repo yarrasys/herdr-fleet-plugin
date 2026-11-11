@@ -31,6 +31,8 @@ or expired, after resolution is revalidated under the mailbox lock).
 
 from __future__ import annotations
 
+from herdr_fleet.coordination import consume
+
 import datetime
 import io
 import json
@@ -236,7 +238,7 @@ def _line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
         return "nothing queued for %s" % name, EXIT_OK
     if drop.status == "refused":
         return "%s: %s, %d left queued" % (name, state_words(drop.state), len(drop.waiting)), EXIT_OK
-    if drop.status == "typing":  # design 21.2: `X: owner typing in w1:p2, 3 left queued`
+    if drop.status in ("typing", "coordination"):
         return "%s: %s, %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_OK
     return "failed %s: %s; %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_FAIL
 
@@ -339,12 +341,23 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
                 else:
                     ctx.say("nothing arrived in %s" % wait_label(timeout_ms or 0))
                 return EXIT_PARTIAL
-            messages = _take(ctx, caller, read_all)
-            if messages or not wait:  # empty after the wait: the watcher took it first; wait on
-                break
+            with consume(ctx, caller) if not count else _no_consume():
+                messages = _take(ctx, caller, read_all)
+                if messages or not wait:
+                    _print_batch(ctx, caller, messages, read_all, count, as_json, limit)
+                    ctx.stdout.flush()
+                    return EXIT_OK
     finally:
         if wait:
             inbox.clear_waiting(repo, caller, os.getpid())
+
+
+def _no_consume():
+    import contextlib
+    return contextlib.nullcontext()
+
+
+def _print_batch(ctx, caller, messages, read_all, count, as_json, limit):
     if count:
         ctx.say(json.dumps({"name": caller, "count": len(messages)}) if as_json else str(len(messages)))
     elif as_json:
@@ -358,14 +371,14 @@ def op_inbox(ctx: Ctx, as_name: Optional[str] = None, read_all: bool = False, co
         for index, message in enumerate(messages, 1):
             ctx.say("%d. #%s  %s  %s  %s%s" % (index, message.short, since_label(message.time), message.sender,
                                               tags(message), first_line(message.body)))
-    return EXIT_OK
 
 
 def _selected(ctx: Ctx, name: str, ref: str, inspect: bool,
               as_json: bool, limit: Optional[int]) -> int:
     """Resolve before any write, then revalidate under the delivery engine's mailbox lock."""
     repo = ctx.fleet.repo
-    message = inbox.resolve(repo, ref, mailbox=name)
+    message = inbox.resolve(repo, ref, mailbox=name, headers_only=not inspect)
+    selected_id = message.id
     diagnostic = ctx.warn if as_json else ctx.say
 
     def validate() -> None:
@@ -378,13 +391,30 @@ def _selected(ctx: Ctx, name: str, ref: str, inspect: bool,
         diagnostic(line)
         return EXIT_PARTIAL
 
-    if not inspect:
-        validate()
-        if message.box == CUR:
-            return already_read()
+    def render() -> None:
+        if as_json:
+            item = _as_dict(message, body=True)
+            ctx.say(json.dumps(dict(item, box=message.box) if inspect else [dict(item, position=1)],
+                               indent=2, ensure_ascii=False))
+        else:
+            if inspect:
+                ctx.say("%s/: inspection does not mark it read (stored history is not proof of delivery)" % message.box)
+            ctx.say(inbox.render_for_print([message], limit))
+
+    if inspect:
+        render()
+        return EXIT_OK
+    validate()
+    if message.box == CUR:
+        return already_read()
+
+    def read() -> int:
+        nonlocal message
         with inbox.locked(repo, name):
-            message = inbox.resolve(repo, ref, mailbox=name)
+            message = inbox.resolve(repo, ref, mailbox=name, headers_only=True)
             validate()
+            if message.id != selected_id:
+                raise UsageError("selected message changed; select its full id again")
             if message.box == CUR:
                 return already_read()
             reason = inbox.due_by(message, inbox.now_utc(), ctx.fleet.fyi_ttl)
@@ -394,16 +424,16 @@ def _selected(ctx: Ctx, name: str, ref: str, inspect: bool,
                 line = "#%s expired (%s); use inbox --show %s to inspect it" % (message.short, reason, ref)
                 diagnostic(line)
                 return EXIT_PARTIAL
+            message = inbox.load(message.path, message.box)
+            validate()
             settle(ctx, [message], "inbox", "sent")
-    if as_json:
-        item = _as_dict(message, body=True)
-        ctx.say(json.dumps(dict(item, box=message.box) if inspect else [dict(item, position=1)],
-                           indent=2, ensure_ascii=False))
-    else:
-        if inspect:
-            ctx.say("%s/: inspection does not mark it read (stored history is not proof of delivery)" % message.box)
-        ctx.say(inbox.render_for_print([message], limit))
-    return EXIT_OK
+        render()
+        return EXIT_OK
+
+    with consume(ctx, name):
+        result = read()
+        ctx.stdout.flush()
+        return result
 
 
 def _take(ctx: Ctx, name: str, read_all: bool) -> List[Message]:
@@ -475,7 +505,7 @@ def _await_mail(ctx: Ctx, name: str, deadline: Optional[float]) -> bool:
     while True:
         if inbox.has_queued(repo, name):
             now = inbox.now_utc()
-            if any(not inbox.is_due(m, now, ctx.fleet.fyi_ttl) for m in inbox.read_box(repo, name, NEW)):
+            if any(not inbox.is_due(m, now, ctx.fleet.fyi_ttl) for m in inbox.read_box(repo, name, NEW, headers_only=True)):
                 return True
         if deadline is not None and ctx.clock.monotonic() >= deadline:
             return False
@@ -615,15 +645,19 @@ def op_inbox_hook(ctx: Ctx, which: str, stdin: TextIO) -> int:
     and nothing on stderr either, so a broken hook never disturbs the agent."""
     ctx.stderr = io.StringIO()  # warnings (a fleet file key, a corrupt message) stay out of the hook
     try:
-        output = _hook_output(ctx, which, stdin)
+        data = _hook_input(stdin)
+        if which == "stop" and data.get("stop_hook_active") is True:
+            return EXIT_OK
+        name = _hook_seat(ctx, data)
+        if not name or not inbox.has_queued(ctx.fleet.repo, name):
+            return EXIT_OK
+        with consume(ctx, name):
+            output = _hook_batch(ctx, name, which)
+            if output:
+                ctx.say(output)
+                ctx.stdout.flush()
     except Exception:  # noqa: BLE001 - invariant 14: a hook prints nothing on any error
         return EXIT_OK
-    if output:
-        try:
-            ctx.say(output)
-            ctx.stdout.flush()
-        except Exception:  # noqa: BLE001
-            pass
     return EXIT_OK
 
 
@@ -660,16 +694,8 @@ def _hook_seat(ctx: Ctx, data: Dict) -> Optional[str]:
     return str(name) if name and fleet.seat(str(name)) is not None else None
 
 
-def _hook_output(ctx: Ctx, which: str, stdin: TextIO) -> Optional[str]:
-    data = _hook_input(stdin)
-    if which == "stop" and data.get("stop_hook_active") is True:
-        return None  # a Stop hook already continued this turn: let it end
-    name = _hook_seat(ctx, data)
-    if not name:
-        return None
+def _hook_batch(ctx, name, which):
     repo = ctx.fleet.repo
-    if not inbox.has_queued(repo, name):
-        return None
     if which == "prompt":
         now = inbox.now_utc()
         count = len([m for m in queued_in(ctx, name) if not inbox.is_due(m, now, ctx.fleet.fyi_ttl)])

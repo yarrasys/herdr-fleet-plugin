@@ -39,8 +39,16 @@ def snapshot(root):
 # Real processes, only file commands. Signal the flock boundary so the parent
 # can arrange a deterministic race without sleeps or live Herdr access.
 LOCKING_CLI = '''
-import fcntl, sys
+import fcntl, sys, os
 from herdr_fleet.cli import main
+from herdr_fleet import permits
+fleet = sys.argv[sys.argv.index('--fleet') + 1]
+fixture = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(fleet))))
+_Store = permits.Store
+class IsolatedStore(_Store):
+    def __init__(self, root=None):
+        super().__init__(root if root is not None else os.path.join(fixture, 'permits'))
+permits.Store = IsolatedStore
 original = fcntl.flock
 def lock(fd, operation):
     if operation == fcntl.LOCK_EX:
@@ -49,7 +57,7 @@ def lock(fd, operation):
 fcntl.flock = lock
 def no_herdr(argv):
     raise AssertionError("file-only child attempted Herdr: %r" % (argv,))
-sys.exit(main(sys.argv[1:], env={}, runner=no_herdr))
+sys.exit(main(sys.argv[1:], env={'HERDR_SOCKET_PATH': os.path.join(fixture, 'synthetic-herdr.sock')}, runner=no_herdr))
 '''
 
 
@@ -789,8 +797,8 @@ class ResolutionRace(LiveFleet):
                     read_box = inbox.read_box
                     moved = []
 
-                    def move_after_new(repo, name, box=NEW, warnings=None):
-                        found = read_box(repo, name, box, warnings)
+                    def move_after_new(repo, name, box=NEW, warnings=None, headers_only=False):
+                        found = read_box(repo, name, box, warnings, headers_only=headers_only)
                         if repo == self.repo and name == "sample-dev" and box == NEW and not moved:
                             # Another reader holds the real lock while delivering after
                             # this scan, before resolve scans cur/. Return the old NEW observation.

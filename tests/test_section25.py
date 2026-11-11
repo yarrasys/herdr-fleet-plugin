@@ -474,7 +474,7 @@ class Harness(PageCase):
     def write_log(self, *entries):
         with open(self.log_path, "a") as handle:
             for entry in entries:
-                handle.write(json.dumps(entry) + "\n")
+                handle.write(json.dumps(self.oracle_permitted_event(entry)) + "\n")
 
     def assert_caught(self, *entries):
         if os.path.exists(self.log_path):

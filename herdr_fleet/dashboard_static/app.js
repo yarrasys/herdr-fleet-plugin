@@ -1,4 +1,4 @@
-/* Signal Box: live observations and deliberate owner actions. No terminal input path. */
+/* Signal Box: live observation, owner conversation and explicit human Control. */
 "use strict";
 (function () {
   let capability = location.hash.slice(1);
@@ -98,8 +98,20 @@
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open($("terminal-screen"));
+  const renderer = TerminalRenderer.mount({term: term, screen: $("terminal-screen"), copy: $("copy")});
+  let watchRender = null;
   const helper = $("terminal-screen").querySelector(".xterm-helper-textarea");
   if (helper) { helper.readOnly = true; helper.tabIndex = -1; helper.setAttribute("aria-hidden", "true"); }
+  const control = typeof TerminalControl !== "undefined" ? TerminalControl.mount({term: term, api: api, renderer: renderer,
+    selection: function () {
+      const target = currentSeat(), fleet = targetFleet();
+      return state.csrf && state.data && !state.data.demo && state.tab === "terminal" && !document.hidden &&
+        target && target.view && fleet && !fleet.stale ? {fleet: state.targetFleet, seat: target.name, view: target.view} : null;
+    },
+    dimensions: function () {
+      const dims = fit.proposeDimensions() || {cols: 80, rows: 24};
+      return {cols: Math.max(20, Math.min(300, dims.cols)), rows: Math.max(5, Math.min(120, dims.rows))};
+    }, expanded: function () { return state.expanded; }, stopWatch: disconnectWatch, status: status}) : null;
   function node(tag, text, className) {
     const item = document.createElement(tag);
     if (text !== undefined && text !== null) item.textContent = String(text);
@@ -146,7 +158,7 @@
   function selectedChanged(fleetId, name) {
     const moved = fleetId !== state.targetFleet || name !== state.seat;
     saveDraft();
-    if (moved) { disconnect("Watch disconnected: selected target changed. Screen cleared."); term.reset(); }
+    if (moved) { disconnect("Watch disconnected: selected target changed. Screen fenced until its current frame parses."); }
     state.targetFleet = fleetId; state.seat = name; state.reply = null; state.replyGeneration++;
     thread().unseen = 0;
     restoreDraft(); render();
@@ -178,7 +190,7 @@
     if (!source || !target || !target.seats.some(function (s) { return s.name === identity[2]; })) {
       notice("This conversation is no longer registered. Refresh before acting."); return;
     }
-    saveDraft(); disconnect("Watch disconnected: conversation changed. Screen cleared."); term.reset();
+    saveDraft(); disconnect("Watch disconnected: conversation changed. Screen fenced until its current frame parses.");
     state.fleet = source.id; state.targetFleet = target.id; state.seat = identity[2];
     thread().unseen = 0;
     state.reply = null; state.replyGeneration++; state.question = null; $("owner-detail").hidden = true;
@@ -408,7 +420,7 @@
   function selectFleet(id) {
     if (state.fleet === id) return;
     const fleet = state.data.fleets.find(function (f) { return f.id === id; }); if (!fleet) return;
-    saveDraft(); disconnect("Watch disconnected: fleet changed. Screen cleared."); term.reset(); $("travel").replaceChildren();
+    saveDraft(); disconnect("Watch disconnected: fleet changed. Screen fenced until its current frame parses."); $("travel").replaceChildren();
     state.fleet = fleet.id; state.targetFleet = fleet.id; state.seat = fleet.seats[0] ? fleet.seats[0].name : null;
     if (state.attentionScope === "selected") { state.attention = null; state.attentionRequest++; }
     if (state.seat) thread().unseen = 0;
@@ -546,6 +558,8 @@
     });
     $("seats").replaceChildren.apply($("seats"), seats);
     const target = currentSeat();
+    if (control) control.observe();
+    if (data.demo) $("control-state").textContent = "DEMO · Native Control is unavailable. Synthetic content has no live terminal.";
     const demoHold = !!(data.demo && data.hold && state.reply);
     $("target-label").textContent = target ? target.name + " · " + target.state : "Choose a seat";
     $("watch").disabled = !target || !target.view || fleet.stale;
@@ -729,13 +743,20 @@
     refreshTab().catch(fail);
   }
   function disconnect(message) {
+    if (control && control.busy()) control.release(message || "Terminal disconnected; input disabled.");
+    disconnectWatch(message);
+  }
+  function disconnectWatch(message) {
     if (state.watch) state.watch.abort(); state.watch = null; state.streamKey = null;
-    status(message || "Watch disconnected. Output retained.");
+    if (watchRender) renderer.invalidate(watchRender); watchRender = null;
+    status(message || "Watch disconnected. Terminal surface is fenced until a current frame parses.");
   }
   async function watch() {
     const target = currentSeat(); if (!target || !target.view) return;
-    disconnect(); term.reset();
-    fit.fit();
+    if (control && control.busy()) await control.release("Released before explicit Watch.");
+    if (control && control.busy()) return;
+    disconnectWatch();
+    const token = renderer.begin("watch"); watchRender = token;
     const dims = fit.proposeDimensions() || {cols: 80, rows: 24};
     const controller = new AbortController(); state.watch = controller; state.streamKey = target.view;
     state.viewport = {cols: Math.max(20, Math.min(300, dims.cols)), rows: Math.max(5, Math.min(120, dims.rows))};
@@ -756,11 +777,8 @@
           const frame = JSON.parse(line);
           if (state.streamKey !== key || state.watch !== controller) return;
           if (frame.type === "frame") {
-            if (frame.full) { term.reset(); }
-            if (term.cols !== frame.cols || term.rows !== frame.rows) term.resize(frame.cols, frame.rows);
-            const raw = atob(frame.bytes); const bytes = new Uint8Array(raw.length);
-            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-            term.write(bytes);
+            await renderer.frame(token, frame);
+            if (state.streamKey !== key || state.watch !== controller || !renderer.ready(token)) return;
             $("terminal-status").textContent = (state.data.demo ? "DEMO · synthetic ANSI" : "WATCH CONNECTED · read only") +
               " · " + target.name + " · frame " + frame.seq + (target.state === "blocked" ? " · Handle this native dialog in Herdr" : "");
           } else {
@@ -768,9 +786,9 @@
           }
         }
       }
-      if (state.watch === controller) { state.watch = null; state.streamKey = null; status($("terminal-status").textContent + (state.data.demo ? " · Demo stream closed" : " · stream ended; agent exit is not inferred")); }
+      if (state.watch === controller) { state.watch = null; state.streamKey = null; renderer.invalidate(token); if (watchRender === token) watchRender = null; status($("terminal-status").textContent + (state.data.demo ? " · Demo stream closed" : " · stream ended; agent exit is not inferred")); }
     } catch (error) {
-      if (state.watch === controller && error.name !== "AbortError") { disconnect("Watch unavailable or disconnected · " + error.message); }
+      if (state.watch === controller && error.name !== "AbortError") { disconnectWatch("Watch unavailable or disconnected · " + error.message); }
     }
   }
   function uniqueIntent() { return crypto.randomUUID(); }
@@ -779,13 +797,14 @@
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(function () {
       if (state.tab !== "terminal") return;
+      if (control && control.busy()) return;
       const dims = fit.proposeDimensions();
       if (!dims) return;
       const cols = Math.max(20, Math.min(300, dims.cols)), rows = Math.max(5, Math.min(120, dims.rows));
       if (state.watch && state.viewport && (cols !== state.viewport.cols || rows !== state.viewport.rows)) {
         status("Watch reconnecting for a new read-only viewport; fresh full frame required.");
         watch();
-      } else if (!state.watch) fit.fit();
+      } else if (!state.watch) renderer.localFit(function () { fit.fit(); }).catch(fail);
     }, 200);
   }
   new ResizeObserver(scheduleViewport).observe($("terminal-screen"));
@@ -873,22 +892,29 @@
       render(); $("draft").focus();
     }).catch(fail);
   });
-  $("collapse").addEventListener("click", function () {
+  $("collapse").addEventListener("click", function (event) {
     state.collapsed = !state.collapsed; $("app").classList.toggle("collapsed", state.collapsed);
     $("collapse").textContent = state.collapsed ? "Expand fleets" : "Collapse fleets";
     $("collapse").setAttribute("aria-expanded", String(!state.collapsed));
     saveView();
+    if (control) control.layout(event);
   });
-  $("expand").addEventListener("click", function () {
+  let normalScroll = null;
+  $("expand").addEventListener("click", function (event) {
+    if (!state.expanded) normalScroll = {x: window.scrollX || 0, y: window.scrollY || 0};
     state.expanded = !state.expanded; $("app").classList.toggle("expanded", state.expanded);
     $("expand").textContent = state.expanded ? "Restore terminal" : "Expand terminal";
     $("expand").setAttribute("aria-expanded", String(state.expanded));
     $("esc-hint").hidden = !state.expanded;
     $("grip").setAttribute("aria-disabled", String(state.expanded)); $("grip").tabIndex = state.expanded ? -1 : 0;
     scheduleViewport();
+    if (control) control.layout(event);
+    if (!state.expanded && normalScroll && typeof window.scrollTo === "function") {
+      window.scrollTo(normalScroll.x, normalScroll.y); normalScroll = null;
+    }
   });
   document.addEventListener("keydown", function (event) {
-    if (event.key !== "Escape" || !state.expanded) return;
+    if (event.key !== "Escape" || !state.expanded || (control && control.busy())) return;
     const tag = event.target && event.target.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
     $("expand").click(); $("expand").focus();
@@ -931,8 +957,9 @@
   $("watch").addEventListener("click", watch);
   $("refresh-observation").addEventListener("click", refresh);
   $("disconnect").addEventListener("click", function () { disconnect(); });
-  $("refit").addEventListener("click", function () { if (state.watch) watch(); else notice("Open Watch before refitting its read-only viewport."); });
+  $("refit").addEventListener("click", function (event) { if (control && control.busy()) control.layout(event); else if (state.watch) watch(); else notice("Open Watch before refitting its read-only viewport."); });
   $("copy").addEventListener("click", function () {
+    if (!renderer.ready()) { notice("Copy unavailable until a current terminal frame has parsed."); return; }
     const lines = []; for (let i = 0; i < term.buffer.active.length; i++) lines.push(term.buffer.active.getLine(i).translateToString(true));
     navigator.clipboard.writeText(lines.join("\n")).then(function () { notice("Copied terminal screen text."); }).catch(fail);
   });
@@ -981,9 +1008,11 @@
   }
   $("grip").addEventListener("pointerdown", function (event) { if (state.expanded) return; drag = {y: event.clientY, height: $("terminal-screen").clientHeight}; $("grip").setPointerCapture(event.pointerId); });
   $("grip").addEventListener("pointermove", function (event) { if (drag && !state.expanded) height(drag.height + event.clientY - drag.y); });
-  $("grip").addEventListener("pointerup", function () { drag = null; saveView(); });
-  $("grip").addEventListener("keydown", function (event) { if (state.expanded) return; if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); height($("terminal-screen").clientHeight + (event.key === "ArrowUp" ? -24 : 24)); saveView(); } });
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) { state.first = true; state.quiet = true; refresh(); } });
+  $("grip").addEventListener("pointerup", function (event) { drag = null; saveView(); if (control) control.layout(event); });
+  $("grip").addEventListener("keydown", function (event) { if (state.expanded) return; if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); height($("terminal-screen").clientHeight + (event.key === "ArrowUp" ? -24 : 24)); saveView(); if (control) control.layout(event); } });
+  window.addEventListener("resize", function (event) { if (control) control.layout(event); });
+  window.addEventListener("blur", function () { if (control && control.busy()) control.release("Browser focus left; input disabled."); });
+  document.addEventListener("visibilitychange", function () { if (document.hidden) { if (control && control.busy()) control.release("Document hidden; Control released."); } else { state.first = true; state.quiet = true; refresh(); } });
   window.addEventListener("pagehide", function () { disconnect(); clearInterval(state.tick); clearTimeout(resizeTimer); if (conversationView) conversationView.destroy(); if (attentionView) attentionView.destroy(); });
   async function bootstrap(supplied) {
     const launch = supplied || capability;

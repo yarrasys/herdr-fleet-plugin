@@ -6,6 +6,7 @@ It is not exposed as a CLI caller override or generic command interface.
 from __future__ import annotations
 
 import fcntl
+import contextlib
 import hashlib
 import io
 import json
@@ -268,11 +269,22 @@ class OwnerActions:
             source_signature = digest(FileCache().bytes(source.path)[0].decode("utf-8"))
             adapter = self
             class GuardedOwner:
+                def __init__(self, native):
+                    self.native = native
+
                 def __getattr__(self, name):
-                    return getattr(adapter.herdr, name)
+                    return getattr(self.native, name)
+
+                @contextlib.contextmanager
+                def target_operation(self, name):
+                    self.agent_get(name)
+                    with self.native.target_operation(name) as native:
+                        guarded = GuardedOwner(native)
+                        guarded.agent_get(name)
+                        yield guarded
 
                 def agent_list(self):
-                    current = adapter.herdr.agent_list()
+                    current = self.native.agent_list()
                     fresh = adapter.registry.fleet(payload["source"])
                     if digest(FileCache().bytes(fresh.path)[0].decode("utf-8")) != source_signature:
                         raise HerdrError("target_changed", "source configuration changed; refresh")
@@ -281,15 +293,15 @@ class OwnerActions:
                     return current
 
                 def agent_get(self, name):
-                    current = adapter.herdr.agent_get(name)
+                    current = self.native.agent_get(name)
                     if name in (target, agent.get("pane_id")) and binding(current) != original_binding:
                         raise HerdrError("target_changed", "target identity changed; refresh")
                     return current
 
                 def agent_prompt(self, name, text):
                     self.agent_get(name)
-                    return adapter.herdr.agent_prompt(name, text)
-            ctx.herdr = GuardedOwner()
+                    return self.native.agent_prompt(name, text)
+            ctx.herdr = GuardedOwner(adapter.herdr)
         result = {"status": "unconfirmed", "certainty": "unconfirmed", "code": 3}
         read_progress = {}
         outgoing = {}

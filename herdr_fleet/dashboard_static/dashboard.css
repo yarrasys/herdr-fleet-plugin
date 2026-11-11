@@ -8,8 +8,40 @@
   --tech:"DIN Alternate",Bahnschrift,"Avenir Next Condensed",Roboto,"Helvetica Neue",Arial,sans-serif;
   --body:"Avenir Next","Segoe UI",system-ui,sans-serif;
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --owner-bar-clearance:208px; /* bounded 190px bar + 8px top + 10px separation */
   --cut:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px);
 }
+
+/* Owner authority stays next to the terminal in the existing Fable surface. */
+.control-tools{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:9px 14px;border-top:1px solid var(--line-dim);border-bottom:1px solid var(--line-dim);background:var(--deck)}
+#control-mode{font:700 11px var(--tech);text-transform:uppercase;letter-spacing:.12em;color:var(--cyan)}
+#control-mode.controlling{color:var(--amber)}
+#control-target{flex:1;min-width:150px;overflow-wrap:anywhere;font:11px var(--mono);color:var(--mute)}
+#control-expiry{font:11px var(--mono);color:var(--amber);white-space:nowrap}
+#release-control{border-color:var(--amber);color:var(--amber)}
+.control-state{padding:0 14px;margin:8px 0;color:var(--mute);font-size:11px;overflow-wrap:anywhere}
+#control-confirmation{max-width:min(620px,calc(100vw - 24px));max-height:calc(100vh - 32px);overflow:auto;background:var(--deck);color:var(--text);border:1px solid var(--line-strong);padding:24px;box-shadow:0 20px 100px #000a}
+#control-confirmation::backdrop{background:rgba(0,3,9,.8)}
+#control-confirmation h2{font-family:var(--display);font-size:24px;margin:0 0 16px}
+#control-confirm-target{font:12px var(--mono);color:var(--cyan);overflow-wrap:anywhere}
+#control-disclosures{padding-left:20px;font-size:13px;line-height:1.6}
+#control-disclosures li{margin:10px 0}
+#control-confirmation .toolbar{justify-content:flex-end;gap:12px;margin-top:20px}
+@media(max-width:600px){.control-tools{padding:8px;gap:6px}#control-target{flex-basis:calc(100% - 70px)}#control-expiry{margin-right:auto}#control-confirmation{padding:16px}}
+.release-shortcut::before{content:" · "}
+body.owner-control-present{padding-top:var(--owner-bar-clearance)}
+html:has(body.owner-control-present):not(:has(.app.expanded)){scroll-padding-top:var(--owner-bar-clearance)}
+body.owner-control-present>.control-tools{position:fixed;z-index:80;top:8px;right:12px;left:calc(25vw + 10px);display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:5px 12px;border:1px solid var(--amber);box-shadow:0 8px 30px #000a;padding:8px 12px;max-height:190px}
+body.owner-control-present:has(.app.collapsed)>.control-tools{left:104px}
+body.owner-control-present>.control-tools #control-mode{grid-column:1;grid-row:1}
+body.owner-control-present>.control-tools #control-expiry{grid-column:2;grid-row:1;justify-self:end;margin:0}
+body.owner-control-present>.control-tools #release-control{grid-column:3;grid-row:1;white-space:nowrap}
+body.owner-control-present>.control-tools #control-target{grid-column:1/-1;grid-row:2;min-width:0;max-height:3em;overflow:auto;line-height:1.4}
+body.owner-control-present>.control-tools #take-control{display:none}
+body.owner-control-present>.control-tools #control-state{grid-column:1/-1;grid-row:3;padding:0;margin:0;max-height:3em;overflow:auto;line-height:1.35}
+.terminal-screen.render-fenced .xterm{visibility:hidden}
+.terminal-screen.render-fenced::after{content:"Terminal output fenced until a current frame has parsed.";position:absolute;inset:16px;color:var(--mute);font:12px/1.5 var(--mono);pointer-events:none}
+@media(max-width:760px){body.owner-control-present>.control-tools,body.owner-control-present:has(.app.collapsed)>.control-tools{left:8px;right:8px}.release-shortcut{display:block;font-size:9px;letter-spacing:0}.release-shortcut::before{content:""}}
 *{box-sizing:border-box}
 html,body{margin:0;min-height:100%;max-width:100%}
 body{font:14px/1.45 var(--body);background:var(--void);color:var(--text)}
@@ -346,18 +378,13 @@ button.desk-fold{min-height:28px;padding:4px 9px;font-size:10px}
   .deck .conversation{margin-top:0;min-height:460px;max-height:calc(100vh - 24px);position:sticky;top:12px}
   .deck .convo{flex:1 1 0}
   .deck .convo-scroll{flex:1 1 0;height:auto;min-height:0}
-  .app.expanded .deck{grid-template-columns:minmax(0,2.1fr) minmax(320px,1fr)}
   /* beside the terminal the input block is compact: its label stays for assistive technology only */
   .deck .convo-compose{padding:8px 14px 10px}
   .deck .convo-compose label[for=draft]{position:absolute;width:1px;height:1px;margin:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
   .deck .convo-compose textarea{min-height:44px;margin-top:7px}
   .deck .convo-compose .toolbar{margin-top:8px}
   .deck .action-result{margin-top:6px}
-  /* expanded: the terminal is as tall as the screen allows, so terminal, thread and input end at the screen edge */
-  .app.expanded .deck .terminal-screen{height:max(360px,calc(100vh - 390px - var(--above-stages,0px) - var(--above-questions,0px)))}
 }
-.pane:has(.demo-stages:not([hidden])){--above-stages:67px}
-.pane:has(.questions:not(.is-empty)){--above-questions:108px}
 
 /* ---------- collapsed fleet column: a rail of numbers, short codes and lamps */
 .app.collapsed{grid-template-columns:92px minmax(0,1fr)}
@@ -377,15 +404,32 @@ button.desk-fold{min-height:28px;padding:4px 9px;font-size:10px}
 .collapsed .fleet-button[aria-current=true] .fleet-signals:before{left:-30px;right:-30px}
 .collapsed .fleet-new{display:block;margin:4px auto 0;width:fit-content}
 
-/* ---------- expanded terminal: everything above it steps aside; owner questions stay */
-.app.expanded .terminal-screen{height:max(360px,calc(100vh - 318px))}
-.app.expanded .pane-head .eyebrow,.app.expanded .readouts,.app.expanded #notice,.app.expanded .demo-stage .sub,.app.expanded .seat small,.app.expanded .terminal-foot,.app.expanded footer,.app.expanded .questions.is-empty{display:none}
-.app.expanded h2{font-size:22px;margin-top:0}
-.app.expanded .persistent-mode{margin-bottom:8px}
-.app.expanded .questions{margin-top:10px}
-.app.expanded .demo-stages{margin-top:10px;padding:10px 14px 6px}
-.app.expanded .seat .card{padding:6px 10px}
-.app.expanded .seat-line{padding-bottom:6px}
+/* Focused terminal: viewport space, rather than a normal-height minimum clamp.
+ * Hidden surroundings leave keyboard/accessibility order; their DOM and drafts
+ * remain intact. The chosen normal height and fleet-rail preference are untouched. */
+body:has(.app.expanded){overflow:hidden}
+.app.expanded .fleet-column,.app.expanded .pane>:not(.deck),.app.expanded .conversation{display:none}
+.app.expanded .pane{position:fixed;inset:0;z-index:70;padding:4px;background:var(--void);overflow:hidden}
+.app.expanded .deck{display:block;height:100%;min-height:0}
+.app.expanded .workspace{height:100%;min-height:0;display:flex;flex-direction:column}
+.app.expanded .workspace-head{flex:none;min-height:0;display:flex}
+.app.expanded .workspace-head .tabs{display:none}
+.app.expanded #target-label{padding:2px 8px;font-size:11px}
+.app.expanded #terminal-panel{display:flex;flex:1 1 0;flex-direction:column;min-height:0}
+.app.expanded .terminal-tools{flex:none;display:grid;grid-template-columns:minmax(0,1fr) auto;padding:4px;gap:8px}
+.app.expanded .terminal-tools>.toolbar{min-width:0;flex-wrap:nowrap;overflow-x:auto}
+.app.expanded .terminal-tools button{white-space:nowrap;flex:none}
+.app.expanded .esc-hint{display:none}
+.app.expanded .control-tools{flex:none;display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:4px 8px;padding:4px 8px}
+.app.expanded #control-mode{grid-column:1;grid-row:1}
+.app.expanded #control-expiry{grid-column:2;grid-row:1;justify-self:end;margin:0}
+.app.expanded #take-control,.app.expanded #release-control{grid-column:3;grid-row:1;white-space:nowrap}
+.app.expanded .control-tools:not([data-phase=idle]) #take-control{display:none}
+.app.expanded #control-target{grid-column:1/-1;grid-row:2;min-width:0;max-height:2.8em;overflow:auto;line-height:1.3}
+.app.expanded #control-state{flex:none;margin:0;padding:2px 8px;font-size:10.5px;line-height:1.25;max-height:3.1em;overflow:auto}
+.app.expanded .terminal-status{flex:none;margin:0;padding:2px 8px;font-size:10.5px;line-height:1.25;max-height:3.3em;overflow:auto}
+.app.expanded #terminal-screen{flex:1 1 0;height:auto;min-height:0;padding:2px}
+.app.expanded #grip,.app.expanded .terminal-foot{display:none}
 
 /* ---------- motion: one switch governs every animation; the system preference only sets its default */
 @keyframes run{to{background-position:calc(100% + 90px) 0,0 0}}
@@ -444,7 +488,6 @@ button.desk-fold{min-height:28px;padding:4px 9px;font-size:10px}
   .demo-stage:nth-child(3):before{display:none}
   .demo-stage .sub{white-space:normal;overflow-wrap:anywhere}
   .terminal-screen{--terminal-height:280px;padding:8px}
-  .app.expanded .terminal-screen{height:68vh}
   .question-row{flex-wrap:wrap}
   .workspace-head{display:block}
   #target-label{display:block}

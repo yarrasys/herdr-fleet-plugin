@@ -35,6 +35,7 @@ import os
 from typing import Dict, Optional, Sequence, TextIO
 
 from herdr_fleet import PLUGIN_ID, inbox
+from herdr_fleet.coordination import semantic
 from herdr_fleet.checks import drift_reasons
 from herdr_fleet.context import EXIT_OK, EXIT_PARTIAL, Ctx, OpError, Report, UsageError
 from herdr_fleet.fleetfile import NAME_RE, FleetError
@@ -61,6 +62,7 @@ def note_path(repo: str, seat: str) -> str:
 # -- the seat's own command ------------------------------------------------------------------
 
 
+@semantic(topology=True)
 def request(ctx: Ctx, op: str, names: Sequence[str], note: Optional[str] = None, wait_ms: Optional[int] = None,
             drop_inbox: bool = False) -> Report:
     """``restart NAME --handover`` / ``swap NAME --handover`` (design 32.5): open the helper
@@ -258,6 +260,7 @@ def _stopped(ctx: Ctx, name: str, report: Report, stdin: TextIO, spec: Dict) -> 
     return report.exit_code() or EXIT_PARTIAL
 
 
+@semantic(topology=True)
 def _close(ctx: Ctx, spec: Optional[Dict]) -> None:
     """Drop the record (saved first: closing the pane ends this process), remove the note
     copy, then close the helper's own pane, which herdr-fleet created (invariant 4)."""

@@ -18,7 +18,7 @@ import os
 import unittest
 
 import fake_herdr
-from support import CALLER_PANE, FleetCase, LiveFleet, THREE_SEATS
+from support import CALLER_PANE, FleetCase, LiveFleet, THREE_SEATS, client_permit_fixture
 from herdr_fleet import labels
 from herdr_fleet.fleetfile import FleetError, LABEL_MAX, load_fleet
 from herdr_fleet.herdr import FORBIDDEN, Herdr
@@ -652,10 +652,10 @@ class Client(unittest.TestCase):
             seen.append(argv[1:])
             return 0, json.dumps({"result": {"pane": {"pane_id": "w1:p2", "label": "x"}}}), ""
 
-        herdr = Herdr("herdr", runner)
-        self.assertEqual(herdr.pane_rename("w1:p2", "sample-dev")["pane_id"], "w1:p2")
-        herdr.pane_clear_name("w1:p2")
-        herdr.agent_focus("sample-dev")
+        with client_permit_fixture(Herdr("herdr", runner)) as herdr:
+            self.assertEqual(herdr.pane_rename("w1:p2", "sample-dev")["pane_id"], "w1:p2")
+            herdr.pane_clear_name("w1:p2")
+            herdr.agent_focus("sample-dev")
         self.assertEqual(seen, [["pane", "rename", "w1:p2", "sample-dev"], ["pane", "rename", "w1:p2", "--clear"],
                                 ["agent", "focus", "sample-dev"]])
         self.assertNotIn(("pane", "rename"), FORBIDDEN)

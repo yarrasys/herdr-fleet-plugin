@@ -182,7 +182,7 @@ class FreshWorkspace(StripCase):
         self.assertIn("about 20% of the area (pane layout unreadable; assumed herdr's 50/50 split)", out)
 
     def test_focus_is_reported_when_herdr_moves_it(self):
-        pane = {"pane_id": "w101:p102", "focused": True}
+        pane = {"pane_id": "w101:p102", "focused": True, "workspace_id": "w101", "terminal_id": "term_w101:p102"}
         self.world["canned"] = [{"prefix": ["plugin", "pane", "open"], "stdout": {"id": "cli:plugin", "result": {
             "type": "plugin_pane_opened", "plugin_pane": {"entrypoint": "watch", "pane": pane}}}}]
         code, out, _ = self.run_cli("up", "--no-kickoff")

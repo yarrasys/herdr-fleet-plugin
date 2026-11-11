@@ -239,7 +239,14 @@ def zoom(herdr, env: Mapping[str, str], watch_pane: Optional[str]) -> Optional[s
     pane = watch_pane if thread else env.get("HERDR_PANE_ID") or watch_pane
     if not pane:
         return None
-    herdr.pane_zoom_toggle(pane)
+    current = herdr.pane_get(pane)
+    values = [("W", current["workspace_id"]), ("P", pane)]
+    if current.get("terminal_id"):
+        values.append(("T", current["terminal_id"]))
+    if current.get("agent"):
+        values.extend(herdr.agent_resources(herdr.agent_get(pane)))
+    with herdr.operation(values, topology=True) as native:
+        native.pane_zoom_toggle(pane)
     return pane
 
 

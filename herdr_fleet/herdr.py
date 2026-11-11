@@ -27,7 +27,12 @@ import subprocess
 import os
 import selectors
 import time
+import copy
+import contextlib
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+from herdr_fleet import permits
+from herdr_fleet.native_commands import classify
 
 Runner = Callable[[List[str]], Tuple[int, str, str]]
 
@@ -57,12 +62,14 @@ class HerdrError(Exception):
 
 def subprocess_runner(argv: List[str]) -> Tuple[int, str, str]:
     """Run argv without a shell or stdin and return (exit code, stdout, stderr)."""
+    context = permits.native_transport()
     proc = subprocess.run(
         argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
+        env=context[0] if context else None, pass_fds=context[1] if context else (),
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -70,8 +77,10 @@ def subprocess_runner(argv: List[str]) -> Tuple[int, str, str]:
 def dashboard_runner(argv: List[str]) -> Tuple[int, str, str]:
     """Dashboard-owned ordinary reads/actions have a finite native-command lifetime."""
     try:
+        context = permits.native_transport()
         proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              universal_newlines=True, timeout=5)
+                              universal_newlines=True, timeout=5,
+                              env=context[0] if context else None, pass_fds=context[1] if context else ())
         return proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired:
         raise HerdrError("timeout", "Herdr request timed out; action delivery may be unconfirmed")
@@ -79,7 +88,9 @@ def dashboard_runner(argv: List[str]) -> Tuple[int, str, str]:
 
 def registry_runner(argv: List[str]) -> Tuple[int, str, str]:
     """One bounded metadata read: no stdin, at most 1 MiB and five seconds."""
-    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    context = permits.native_transport()
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               env=context[0] if context else None, pass_fds=context[1] if context else ())
     selector, chunks, size = selectors.DefaultSelector(), [], 0
     end = time.monotonic() + 5.0
     try:
@@ -154,6 +165,165 @@ class Herdr:
         self.runner = runner or subprocess_runner
         self.stream_runner = stream_runner or subprocess.Popen
         self.start_timeout = True  # False once herdr rejected `agent start --timeout` (design 32.1, review 6)
+        self.env = dict(os.environ)
+        self._domain = None
+        self.permit = None
+        self._agents, self._panes = {}, {}
+        self._workspaces = set()
+
+    def configure(self, env):
+        snapshot = dict(env)
+        if snapshot != self.env:
+            self.env, self._domain = snapshot, None
+
+    def domain(self):
+        if self._domain is None:
+            try:
+                candidates = permits.endpoints(self.env)
+                with permits.transport(self.env):
+                    runner = registry_runner if self.runner in (subprocess_runner, dashboard_runner) else self.runner
+                    code, out, err = runner([self.binary, "status", "server", "--json"])
+                if code or len(out.encode("utf-8")) > 1048576:
+                    raise permits.Unavailable("native endpoint status unavailable")
+                status = json.loads(out)
+                self._domain = permits.selected(candidates, status)
+                self._server_running = status["running"]
+            except (ValueError, OSError, permits.Unavailable) as exc:
+                raise HerdrError("permit_unavailable", "coordination endpoint unavailable: %s" % exc)
+        return self._domain
+
+    def control_client(self):
+        """Fresh positively running endpoint/client evidence; no mutations."""
+        client = copy.copy(self)
+        if client.runner in (subprocess_runner, dashboard_runner):
+            client.runner = registry_runner  # Fixed classified reads, bounded bytes/time.
+        client._domain, client.permit = None, None
+        domain = client.domain()
+        if not client._server_running:
+            raise HerdrError("control_unavailable", "Native server is not positively running")
+        domain.frozen(client.env, client_protocol=True)
+        return client
+
+    @contextlib.contextmanager
+    def operation(self, values, topology=False):
+        """Explicit bound native client for one complete semantic interval."""
+        requested = permits.resources(values)
+        try:
+            if self.permit is not None:
+                if not self.permit.covers(requested, topology):
+                    raise permits.Unavailable("nested operation exceeds its covering permit")
+                yield self
+                return
+            domain = self.domain()
+            growth = 2 * sum(k == "N" for k, _ in requested) + 3 if topology else 0
+            with permits.Store().acquire([domain], requested, topology=topology, growth=growth) as permit:
+                bound = copy.copy(self)
+                bound.permit = permit
+                yield bound
+        except permits.Held as exc:
+            raise HerdrError("owner_control", str(exc))
+        except permits.Unavailable as exc:
+            raise HerdrError("permit_unavailable", str(exc))
+
+    def agent_resources(self, agent):
+        if not all(isinstance(agent.get(k), str) and agent[k] for k in ("pane_id", "terminal_id", "workspace_id")):
+            raise HerdrError("permit_unavailable", "native target lacks exact pane/terminal/workspace identity")
+        values = [("W", agent["workspace_id"]), ("P", agent["pane_id"]), ("T", agent["terminal_id"])]
+        if agent.get("name"):
+            values.append(("N", agent["name"]))
+        return values
+
+    @contextlib.contextmanager
+    def target_operation(self, target):
+        if self.permit is not None:
+            agent = self._agents.get(target)
+            if agent is None:
+                raise HerdrError("agent_not_found", "no validated agent for this nested target")
+            with self.operation(self.agent_resources(agent)) as bound:
+                yield bound
+            return
+        records = self.agent_list()
+        matches = [a for a in records if isinstance(a, dict) and target in (a.get("name"), a.get("pane_id"))]
+        if len(matches) > 1:
+            raise HerdrError("target_changed", "native target identity is ambiguous")
+        agent = matches[0] if matches else None
+        if agent is None:
+            raise HerdrError("agent_not_found", "no live agent for this permit target")
+        values = self.agent_resources(agent)
+        with self.operation(values) as bound:
+            records = bound.agent_list()
+            matches = [a for a in records if isinstance(a, dict) and target in (a.get("name"), a.get("pane_id"))]
+            current = matches[0] if len(matches) == 1 else {}
+            if any(current.get(k) != agent.get(k) for k in ("name", "pane_id", "terminal_id", "workspace_id")):
+                raise HerdrError("target_changed", "target changed while acquiring its permit")
+            yield bound
+
+    def _mutation_resources(self, argv):
+        """Finite native mutation inventory. No unchecked run/text mutation fallback."""
+        if argv == ["agent", "start", "--help"]:
+            return None, False
+        pair = tuple(argv[:2])
+        if pair in (("agent", "prompt"), ("agent", "send-keys"), ("agent", "focus")):
+            return self.agent_resources(self._known_agent(argv[2])), False
+        if pair == ("agent", "start"):
+            pane = argv[argv.index("--pane") + 1]
+            info = self._known_pane(pane)
+            return [("N", argv[2])] + self.agent_resources(dict(info, name=None)), False
+        if pair == ("agent", "rename"):
+            record = self._known_agent(argv[2])
+            return self.agent_resources(record) + [("N", argv[3])], False
+        if pair == ("workspace", "create"):
+            if self.permit is None or not any(k[0] == "N" for k in self.permit.requests):
+                raise HerdrError("permit_unavailable", "workspace creation needs its reserved seat names")
+            return [], False
+        if pair == ("workspace", "close"):
+            return [("W", argv[2])], True
+        if pair[0] == "pane" and pair[1] in ("rename", "close", "split", "move", "resize", "zoom"):
+            pane = argv[argv.index("--pane") + 1] if "--pane" in argv else argv[2]
+            info = self._known_pane(pane)
+            values = [("P", pane)]
+            if info.get("workspace_id"):
+                values.append(("W", info["workspace_id"]))
+            if info.get("terminal_id"):
+                values.append(("T", info["terminal_id"]))
+            agent = self._agents.get(pane)
+            if agent and agent.get("name") and info.get("agent"):
+                values.append(("N", agent["name"]))
+            topology = pair[1] in ("close", "split", "move", "resize", "zoom")
+            if topology:
+                if not info.get("workspace_id"):
+                    raise HerdrError("permit_unavailable", "topology target has no workspace")
+                if "--workspace" in argv:
+                    values.append(("W", argv[argv.index("--workspace") + 1]))
+                if "--tab" in argv:
+                    values.append(("W", argv[argv.index("--tab") + 1].split(":", 1)[0]))
+                if "--target-pane" in argv:
+                    neighbor = self._known_pane(argv[argv.index("--target-pane") + 1])
+                    values.extend(self.agent_resources(dict(neighbor, name=None)))
+            return values, topology
+        if tuple(argv[:3]) == ("plugin", "pane", "open"):
+            if "--target-pane" in argv:
+                info = self._known_pane(argv[argv.index("--target-pane") + 1])
+                return [("W", info["workspace_id"])], True
+            if "--workspace" in argv:
+                return [("W", argv[argv.index("--workspace") + 1])], True
+            current = self.pane_current()
+            if not current.get("workspace_id"):
+                raise HerdrError("permit_unavailable", "plugin placement needs an exact workspace")
+            return [("W", current["workspace_id"])], True
+        return None, False
+
+    def _known_agent(self, target):
+        record = self._agents.get(target)
+        if not record:
+            raise HerdrError("permit_unavailable", "mutation lacks a validated native agent mapping")
+        return record
+
+    def _known_pane(self, target):
+        record = self._panes.get(target)
+        if not record:
+            raise HerdrError("permit_unavailable", "mutation lacks a validated native pane mapping")
+        return record
 
     # -- transport -------------------------------------------------------
 
@@ -161,6 +331,9 @@ class Herdr:
         argv = [str(a) for a in argv]
         if not argv:
             raise HerdrError("forbidden_command", "refusing to run bare herdr (it attaches the TUI)")
+        prefix = argv[:argv.index("--")] if "--" in argv else argv
+        if argv[0] == "session" or any(a == "--session" or a.startswith("--session=") for a in prefix):
+            raise HerdrError("forbidden_command", "session selection cannot override a frozen coordination endpoint", argv)
         if argv[0] == "terminal":
             raise HerdrError("forbidden_command", "terminal access is only through validated read-only observe", argv)
         if tuple(argv[:2]) in FORBIDDEN and not (keys and tuple(argv[:2]) == SEND_KEYS):
@@ -172,8 +345,36 @@ class Herdr:
                 % " ".join(argv[:2]),
                 argv,
             )
+        category = classify(argv, self.env.get("HERDR_PLUGIN_ID") or "yarrasys.fleet")
+        if category is None:
+            raise HerdrError("forbidden_command", "unsupported or malformed native command", argv)
         try:
-            return self.runner([self.binary] + argv)
+            required, topology = self._mutation_resources(argv)
+            if category == "mutation" and required is None:
+                raise HerdrError("forbidden_command", "mutation has no resource classifier", argv)
+            descriptors, evidence = (), None
+            env = self.env
+            if required is not None:
+                if self.permit is None or not self.permit.covers(required, topology):
+                    raise HerdrError("permit_unavailable", "native mutation has no covering semantic permit", argv)
+                # A creation child has no W until its response; only its reserved
+                # name descriptors exist at submission. Other children inherit
+                # exactly their own target/topology resources, not the whole plan.
+                child_resources = required or [key for key in self.permit.requests if key[0] == "N"]
+                descriptors = self.permit.descriptors(child_resources)
+                evidence = {"resources": [list(r) for r in required], "topology": topology,
+                            "pid": os.getpid(), "thread": self.permit._owner[1].ident, "fds": list(descriptors),
+                            "claims": [[k, v, "exclusive" if self.permit.requests[(k, v)] == permits.fcntl.LOCK_EX else "shared"]
+                                       for k, v in child_resources]}
+                env = self.domain().frozen(self.env)
+            elif self._domain is not None:
+                env = self._domain.frozen(self.env)
+                if self.permit is not None:
+                    descriptors = self.permit.descriptors()
+            with permits.transport(env, descriptors, evidence):
+                return self.runner([self.binary] + argv)
+        except permits.Unavailable as exc:
+            raise HerdrError("permit_unavailable", str(exc), argv)
         except OSError as exc:
             raise HerdrError("herdr_not_found", "cannot run %s: %s" % (self.binary, exc), argv)
 
@@ -192,6 +393,75 @@ class Herdr:
         if isinstance(doc, dict) and isinstance(doc.get("error"), dict):
             raise _error_from(1, "", out, argv)
         result = doc.get("result") if isinstance(doc, dict) else None
+        previous_panes = set(self._panes)
+        previous_workspaces = set(self._workspaces)
+        if isinstance(result, dict):
+            for workspace in result.get("workspaces", []) if isinstance(result.get("workspaces"), list) else []:
+                if isinstance(workspace, dict) and workspace.get("workspace_id"):
+                    self._workspaces.add(workspace["workspace_id"])
+            records = list(result.get("agents") or []) if isinstance(result.get("agents"), list) else []
+            if isinstance(result.get("agents"), list):
+                self._agents = {}
+            if isinstance(result.get("agent"), dict):
+                records.append(result["agent"])
+            for agent in records:
+                if not isinstance(agent, dict):
+                    continue
+                if agent.get("pane_id"):
+                    self._agents[agent["pane_id"]] = agent
+                    self._panes[agent["pane_id"]] = agent
+                if agent.get("name"):
+                    self._agents[agent["name"]] = agent
+            for pane in list(result.get("panes") or []) if isinstance(result.get("panes"), list) else []:
+                if isinstance(pane, dict) and pane.get("pane_id"):
+                    self._panes[pane["pane_id"]] = pane
+            if isinstance(result.get("pane"), dict) and result["pane"].get("pane_id"):
+                self._panes[result["pane"]["pane_id"]] = result["pane"]
+        if self.permit is not None and isinstance(result, dict):
+            pair = tuple(argv[:2])
+            panes = []
+            if pair == ("workspace", "create"):
+                workspace = (result.get("workspace") or {}).get("workspace_id")
+                if not workspace:
+                    raise HerdrError("bad_output", "created workspace has no native identity")
+                if workspace in previous_workspaces:
+                    raise HerdrError("bad_output", "workspace creation returned an existing identity")
+                self.permit.created_workspace(workspace)
+                self._workspaces.add(workspace)
+                panes.append(result.get("root_pane") or {})
+            elif pair == ("pane", "split"):
+                panes.append(result.get("pane") or {})
+            elif pair == ("pane", "move"):
+                panes.append((result.get("move_result") or {}).get("pane") or {})
+            elif tuple(argv[:3]) == ("plugin", "pane", "open"):
+                panes.append((result.get("plugin_pane") or {}).get("pane") or {})
+            for pane in panes:
+                if not pane.get("pane_id") or not pane.get("workspace_id") or not pane.get("terminal_id"):
+                    raise HerdrError("bad_output", "created/moved pane lacks native identity")
+                if pane["pane_id"] in previous_panes and not (pair == ("pane", "move") and pane["pane_id"] == argv[2]):
+                    raise HerdrError("bad_output", "creation/move returned an unrelated existing pane")
+                expected = None
+                if pair == ("workspace", "create"):
+                    expected = workspace
+                elif pair == ("pane", "split"):
+                    expected = self._known_pane(argv[2]).get("workspace_id")
+                elif "--workspace" in argv:
+                    expected = argv[argv.index("--workspace") + 1]
+                elif "--tab" in argv:
+                    expected = argv[argv.index("--tab") + 1].split(":", 1)[0]
+                elif "--target-pane" in argv:
+                    expected = self._known_pane(argv[argv.index("--target-pane") + 1]).get("workspace_id")
+                if expected is not None and pane["workspace_id"] != expected:
+                    raise HerdrError("bad_output", "creation/move returned a different workspace")
+                self.permit.derive(pane["workspace_id"], [("P", pane["pane_id"]), ("T", pane["terminal_id"])])
+                if pair == ("pane", "move"):
+                    carried = self._agents.pop(argv[2], None)
+                    if carried is not None:
+                        current_agent = dict(carried, **{k: v for k, v in pane.items() if k != "name"})
+                        self._agents[pane["pane_id"]] = current_agent
+                        if current_agent.get("name"):
+                            self._agents[current_agent["name"]] = current_agent
+                self._panes[pane["pane_id"]] = pane
         return result if isinstance(result, dict) else {}
 
     def text(self, *argv: str) -> str:
@@ -204,8 +474,9 @@ class Herdr:
     # -- discovery -------------------------------------------------------
 
     def bounded_dashboard_client(self):
-        return Herdr(self.binary, dashboard_runner if self.runner is subprocess_runner else self.runner,
-                     self.stream_runner)
+        client = copy.copy(self)
+        client.runner = dashboard_runner if self.runner is subprocess_runner else self.runner
+        return client
 
     def terminal_observe(self, target: str, cols: int, rows: int):
         """The sole streaming path; fixed observe argv and closed stdin (41.6)."""
@@ -215,11 +486,38 @@ class Herdr:
             raise HerdrError("forbidden_command", "invalid observer target or viewport")
         argv = [self.binary, "terminal", "session", "observe", target, "--cols", str(cols), "--rows", str(rows)]
         try:
+            env = self.domain().frozen(self.env, client_protocol=True)
             process = self.stream_runner(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL, bufsize=0)
+                                         stderr=subprocess.DEVNULL, bufsize=0, env=env)
+        except permits.Unavailable as exc:
+            raise HerdrError("observe_unavailable", "Watch unavailable: %s" % exc) from exc
         except OSError:
             raise HerdrError("observe_unavailable", "Watch unavailable: could not start the observer")
         return ObserveStream(process)
+
+    def terminal_control(self, target, cols, rows, permit):
+        """Fixed section-45 adapter; no generic runner or automated key path."""
+        try:
+            if (not isinstance(permit, permits.ControlPermit) or not isinstance(target, str)
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", target)
+                    or type(cols) is not int or type(rows) is not int
+                    or not 20 <= cols <= 300 or not 5 <= rows <= 120):
+                raise permits.Unavailable("invalid control permit/target/viewport")
+            domain = self.domain()
+            descriptors = permit.control_descriptors(domain, target)
+            env = domain.frozen(self.env, client_protocol=True)
+            evidence = {"human_control": True, "fds": list(descriptors),
+                        "claims": [[k, v, "shared" if k == "W" else "exclusive"] for k, v in permit.requests]}
+            stream = ControlStream(None, permit, domain, target)  # Allocate owner before spawn.
+            with permits.transport(env, descriptors, evidence):
+                stream.process = self.stream_runner([self.binary, "terminal", "session", "control", target,
+                                                     "--cols", str(cols), "--rows", str(rows)],
+                                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                                    bufsize=0, env=env, pass_fds=descriptors, close_fds=True)
+            stream.setup()
+            return stream
+        except (permits.Unavailable, OSError) as exc:
+            raise HerdrError("control_unavailable", "Controller unavailable; no input enabled") from exc
 
     def version(self) -> Optional[Tuple[int, int, int]]:
         return parse_version(self.text("--version"))
@@ -493,6 +791,110 @@ class Herdr:
         is the snapshot afterwards). herdr adds ``amount`` to that split's first-child
         ratio for right and down, subtracts it for left and up (design 19.4)."""
         return dict(self.run(*pane_resize_argv(pane_id, direction, amount)).get("resize") or {})
+
+
+class ControlStream:
+    """Bounded nonblocking owner writer; output reader has no permit authority."""
+    def __init__(self, process, permit, domain, terminal):
+        self.process, self.permit, self.domain, self.terminal = process, permit, domain, terminal
+        self.closing = False
+        self.setup_failed = False
+        if process is not None: self.setup()
+
+    def setup(self):
+        try:
+            os.set_blocking(self.process.stdin.fileno(), False)
+            os.set_blocking(self.process.stdout.fileno(), False)
+        except Exception:
+            # Ownership was established before either fallible setup operation.
+            # The worker still receives this object and must reap the exact child.
+            self.setup_failed = True
+
+    def input(self, text, stop, eligible=None):
+        if not isinstance(text, str) or not 0 < len(text.encode("utf-8")) <= 8192:
+            raise HerdrError("control_invalid", "Input exceeds the 8 KiB limit or is empty")
+        self._write({"type": "terminal.input", "text": text}, stop, eligible)
+
+    def resize(self, cols, rows, stop, eligible=None):
+        if type(cols) is not int or type(rows) is not int or not 20 <= cols <= 300 or not 5 <= rows <= 120:
+            raise HerdrError("control_invalid", "Invalid viewport")
+        self._write({"type": "terminal.resize", "cols": cols, "rows": rows}, stop, eligible)
+
+    def _write(self, command, stop, eligible):
+        self.permit.control_descriptors(self.domain, self.terminal)
+        data = (json.dumps(command, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+        if len(data) > 65536:
+            raise HerdrError("control_invalid", "Controller payload exceeds limit")
+        end, offset = time.monotonic() + 0.5, 0
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(self.process.stdin, selectors.EVENT_WRITE)
+            while offset < len(data):
+                if self.setup_failed or self.closing or stop.is_set() or time.monotonic() >= end or self.process.poll() is not None:
+                    raise HerdrError("control_uncertain", "Submission uncertain; control revoked, never replay")
+                if selector.select(0.02):
+                    if stop.is_set() or (eligible is not None and not eligible()) or time.monotonic() >= end:
+                        raise HerdrError("control_uncertain", "Submission deadline passed; revoked, never replay")
+                    try:
+                        written = os.write(self.process.stdin.fileno(), data[offset:])
+                    except BlockingIOError:
+                        continue
+                    if written <= 0:
+                        raise OSError("closed controller input")
+                    offset += written
+        except OSError as exc:
+            raise HerdrError("control_uncertain", "Submission uncertain; control revoked, never replay") from exc
+        finally:
+            selector.close()
+
+    def lines(self, stop):
+        selector, pending = selectors.DefaultSelector(), b""
+        try:
+            selector.register(self.process.stdout, selectors.EVENT_READ)
+            while not stop.is_set():
+                if not selector.select(0.05):
+                    continue
+                try:
+                    data = os.read(self.process.stdout.fileno(), 8192)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    return
+                pending += data
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    if len(line) > 262144:
+                        raise HerdrError("control_unavailable", "Controller output exceeds frame limit")
+                    yield line
+                if len(pending) > 262144:
+                    raise HerdrError("control_unavailable", "Controller output exceeds frame limit")
+        finally:
+            selector.close()
+
+    def teardown(self):
+        """Creator only. EOF/detach, then bounded exact-child terminate/kill/reap.
+
+        False retains the parent's permit; a timeout is never proof of unlock.
+        The caller stops/joins the independent reader before closing stdout.
+        """
+        self.permit.check()
+        self.closing = True
+        try:
+            if self.process.stdin and not self.process.stdin.closed:
+                self.process.stdin.close()
+            if self.process.poll() is None:
+                try:
+                    self.process.wait(timeout=0.15)
+                except subprocess.TimeoutExpired:
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=0.25)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait(timeout=0.5)
+            return self.process.poll() is not None
+        except (OSError, subprocess.TimeoutExpired):
+            return False
 
 
 class ObserveStream:

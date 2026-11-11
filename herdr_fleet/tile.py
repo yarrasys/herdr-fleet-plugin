@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from herdr_fleet import labels, watchpane
+from herdr_fleet.coordination import semantic
 from herdr_fleet.context import Ctx, OpError, Report, UsageError
 from herdr_fleet.fleetfile import Seat
 from herdr_fleet.herdr import HerdrError, describe, pane_move_argv, pane_park_argv, render_cmd
@@ -102,10 +103,10 @@ def plan_moves(ctx: Ctx, seats: List[Seat], band: bool = False, strip: bool = Fa
     return moves
 
 
+@semantic(topology=True)
 def op_tile(ctx: Ctx) -> Report:
     report = Report("tile")
     _tile(ctx, report)
-    labels.apply(ctx, None, report)  # design 22.1; never on a dry run
     return report
 
 

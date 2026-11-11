@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import support
 from herdr_fleet.fleetfile import Fleet, Seat
@@ -211,8 +212,9 @@ class Client(unittest.TestCase):
         self.assertEqual(h.kinds(), ["pi", "claude"])
 
     def test_start_argv_and_split_argv(self):
-        h = self.herdr(out='{"result": {"pane": {"pane_id": "w1:p9"}}}')
-        self.assertEqual(h.pane_split("w1:p1", "down", 0.3, "/r", {"B": "2", "A": "1"}), "w1:p9")
+        h = self.herdr(out='{"result": {"pane": {"pane_id": "w1:p9", "workspace_id": "w1", "terminal_id": "term_9"}}}')
+        with support.client_permit_fixture(h, pane="w1:p1", topology=True) as native:
+            self.assertEqual(native.pane_split("w1:p1", "down", 0.3, "/r", {"B": "2", "A": "1"}), "w1:p9")
         self.assertEqual(self.seen[0][1:], ["pane", "split", "w1:p1", "--direction", "down", "--ratio", "0.3",
                                             "--cwd", "/r", "--env", "A=1", "--env", "B=2", "--no-focus"])
 
@@ -255,15 +257,20 @@ class FakeMatchesLive(unittest.TestCase):
             sup.fake_herdr.add_workspace(world, "w2", "y", tmp)
             with open(world_path, "w") as handle:
                 json.dump(world, handle)
-            self.assertEqual(h.pane_move_to_tab("w1:p1", "w1:t1", "down", 0.5, "w1:p2"), "w1:p1")
-            self.assertEqual(h.pane_move_new_tab("w1:p1", "w1", "park"), "w1:p1")
-            self.assertNotEqual(h.pane_get("w1:p1")["tab_id"], "w1:t1")
-            self.assertEqual(h.pane_move_to_tab("w1:p1", "w1:t1", "down", 0.5, "w1:p2"), "w1:p1")
-            self.assertEqual(h.pane_get("w1:p1")["tab_id"], "w1:t1")
-            moved = h.pane_move_to_tab("w1:p1", "w2:t1", "right", 0.5)
-            self.assertTrue(moved.startswith("w2:p"))
-            self.assertEqual(h.agent_get(moved)["name"], "dev")
-            self.assertEqual(h.tab_list("w2")[0]["tab_id"], "w2:t1")
+            h.configure({"HERDR_SOCKET_PATH": os.path.join(tmp, "api.sock")})
+            records = h.pane_list("w1") + h.pane_list("w2")
+            values = [("N", "dev")] + [(kind, p[field]) for p in records for kind, field in (("W", "workspace_id"), ("P", "pane_id"), ("T", "terminal_id"))]
+            with mock.patch("herdr_fleet.permits.default_root", return_value=os.path.join(tmp, "locks")):
+                with h.operation(values, topology=True) as h:
+                    self.assertEqual(h.pane_move_to_tab("w1:p1", "w1:t1", "down", 0.5, "w1:p2"), "w1:p1")
+                    self.assertEqual(h.pane_move_new_tab("w1:p1", "w1", "park"), "w1:p1")
+                    self.assertNotEqual(h.pane_get("w1:p1")["tab_id"], "w1:t1")
+                    self.assertEqual(h.pane_move_to_tab("w1:p1", "w1:t1", "down", 0.5, "w1:p2"), "w1:p1")
+                    self.assertEqual(h.pane_get("w1:p1")["tab_id"], "w1:t1")
+                    moved = h.pane_move_to_tab("w1:p1", "w2:t1", "right", 0.5)
+                    self.assertTrue(moved.startswith("w2:p"))
+                    self.assertEqual(h.agent_get(moved)["name"], "dev")
+                    self.assertEqual(h.tab_list("w2")[0]["tab_id"], "w2:t1")
         finally:
             shutil.rmtree(tmp)
 

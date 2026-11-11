@@ -74,7 +74,8 @@ def apply(ctx: Ctx, live: Optional[Dict[str, Dict]] = None, report: Optional[Rep
         try:
             if ctx.herdr.pane_get(pane).get("label") == name:
                 continue
-            ctx.herdr.pane_rename(pane, name)
+            with ctx.herdr.target_operation(seat.name) as native:
+                native.pane_rename(pane, name)
         except HerdrError as exc:
             _warn(ctx, report, "could not name %s: %s" % (pane, describe(exc)))
             continue
@@ -94,7 +95,9 @@ def clear(ctx: Ctx, pane: str, report: Report) -> bool:
         info = ctx.herdr.pane_get(pane)
         if not info.get("label") or info.get("agent"):
             return False
-        ctx.herdr.pane_clear_name(pane)
+        values = [("P", pane), ("W", info["workspace_id"])] + ([("T", info["terminal_id"])] if info.get("terminal_id") else [])
+        with ctx.herdr.operation(values) as native:
+            native.pane_clear_name(pane)
     except HerdrError as exc:
         if "not_found" in exc.code:  # closed meanwhile: nothing left to name
             return False

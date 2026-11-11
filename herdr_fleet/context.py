@@ -172,6 +172,8 @@ class Ctx:
                  stderr: TextIO, cwd: str, file: Optional[str] = None, notify: bool = False,
                  dry_run: bool = False):
         self.herdr = herdr
+        if self.herdr is not None:
+            self.herdr.configure(env)
         self.env = env
         self.clock = clock
         self.stdout = stdout

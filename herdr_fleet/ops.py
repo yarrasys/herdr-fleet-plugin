@@ -21,6 +21,7 @@ import os
 import shlex
 from typing import Callable, Dict, List, Optional, Sequence, Set, TextIO, Tuple
 
+from herdr_fleet.coordination import semantic
 from herdr_fleet import PLUGIN_ID, context_size, inbox, labels, limits, presence, watchpane
 from herdr_fleet import messages as messages_mod
 from herdr_fleet import state as state_mod
@@ -93,6 +94,7 @@ def drop_inboxes(ctx: Ctx, seats: Sequence[Seat], report: Report) -> None:
 # -- up ------------------------------------------------------------------------------
 
 
+@semantic(topology=True)
 def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: bool = False,
           note: Optional[str] = None, join: bool = False, no_watch: bool = False) -> Report:
     """Design 4.1, 14, 19 and 26: classify every seat, find or create the workspace,
@@ -149,7 +151,6 @@ def op_up(ctx: Ctx, names: Sequence[str], me: Optional[str] = None, no_kickoff: 
         strip.open_after(live, placed, target, up)
     ctx.save()
     now = live_by_name(ctx.herdr) if check else None
-    labels.apply(ctx, now, report)  # design 22.1: every live seat, adopted and --me seats included
     if now is not None:
         band_check(ctx, now, target, report)  # design 26.2: the report ends with the tile hint
     return report
@@ -282,9 +283,12 @@ def settle(ctx: Ctx, seat: Seat, agent: Dict, wait_ms: Optional[int], report: Re
         if ctx.dry_run:
             report.add(seat.name, "plan", "wait up to %d ms for it to settle, then re-check" % wait_ms)
             return agent
-        try:
-            ctx.herdr.agent_wait(seat.name, WAIT_UNTIL, wait_ms)
-        except HerdrError as exc:
+        waited = getattr(ctx, "preliminary_waits", {})
+        if seat.name not in waited:
+            report.add(seat.name, "refused", "became working before the final eligibility check; retry --wait", "partial")
+            return None
+        exc = waited[seat.name]
+        if exc is not None:
             report.add(seat.name, "refused",
                        "still working after --wait %d ms (%s)" % (wait_ms, describe(exc)), "partial")
             return None
@@ -397,6 +401,7 @@ def _caller_refusal(ctx: Ctx, name: str, agent: Optional[Dict], known: str = OWN
     return known
 
 
+@semantic(topology=False)
 def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_ms: Optional[int] = None,
                reason: str = "restart", drop_inbox: bool = False, name_panes: bool = True) -> Report:
     """Design 4.3. ``name_panes=False`` leaves the pane names to the caller (``swap``
@@ -442,8 +447,6 @@ def op_restart(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, wait_
     if to_brief or to_queue:
         send_kickoffs(ctx, to_brief, reason, note, label_for(ctx, target), report, blocked=to_queue, queue=True)
     ctx.save()
-    if name_panes:
-        labels.apply(ctx, None, report)
     return report
 
 
@@ -456,6 +459,7 @@ def failover_of(ctx: Ctx, seat: Seat) -> Optional[Dict]:
     return None
 
 
+@semantic(topology=False)
 def op_swap(ctx: Ctx, names: Sequence[str], note: Optional[str] = None,
             wait_ms: Optional[int] = None, fallback: bool = False) -> Report:
     """Restart exactly the seats that drifted from the file; start absent ones.
@@ -513,7 +517,6 @@ def op_swap(ctx: Ctx, names: Sequence[str], note: Optional[str] = None,
                 _warn_still_limited(ctx, seat, report)
             else:
                 seat.use(str(returning[name].get("to")))  # it did not start: still failed over
-    labels.apply(ctx, None, report)
     return report
 
 
@@ -621,7 +624,6 @@ def _swap_fallback(ctx: Ctx, names: Sequence[str], note: Optional[str], wait_ms:
             plans.append((seat,) + plan)
     for seat, old, choices, record, allowance in plans:
         _fallback_one(ctx, seat, old, choices, record, note, wait_ms, report, allowance)
-    labels.apply(ctx, None, report)
     return report
 
 
@@ -756,6 +758,7 @@ def _reset_words(agents: Dict[str, Dict], kind: str) -> str:
 # -- kickoff and down --------------------------------------------------------------
 
 
+@semantic(topology=False)
 def op_kickoff(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, drop_inbox: bool = False) -> Report:
     """Resend kickoffs. safe_prompt refuses blocked, unknown, working and absent agents."""
     report = Report("kickoff")
@@ -764,10 +767,10 @@ def op_kickoff(ctx: Ctx, names: Sequence[str], note: Optional[str] = None, drop_
     if drop_inbox:
         drop_inboxes(ctx, seats, report)
     send_kickoffs(ctx, seats, "kickoff", note, label_for(ctx, None), report)
-    labels.apply(ctx, None, report)
     return report
 
 
+@semantic(topology=False)
 def op_down(ctx: Ctx, names: Sequence[str], wait_ms: Optional[int] = None, close_panes: bool = False,
             close_workspace: bool = False) -> Report:
     report = Report("down")
@@ -889,7 +892,8 @@ def op_go(ctx: Ctx, name: str) -> Tuple[int, str]:
         if "not_found" in exc.code:
             return EXIT_PARTIAL, "%s is absent; nothing to focus" % name
         raise
-    ctx.herdr.agent_focus(target.herdr)
+    with ctx.herdr.target_operation(target.herdr) as native:
+        native.agent_focus(target.herdr)
     return EXIT_OK, "focused %s (%s, %s)" % (name, agent.get("pane_id") or target.herdr,
                                              agent.get("agent_status") or "unknown")
 
@@ -934,6 +938,7 @@ def op_peek(ctx: Ctx, name: str, lines: int = PEEK_LINES, source: Optional[str] 
     return EXIT_OK, text.rstrip("\n"), note
 
 
+@semantic(topology=False)
 def op_interrupt(ctx: Ctx, name: str, wait_ms: Optional[int] = None, as_name: Optional[str] = None) -> Tuple[int, str]:
     """Design 23.7: press the kind's interrupt keys (``seats.INTERRUPT_KEYS``, else
     ``[interrupt]`` in the fleet file, then the plugin config) in a seat of this fleet that
@@ -1048,6 +1053,7 @@ def _clear_input(ctx: Ctx, name: str, kind: str) -> Optional[str]:
 UI_PLACEMENT = {"watch": "split"}  # design 18.6: the watcher opens as a split; the others as the manifest says
 
 
+@semantic(topology=True)
 def op_ui(ctx: Ctx, entrypoint: str) -> None:
     """Open a plugin pane with its cwd at the repo root so it can find the fleet file."""
     repo = ctx.fleet.repo

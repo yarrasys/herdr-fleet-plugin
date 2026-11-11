@@ -618,6 +618,46 @@ def fleet_names(path: Optional[str]) -> Dict[str, str]:
 LOCK = threading.Lock()  # one call at a time reads, changes and writes the world
 
 
+def permit_need(world, args):
+    """Independent resource inventory, from the fake server BEFORE the effect."""
+    pair = tuple(args[:2])
+    agent_op = pair in (("agent", "prompt"), ("agent", "send-keys"), ("agent", "focus"), ("agent", "rename"), ("agent", "start"))
+    pane_op = pair[0] == "pane" and pair[1] in ("rename", "close", "split", "move", "resize", "zoom")
+    plugin = args[:3] == ["plugin", "pane", "open"]
+    if not (agent_op or pane_op or plugin or pair in (("workspace", "create"), ("workspace", "close"))):
+        return None
+    if pair == ("workspace", "create"):
+        return {"keys": [], "creation": True, "topology": False}
+    if pair == ("workspace", "close"):
+        return {"keys": [["W", args[2]]], "topology": True}
+    def option(name):
+        return args[args.index(name) + 1] if name in args else None
+    target = option("--pane") or (option("--target-pane") if plugin else None)
+    if target is None and not plugin:
+        target = args[2]
+    pane_id = next((pid for pid, pane in world["panes"].items()
+                    if target in (pid, (pane.get("agent") or {}).get("name"))), None)
+    pane = world["panes"].get(pane_id, {})
+    keys = []
+    topology = plugin or (pane_op and pair[1] != "rename")
+    if plugin:
+        workspace = option("--workspace") or pane.get("workspace_id") or (world["panes"].get(world.get("caller"), {}) or {}).get("workspace_id")
+        if workspace: keys.append(["W", workspace])
+    elif pane_id:
+        keys.extend([["W", pane["workspace_id"]], ["P", pane_id], ["T", "term_" + pane_id]])
+        old_name = (pane.get("agent") or {}).get("name")
+        if old_name and pair != ("agent", "start"): keys.append(["N", old_name])
+    if pair == ("agent", "start"): keys.append(["N", args[2]])
+    if pair == ("agent", "rename"): keys.append(["N", args[3]])
+    if pair == ("pane", "move"):
+        workspace = option("--workspace") or ((option("--tab") or "").split(":")[0])
+        if workspace: keys.append(["W", workspace])
+        other = option("--target-pane")
+        if other and other in world["panes"]:
+            keys.extend([["W", world["panes"][other]["workspace_id"]], ["P", other], ["T", "term_" + other]])
+    return {"keys": keys, "topology": topology}
+
+
 class Fake:
     """Callable runner: ``Fake(world_path, log_path)([binary, *argv])``."""
 
@@ -638,9 +678,26 @@ class Fake:
         with open(self.world_path, "r", encoding="utf-8") as handle:
             world = json.load(handle)
         info: Dict = {}
+        from herdr_fleet import permits
+        transport = permits.native_transport()
+        if transport and transport[2] is not None:
+            evidence = dict(transport[2])
+            evidence["live_fds"] = all(os.fstat(fd).st_nlink == 1 for fd in transport[1])
+            info["permit"] = evidence
         if self.caller:
             world["caller"] = self.caller
-        code, out, err = Sim(world, info, self.inbox, self.fleet).handle(args)
+        required = permit_need(world, args)
+        if required is not None:
+            info["permit_required"] = required
+        if args == ["status", "server", "--json"]:
+            env = transport[0] if transport else os.environ
+            socket = world.get("status_socket")
+            if socket is None:
+                candidates = permits.endpoints(env)
+                socket = next((d.api for d in candidates if "/herdr/" in d.api), candidates[0].api)
+            code, out, err = 0, json.dumps({"status": "running", "running": True, "socket": socket}), ""
+        else:
+            code, out, err = Sim(world, info, self.inbox, self.fleet).handle(args)
         with open(self.world_path, "w", encoding="utf-8") as handle:
             json.dump(world, handle)
         with open(self.log_path, "a", encoding="utf-8") as handle:
@@ -737,6 +794,8 @@ class Sim:
         rec = self._pane_record(pid)
         rec.pop("scroll", None)
         agent = self.w["panes"][pid]["agent"]
+        if agent.get("launch_pending", False) is not False:
+            rec["launch_pending"] = agent["launch_pending"]  # Native serde omits its default false.
         if agent.get("name"):
             rec["name"] = agent["name"]
         if "agent_session" in agent:  # herdr 0.9.5; absent unless a test set it

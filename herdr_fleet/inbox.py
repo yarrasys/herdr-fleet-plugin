@@ -36,6 +36,7 @@ import datetime
 import fcntl
 import json
 import os
+import stat
 import re
 import secrets
 import tempfile
@@ -395,7 +396,8 @@ def load_headers(path: str, box: str) -> Message:
     return message
 
 
-def read_box(repo: str, name: str, box: str = NEW, warnings: Optional[List[str]] = None) -> List[Message]:
+def read_box(repo: str, name: str, box: str = NEW, warnings: Optional[List[str]] = None,
+             headers_only: bool = False) -> List[Message]:
     """The messages of one box: ``new/`` in delivery order (urgent first, then oldest
     first), ``cur/`` oldest first. Unreadable files are skipped with a warning."""
     folder = box_dir(repo, name, box)
@@ -403,7 +405,7 @@ def read_box(repo: str, name: str, box: str = NEW, warnings: Optional[List[str]]
     for filename in _files(folder):
         path = os.path.join(folder, filename)
         try:
-            found.append(load(path, box))
+            found.append(load_headers(path, box) if headers_only else load(path, box))
         except (OSError, ValueError) as exc:
             if warnings is not None:
                 warnings.append("%s: unreadable message skipped (%s)" % (path, exc))
@@ -463,6 +465,42 @@ def try_locked(repo: str, name: str) -> Iterator[bool]:
         os.close(fd)
 
 
+def open_mailbox_lock(repo: str, name: str, prepare: bool = False) -> int:
+    """Checked stable lock for an explicit routed acquisition, never a sweep.
+
+    Preparation creates only empty validated infrastructure. It neither reserves
+    an id nor reads/moves a message. The caller closes the returned descriptor.
+    """
+    box_dir(repo, name, NEW)  # validate the name before opening any path
+    directory = os.open(os.path.join(repo, ".herdr"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in (INBOX, name):
+            if prepare:
+                try: os.mkdir(part, 0o755, dir_fd=directory)
+                except FileExistsError: pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        if prepare:
+            for part in (NEW, CUR):
+                try: os.mkdir(part, 0o755, dir_fd=directory)
+                except FileExistsError: pass
+                check = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(check)
+        fd = os.open(LOCK_NAME, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_CREAT if prepare else 0),
+                     0o644, dir_fd=directory)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+                raise OSError("mailbox lock is redirected or unsafe")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+    finally:
+        os.close(directory)
+
+
 @contextlib.contextmanager
 def locked(repo: str, name: str) -> Iterator[None]:
     """Hold the mailbox's lock while its queued files are read, prompted and moved."""
@@ -480,7 +518,7 @@ def locked(repo: str, name: str) -> Iterator[None]:
             os.close(fd)
 
 
-def resolve(repo: str, ref: str, mailbox: Optional[str] = None) -> Message:
+def resolve(repo: str, ref: str, mailbox: Optional[str] = None, headers_only: bool = False) -> Message:
     """The message a command-line id names: a full id, or its hex part with or without
     ``#``. Unknown and ambiguous references are usage errors (the latter lists the ids)."""
     ref = ref.strip()
@@ -495,7 +533,7 @@ def resolve(repo: str, ref: str, mailbox: Optional[str] = None) -> Message:
 
     def scan() -> List[Message]:
         candidates = (all_messages(repo) if mailbox is None else
-                      [m for box in (NEW, CUR) for m in read_box(repo, mailbox, box)])
+                      [m for box in (NEW, CUR) for m in read_box(repo, mailbox, box, headers_only=headers_only)])
         return [m for m in candidates if match(m)]
 
     matches = scan()

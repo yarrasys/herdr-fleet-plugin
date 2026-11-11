@@ -18,17 +18,22 @@ from herdr_fleet.dashboard_data import Registry, Observer, DataError
 from herdr_fleet.dashboard_actions import OwnerActions, Conflict
 from herdr_fleet.dashboard_terminal import Watches
 from herdr_fleet.dashboard_demo import Demo
+from herdr_fleet.dashboard_control import Controls
 
 ASSET_ROOT = os.path.join(os.path.dirname(__file__), "dashboard_static")
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           "/conversation-view.js": ("conversation-view.js", "text/javascript; charset=utf-8"),
           "/attention-view.js": ("attention-view.js", "text/javascript; charset=utf-8"),
+          "/terminal-control.js": ("terminal-control.js", "text/javascript; charset=utf-8"),
+          "/terminal-renderer.js": ("terminal-renderer.js", "text/javascript; charset=utf-8"),
           "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
           "/vendor/xterm.js": ("vendor/xterm.js", "text/javascript; charset=utf-8"),
           "/vendor/addon-fit.js": ("vendor/addon-fit.js", "text/javascript; charset=utf-8"),
           "/vendor/xterm.css": ("vendor/xterm.css", "text/css; charset=utf-8")}
 MAX_BODY = 49152
+CONTROL_ROUTES = {"/api/control/" + name for name in
+                  ("prepare", "acquire", "stream", "input", "resize", "heartbeat", "release")}
 
 
 class Authority:
@@ -81,6 +86,8 @@ class DashboardServer(ThreadingHTTPServer):
             raise ValueError("dashboard binds only 127.0.0.1 on a valid port")
         self.observer, self.watches, self.actions, self.demo = observer, watches, actions, demo
         self.authority = Authority()
+        self.controls = (Controls(watches.herdr, watches.registry, self.authority)
+                         if not demo and actions is not None and hasattr(watches, "herdr") else None)
         self.stop_event = threading.Event()
         self.connections = threading.BoundedSemaphore(24)
         self.worker = None
@@ -120,6 +127,8 @@ class DashboardServer(ThreadingHTTPServer):
 
     def server_close(self):
         self.stop_event.set()
+        if self.controls is not None:
+            self.controls.close()
         self.watches.close()
         if self.worker:
             self.worker.join()
@@ -183,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
             raise PermissionError("Exactly one owner session and anti-forgery header are required")
         return self.server.authority.authenticate(self.headers.get("Cookie"), self.headers.get("X-Fleet-CSRF"))
 
-    def body(self):
+    def body(self, maximum=MAX_BODY, strict=False):
         if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) != 1:
             raise DataError("A bounded Content-Length is required")
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
@@ -192,13 +201,19 @@ class Handler(BaseHTTPRequestHandler):
             size = int(self.headers["Content-Length"])
         except (ValueError, TypeError):
             raise DataError("Invalid Content-Length")
-        if not 0 < size <= MAX_BODY:
-            raise DataError("Request body exceeds 49152 bytes or is empty")
+        if not 0 < size <= maximum:
+            raise DataError("Request body exceeds %d bytes or is empty" % maximum)
         raw = self.rfile.read(size)
         if len(raw) != size:
             raise DataError("Incomplete request body")
         try:
-            value = json.loads(raw)
+            def pairs(items):
+                result = {}
+                for key, value in items:
+                    if key in result: raise ValueError("duplicate JSON field")
+                    result[key] = value
+                return result
+            value = json.loads(raw, object_pairs_hook=pairs) if strict else json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             raise DataError("Malformed JSON")
         if not isinstance(value, dict):
@@ -276,12 +291,31 @@ class Handler(BaseHTTPRequestHandler):
                              cookie="%s=%s; HttpOnly; SameSite=Strict; Path=/" % (self.server.authority.cookie_name, token))
                 return
             session = self.authenticate(mutation=True)
-            body = self.body()
+            control = path.path in CONTROL_ROUTES
+            body = self.body(65536 if path.path == "/api/control/input" else MAX_BODY, strict=control)
             if path.path == "/api/action":
                 if self.server.demo or self.server.actions is None:
                     self.respond(403, {"error": "Demo has no live owner actions"})
                     return
                 self.respond(200, self.server.actions.perform(body))
+            elif control:
+                if self.server.controls is None or self.server.demo:
+                    self.respond(403, {"error": "Demo has no native Control"})
+                    return
+                if path.fragment or path.scheme or path.netloc:
+                    raise DataError("Control accepts no URL authority")
+                action = path.path.rsplit("/", 1)[1]
+                if action == "stream":
+                    self.server.controls.schema(action, body)
+                    self.stream(body, session, control=True)
+                else:
+                    result = self.server.controls.perform(action, body, session)
+                    try:
+                        self.respond(200, result)
+                    except OSError:
+                        self.close_connection = True
+                        if action in ("input", "resize"):
+                            self.server.controls.uncertain(body, session)
             elif path.path == "/api/watch":
                 if set(body) != {"fleet", "seat", "view", "cols", "rows"}:
                     raise DataError("Watch accepts only a registered seat view and viewport")
@@ -305,7 +339,7 @@ class Handler(BaseHTTPRequestHandler):
         except (DataError, ValueError, OSError):
             self.respond(400, {"error": "Action invalid or target changed; refresh before a deliberate new attempt"})
 
-    def stream(self, body, session):
+    def stream(self, body, session, control=False):
         self.send_response(200)
         self.headers_safe()
         self.send_header("Content-Type", "application/x-ndjson")
@@ -326,8 +360,9 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 return True
             return False
-        iterator = self.server.watches.frames(body["fleet"], body["seat"], body["view"],
-                                              body["cols"], body["rows"], disconnected)
+        iterator = (self.server.controls.frames(body, session, disconnected) if control else
+                    self.server.watches.frames(body["fleet"], body["seat"], body["view"],
+                                              body["cols"], body["rows"], disconnected))
         try:
             for frame in iterator:
                 self.wfile.write(json.dumps(frame).encode() + b"\n")
@@ -336,7 +371,9 @@ class Handler(BaseHTTPRequestHandler):
                     break
         except (DataError, ValueError):
             try:
-                self.wfile.write(b'{"type":"error","message":"Watch target changed or frame invalid; refresh and reconnect"}\n')
+                message = ("Control ended; input is disabled. Confirm a new attempt explicitly." if control else
+                           "Watch target changed or frame invalid; refresh and reconnect")
+                self.wfile.write(json.dumps({"type": "error", "message": message}).encode() + b"\n")
                 self.wfile.flush()
             except OSError:
                 pass

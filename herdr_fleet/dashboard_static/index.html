@@ -11,6 +11,8 @@
 <script defer src="/vendor/addon-fit.js"></script>
 <script defer src="/conversation-view.js"></script>
 <script defer src="/attention-view.js"></script>
+<script defer src="/terminal-renderer.js"></script>
+<script defer src="/terminal-control.js"></script>
 <script defer src="/app.js"></script>
 </head>
 <body>
@@ -30,7 +32,7 @@
   <main class="pane" id="main">
     <p id="persistent-mode" class="persistent-mode">Owner session required</p>
     <header class="pane-head">
-      <div><p class="eyebrow">Fleet observation · Watch only</p><h2 id="fleet-title">Connect your console</h2></div>
+      <div><p class="eyebrow">Fleet observation · explicit owner Control</p><h2 id="fleet-title">Connect your console</h2></div>
       <div class="toolbar"><button id="motion" role="switch" aria-checked="true">Motion <span id="motion-state" class="switch-state" aria-hidden="true">on</span></button><div class="view-wrap"><button id="view-settings" aria-controls="view-prefs" aria-expanded="false">View</button><section id="view-prefs" class="view-pop" aria-label="View preferences" hidden><h4>View preferences</h4><p>Fleet rail, Motion, terminal height and Desk filters are remembered using their existing controls. Terminal expansion and the active tab stay temporary.</p><button id="reset-view-preferences">Reset view preferences</button><p id="view-pref-status" role="status"></p></section></div><button id="demo-answer" class="attention" hidden>Answer Demo question</button><button id="replay" hidden>Replay Demo</button></div>
     </header>
     <div class="readouts"><span id="freshness">Use the full launch address printed by the foreground process.</span><span id="watcher">Watcher unknown</span><button id="refresh-observation">Refresh observation</button></div>
@@ -55,10 +57,16 @@
       </div><span id="target-label">Choose a seat</span></header>
       <div id="terminal-panel" role="tabpanel" aria-labelledby="tab-terminal">
         <div class="terminal-tools"><div class="toolbar"><button id="watch">Watch terminal</button><button id="disconnect">Disconnect</button><button id="refit">Refit Watch</button><button id="copy">Copy screen</button></div><span class="expand-group"><span id="esc-hint" class="esc-hint" hidden>Esc restores</span><button id="expand" aria-expanded="false" aria-controls="terminal-screen">Expand terminal</button></span></div>
+        <div class="control-tools" aria-label="Terminal authority">
+          <strong id="control-mode">Watch</strong><span id="control-target">Choose a registered terminal</span>
+          <span id="control-expiry"></span><button id="take-control" disabled>Take control</button>
+          <button id="release-control" aria-keyshortcuts="Control+Shift+X" hidden>Release<span class="release-shortcut">Ctrl+Shift+X</span></button>
+        </div>
+        <p id="control-state" class="control-state" role="status">Watch is read only. Control requires explicit confirmation.</p>
         <p id="terminal-status" class="terminal-status" role="status">Read-only observation. Handle native dialogs in Herdr.</p>
         <div id="terminal-screen" class="terminal-screen" tabindex="-1" aria-label="Read-only ANSI terminal"></div>
         <div id="grip" class="height-grip" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="Terminal height" aria-valuemin="200" aria-valuemax="900" aria-valuenow="360"></div>
-        <p class="terminal-foot">WATCH ONLY · No input, controller, focus or agent-pane resize. Stream closure does not establish agent exit.</p>
+        <p class="terminal-foot">Watch is read only. Explicit owner Control uses the native terminal and real sizing; it may become a shell. Submission does not establish consumption. Stream closure does not establish agent exit.</p>
       </div>
       <div id="log-panel" role="tabpanel" aria-labelledby="tab-log" hidden><div class="toolbar"><button id="refresh-log">Refresh log</button><button id="watch-log">Watcher log</button></div><pre id="log-output"></pre></div>
       <div id="messages-panel" role="tabpanel" aria-labelledby="tab-messages" hidden><div class="toolbar"><button id="owner-history">Owner mailbox</button><button id="seat-history">Selected seat history</button><button id="refresh-messages">Refresh messages</button></div><div id="message-output"></div></div>
@@ -78,5 +86,10 @@
     <footer>LOCAL OWNER SESSION · Data stays on this foreground service · Ctrl-C in its shell closes the dashboard.</footer>
   </main>
 </div>
+<dialog id="control-confirmation" aria-labelledby="control-confirm-title" aria-describedby="control-confirm-target control-disclosures">
+  <h2 id="control-confirm-title">Take control of this terminal?</h2>
+  <p id="control-confirm-target"></p><ul id="control-disclosures"></ul>
+  <div class="toolbar"><button id="cancel-control" autofocus>Cancel</button><button id="confirm-control" disabled>Confirm Take control</button></div>
+</dialog>
 </body>
 </html>

@@ -60,7 +60,7 @@ from herdr_fleet import contacts as contact_mod
 from herdr_fleet import crossfleet, inbox, limits, presence, seen
 from herdr_fleet.context import EXIT_FAIL, EXIT_OK, EXIT_PARTIAL, Ctx, UsageError, preflight
 from herdr_fleet.fleetfile import NAME_RE, FleetError, find_fleet_file
-from herdr_fleet.herdr import HerdrError
+from herdr_fleet.herdr import HerdrError, describe
 from herdr_fleet.inbox import CUR, NEW, Message, size_label
 from herdr_fleet.kickoff import INBOX_HEADING
 from herdr_fleet.notify import notify
@@ -455,7 +455,7 @@ def format_entry(entry: Dict) -> str:
 class Drop:
     """What one delivery attempt to a mailbox did."""
 
-    status: str                  # sent | unconfirmed | pointer | refused | typing | failed | empty
+    status: str                  # sent | unconfirmed | pointer | refused | typing | coordination | failed | empty
     detail: str = ""             # for typing: ``owner typing in <pane>`` (design 21.2)
     state: str = ""              # the state safe_prompt saw
     carried: List[Message] = field(default_factory=list)  # in the prompt, now in cur/
@@ -570,6 +570,24 @@ def settle(ctx: Ctx, messages: Sequence[Message], via: str, delivery: str,
 def prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: str,
                    own: Optional[Message] = None, exclude: Sequence[str] = (),
                    mirror: Optional[str] = None) -> Drop:
+    import copy
+    try:
+        with ctx.herdr.target_operation(target) as native:
+            bound = copy.copy(ctx)
+            bound.herdr = native
+            return _prompt_mailbox(bound, name, target, allow, via, own, exclude, mirror)
+    except HerdrError as exc:
+        if exc.code in ("owner_control", "permit_unavailable"):
+            return Drop("coordination", "owner control" if exc.code == "owner_control" else describe(exc),
+                        waiting=inbox.read_box(ctx.fleet.repo, name, NEW, headers_only=True))
+        if "not_found" in exc.code:
+            return Drop("refused", "target absent", "absent")
+        raise
+
+
+def _prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: str,
+                    own: Optional[Message] = None, exclude: Sequence[str] = (),
+                    mirror: Optional[str] = None) -> Drop:
     """Deliver a mailbox in one prompt (design 18.4). The caller holds ``inbox.locked``.
     ``target`` is what ``agent prompt`` gets (a name or a pane id); ``allow`` the states
     ``safe_prompt`` accepts; ``own`` the message ``send`` just queued; ``exclude`` ids
@@ -586,8 +604,8 @@ def prompt_mailbox(ctx: Ctx, name: str, target: str, allow: Sequence[str], via: 
     text, size, pointer = compose_prompt(queued, own)
     outcome = safe_prompt(ctx.herdr, target, text, allow)
     state = str(outcome.agent.get("agent_status") or "")
-    if outcome.status == "typing":  # design 21.2: the owner is typing there; nothing sent
-        return Drop("typing", outcome.detail, state, [], items, size, outcome.agent)
+    if outcome.status in ("typing", "coordination"):
+        return Drop(outcome.status, outcome.detail, state, [], items, size, outcome.agent)
     if pointer and (outcome.ok or outcome.status == "unconfirmed"):
         head = items[:1] if items[0].is_kickoff else []  # 32.6: the kickoff went; the pointer is for the rest
         if head:
@@ -958,7 +976,7 @@ def op_send(ctx: Ctx, words: Sequence[str], text_file: Optional[str] = None, as_
     taken = inbox.taken_shorts(repo)
     observed: Dict[str, str] = {}
     codes = []
-    note = inbox_note(ctx, sender, bool(as_name))  # design 23.1: mail before reports; it only reads
+    note = inbox_note(ctx, sender, bool(as_name), emit=True)  # 45.4: keep N through hint emission/flush
     if note:
         ctx.say(note)
     ctx.say("sender: %s; selected fleet: %s" % (sender, selection_label(ctx)))
@@ -1074,7 +1092,25 @@ def fleet_flag(ctx: Ctx) -> str:
     return " --fleet %s" % shlex.quote(path)
 
 
-def inbox_note(ctx: Ctx, name: str, explicit: bool) -> Optional[str]:
+def inbox_note(ctx: Ctx, name: str, explicit: bool, emit: bool = False) -> Optional[str]:
+    from herdr_fleet.coordination import consume
+    if not inbox.has_queued(ctx.fleet.repo, name):
+        return None
+    try:
+        with consume(ctx, name):
+            note = _inbox_note(ctx, name, explicit)
+            if note and emit:
+                ctx.say(note)
+                ctx.stdout.flush()
+                return None
+            return note
+    except HerdrError as exc:
+        if exc.code in ("owner_control", "permit_unavailable"):
+            return "note: %s inbox held (%s); messages remain queued" % (name, "owner control" if exc.code == "owner_control" else "coordination unavailable")
+        raise
+
+
+def _inbox_note(ctx: Ctx, name: str, explicit: bool) -> Optional[str]:
     """Design 23.1: when the sender's own mailbox holds messages that are not due,
     ``note: 1 unread from sample-orchestrator (#103001, 20:20); read it before you go on:
     herdr-fleet inbox --read``; for several, the senders in the order of their oldest
@@ -1126,25 +1162,29 @@ def _send_routed(ctx: Ctx, target: Target, message: Message, mode: str, when_rea
         return _route(owner, target, message, mode, when_ready_ms, log_file, {})
     created = False
     try:
-        with crossfleet.reserved((source, destination)):
-            crossfleet.safe_mailbox(source, message.to)
-            crossfleet.safe_mailbox(destination, message.to)
-            with inbox.locked(destination, message.to):
-                # Revalidate after locks, before writing either inbox tree.
-                crossfleet.validated_fleet(source)
-                crossfleet.validated_fleet(destination)
-                taken.update(inbox.taken_shorts(source) | inbox.taken_shorts(destination))
-                message.id = inbox.new_id(inbox.now_utc(), taken)
-                message.route_bytes = inbox.size_of(inbox.direct_text(message))
-                message.origin_send_order = len(read(source))
-                message.destination_send_order = len(read(destination))
-                inbox.write(destination, message)
-                created = True  # authoritative success; no fallback/replacement after here
-                receipt = copy.copy(message)
-                receipt.history_only = True
-                inbox.write(source, receipt, CUR)
-                append(destination, crossfleet.queued_entry(message, destination))
-                append(source, crossfleet.queued_entry(message, source))
+        with crossfleet.routed_reservation((source, destination), destination, message.to, ctx.clock,
+                                          allow_backoff=ctx.herdr.permit is None):
+            # Revalidate after locks, before writing either inbox tree.
+            crossfleet.validated_fleet(source)
+            current_destination = crossfleet.validated_fleet(destination)
+            from herdr_fleet.fleetfile import load_fleet
+            current_source = load_fleet(ctx.fleet.path)
+            if (current_source.contact(target.requested) != ctx.fleet.contact(target.requested)
+                    or current_destination.seat(message.to) is None):
+                raise OSError("routed configuration changed before enqueue")
+            owner._fleet = current_destination
+            taken.update(inbox.taken_shorts(source) | inbox.taken_shorts(destination))
+            message.id = inbox.new_id(inbox.now_utc(), taken)
+            message.route_bytes = inbox.size_of(inbox.direct_text(message))
+            message.origin_send_order = len(read(source))
+            message.destination_send_order = len(read(destination))
+            inbox.write(destination, message)
+            created = True  # authoritative success; no fallback/replacement after here
+            receipt = copy.copy(message)
+            receipt.history_only = True
+            inbox.write(source, receipt, CUR)
+            append(destination, crossfleet.queued_entry(message, destination))
+            append(source, crossfleet.queued_entry(message, source))
     except (OSError, ValueError, UsageError) as exc:
         if not created and message.id:
             for box in (NEW, CUR):
@@ -1265,6 +1305,10 @@ def _route(ctx: Ctx, target: Target, message: Message, mode: str, when_ready_ms:
         line, code = _queued_line(ctx, target, message, shown, log_file)
         return [line + "; prompted a pointer instead: %s"
                 % inbox.pointer_text(drop.waiting, drop.size, prefix=False)], code
+    if drop.status == "coordination":
+        # Enqueue was accepted. Even --now retains its original pending message;
+        # later automatic delivery still requires idle/done, never typed-ahead replay.
+        return _queued(ctx, target, message, held_label(drop, state), log_file, mode=mode)
     if drop.status in ("refused", "typing"):  # turned busy since the check, or the owner is typing
         label = drop.state if drop.status == "refused" else held_label(drop, state)
         if mode == "now":
@@ -1334,7 +1378,7 @@ def refusal_line(name: str, drop: Drop, state: str) -> Tuple[str, int]:
             name, place(shown), inbox.pointer_text(drop.waiting, drop.size, prefix=False)), EXIT_OK
     if drop.status == "refused":
         return "%s: %s, %d left queued" % (name, state_words(drop.state), len(drop.waiting)), EXIT_OK
-    if drop.status == "typing":  # design 21.2: nothing moves while the owner types there
+    if drop.status in ("typing", "coordination"):
         return "%s: %s, %d left queued" % (name, drop.detail, len(drop.waiting)), EXIT_OK
     if drop.status == "empty":
         return "nothing queued for %s" % name, EXIT_OK

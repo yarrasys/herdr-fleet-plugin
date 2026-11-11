@@ -169,7 +169,10 @@ class Guard(LiveFleet):
         before = len(self.calls())
         outcome = safe_prompt(self.client(), "sample-dev", "hello")
         self.assertEqual(outcome.status, "blocked")
-        self.assertEqual([c["argv"][:2] for c in self.calls()[before:]], [["agent", "get"]])
+        # Endpoint/mapping reads bracket the new producer permit. The state
+        # check still refuses blocked before any prompt-screen read or effect.
+        self.assertEqual([c["argv"][:2] for c in self.calls()[before:]],
+                         [["agent", "list"], ["status", "server"], ["agent", "list"], ["agent", "get"]])
 
     def test_a_herdr_error_in_the_guard_sends_nothing(self):
         fake_herdr.focus(self.world, "w2:p2")
