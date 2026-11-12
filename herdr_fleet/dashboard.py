@@ -18,7 +18,7 @@ from herdr_fleet.dashboard_data import Registry, Observer, DataError
 from herdr_fleet.dashboard_actions import OwnerActions, Conflict
 from herdr_fleet.dashboard_terminal import Watches
 from herdr_fleet.dashboard_demo import Demo
-from herdr_fleet.dashboard_control import Controls
+from herdr_fleet.dashboard_control import Controls, WatcherUpgradeRequired, WATCHER_RESTART
 
 ASSET_ROOT = os.path.join(os.path.dirname(__file__), "dashboard_static")
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
@@ -336,6 +336,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(403, {"error": str(exc)[:240]})
         except Conflict as exc:
             self.respond(409, {"error": str(exc)[:240]})
+        except WatcherUpgradeRequired:
+            self.respond(400, {"error": WATCHER_RESTART})
         except (DataError, ValueError, OSError):
             self.respond(400, {"error": "Action invalid or target changed; refresh before a deliberate new attempt"})
 

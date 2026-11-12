@@ -20,7 +20,7 @@ from herdr_fleet import build_identity, permits
 from herdr_fleet.dashboard_data import DataError, binding
 from herdr_fleet.dashboard_terminal import Frames
 from herdr_fleet.herdr import HerdrError
-from herdr_fleet.process_identity import identity
+from herdr_fleet.process_identity import SCHEME, identity
 from herdr_fleet.seats import find_agent_process
 
 DISCLOSURES = [
@@ -38,6 +38,16 @@ HEARTBEAT_S, ABSOLUTE_S, PROBE_S = 15, 600, 2
 
 class ControlError(DataError):
     """Fixed, body-free failure safe for the owner response."""
+
+
+WATCHER_RESTART = "Control unavailable: restart this fleet's watcher with the current plugin before using Control."
+
+
+class WatcherUpgradeRequired(ControlError):
+    """The one fixed compatibility instruction allowed through prepare errors."""
+
+    def __init__(self):
+        super().__init__(WATCHER_RESTART)
 
 
 def watcher_eligible(fleet):
@@ -71,6 +81,9 @@ def watcher_eligible(fleet):
         return
     except OSError:
         raise ControlError("Watcher liveness is unknown; Control unavailable")
+    scheme = value.get("process_identity_scheme")
+    if type(scheme) is not str or scheme != SCHEME:
+        raise WatcherUpgradeRequired()
     launch = build_identity.validated(value.get("launch"))
     recorded = value.get("process_identity")
     if (type(value.get("control_gate_protocol")) is not int or value["control_gate_protocol"] != 1
@@ -84,11 +97,14 @@ def watcher_eligible(fleet):
 class Probe:
     def __init__(self, manager, selection):
         self.done, self.result = threading.Event(), None
+        self.upgrade_required = False
         if not manager.probe_slots.acquire(False):
             raise ControlError("Control identity-check capacity reached")
         def run():
             try:
                 self.result = manager.snapshot(selection)
+            except WatcherUpgradeRequired:
+                self.upgrade_required = True
             except Exception:
                 self.result = None
             finally:
@@ -105,7 +121,11 @@ class Probe:
         while not self.done.wait(0.02):
             if stop.is_set() or time.monotonic() >= end:
                 raise ControlError("Control identity unavailable; no input enabled")
-        if stop.is_set() or self.result is None:
+        if stop.is_set():
+            raise ControlError("Control target/runtime/watcher unavailable or changed")
+        if self.upgrade_required:
+            raise WatcherUpgradeRequired()
+        if self.result is None:
             raise ControlError("Control target/runtime/watcher unavailable or changed")
         return self.result
 
@@ -203,7 +223,12 @@ class Controls:
         self.schema("prepare", body)
         if not self.authorized(session):
             raise ControlError("Owner authority expired")
-        snapshot = Probe(self, body).wait(threading.Event())
+        try:
+            snapshot = Probe(self, body).wait(threading.Event())
+        except WatcherUpgradeRequired:
+            if not self.authorized(session):
+                raise ControlError("Owner authority expired") from None
+            raise
         with self.lock:
             self._prune()
             if self.closed or len(self.pending) >= 64:

@@ -19,6 +19,7 @@ from unittest import mock
 
 from herdr_fleet import permits
 from herdr_fleet.herdr import Herdr, HerdrError
+from herdr_fleet.process_identity import SCHEME
 import test_control45 as control_tests
 import test_section41 as dashboard_tests
 
@@ -354,7 +355,8 @@ class WatcherEvidence(unittest.TestCase):
                 fingerprint = identity(child.pid)
                 self.assertIsNotNone(fingerprint)
                 valid = dict(pid=child.pid, control_gate_protocol=1,
-                    launch=dict(version="0.23.0", commit="a"*40), process_identity=fingerprint, fleet=fleet.path)
+                    launch=dict(version="0.23.1", commit="a"*40), process_identity=fingerprint,
+                    process_identity_scheme=SCHEME, fleet=fleet.path)
                 path.write_text(json.dumps(valid)); watcher_eligible(fleet)
                 path.write_text(json.dumps(dict(valid, process_identity="c"*64)))
                 with self.assertRaises(ControlError): watcher_eligible(fleet)
@@ -371,8 +373,8 @@ class WatcherEvidence(unittest.TestCase):
             fleet = SimpleNamespace(watch=True, repo=folder, path=folder + "/.herdr/fleet.toml")
             path = folder + "/.herdr/watch.lock"
             watcher_eligible(fleet)
-            valid = dict(pid=12345, control_gate_protocol=1, launch=dict(version="0.23.0", commit="a"*40),
-                         process_identity="b"*64, fleet=fleet.path)
+            valid = dict(pid=12345, control_gate_protocol=1, launch=dict(version="0.23.1", commit="a"*40),
+                         process_identity="b"*64, process_identity_scheme=SCHEME, fleet=fleet.path)
             Path(path).write_text(json.dumps(valid))
             with mock.patch("herdr_fleet.dashboard_control.os.kill", side_effect=ProcessLookupError): watcher_eligible(fleet)
             with mock.patch("herdr_fleet.dashboard_control.os.kill", return_value=None), \

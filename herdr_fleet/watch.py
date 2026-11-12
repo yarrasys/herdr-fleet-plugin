@@ -167,10 +167,10 @@ def watcher_line(status: Dict) -> str:
 def acquire(repo: str, fleet_path: str, pid: Optional[int] = None) -> Dict:
     """Write ``.herdr/watch.lock``, or raise OpError when a live watcher holds it. The file
     is created with a hard link, so of two watchers starting at once only one gets it."""
-    from herdr_fleet.process_identity import identity
+    from herdr_fleet.process_identity import SCHEME, identity
     data = {"pid": pid or os.getpid(), "started": now_iso(), "fleet": fleet_path,
             "launch": dict(build_identity.current()), "control_gate_protocol": 1,
-            "process_identity": identity(pid or os.getpid())}
+            "process_identity_scheme": SCHEME, "process_identity": identity(pid or os.getpid())}
     folder = os.path.join(repo, ".herdr")
     os.makedirs(folder, exist_ok=True)
     ensure_gitignore(folder)
